@@ -34,7 +34,8 @@ class Booking(SQLModel, table=True):
     formula: str = Field(default="single")               # public.booking_formula
     mode: str = Field(default="online")                  # public.teaching_mode
     session_type: str = Field(default="individual")      # public.session_type
-    booking_date: dt.date = Field(alias="date")          # 'date' in DB
+    # Python attr 'booking_date' maps to DB column 'date' (avoids shadowing the dt.date type)
+    booking_date: dt.date = Field(sa_column=sa.Column("date", sa.Date, nullable=False))
     slot_time: Optional[dt.time] = Field(default=None)
     duration_min: int = Field(default=90)
     amount: int = Field(default=0)                       # DZD
