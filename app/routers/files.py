@@ -30,7 +30,7 @@ async def upload_file_endpoint(
     folder: str = Form(default="uploads"),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Upload a file to Cloudflare R2 storage."""
+    """Upload a file to Supabase Storage."""
     if file.content_type not in ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
@@ -64,7 +64,7 @@ async def delete_file_endpoint(
     key: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Delete a file from R2 storage by key."""
+    """Delete a file from Supabase Storage by path."""
     # Security: ensure the file belongs to this user or user is admin
     user_id = current_user["id"]
     role = current_user.get("role", "student")

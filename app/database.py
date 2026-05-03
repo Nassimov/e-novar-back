@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Generator
+from typing import Generator, Optional
 
 from sqlmodel import Session, SQLModel, create_engine
 from supabase import Client, create_client
@@ -9,28 +9,35 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# SQLModel engine
-engine = create_engine(
-    settings.database_url,
-    echo=settings.app_env == "development",
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
-)
+# Engine is created lazily so missing DATABASE_URL doesn't crash on import
+_engine = None
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            settings.database_url,
+            echo=settings.app_env == "development",
+            pool_pre_ping=True,
+            pool_size=10,
+            max_overflow=20,
+        )
+    return _engine
 
 
 def create_db_and_tables() -> None:
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.create_all(get_engine())
 
 
 def get_session() -> Generator[Session, None, None]:
-    with Session(engine) as session:
+    with Session(get_engine()) as session:
         yield session
 
 
-# Supabase clients
-_supabase_anon: Client | None = None
-_supabase_service: Client | None = None
+# Supabase clients (lazy)
+_supabase_anon: Optional[Client] = None
+_supabase_service: Optional[Client] = None
 
 
 def get_supabase_anon() -> Client:

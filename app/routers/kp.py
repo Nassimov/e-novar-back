@@ -182,7 +182,7 @@ async def unlock_badge(
 
 @router.get("/leaderboard", response_model=List[LeaderboardEntry])
 async def get_leaderboard(
-    period: str = Query("week", regex="^(week|month|all)$"),
+    period: str = Query("week", pattern="^(week|month|all)$"),
     size: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
 ):

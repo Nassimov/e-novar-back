@@ -20,41 +20,38 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     database_url: str = ""
 
-    # Redis
+    # Supabase Storage
+    supabase_storage_bucket: str = "karini-files"
+
+    # Redis (Railway Redis add-on or external)
     redis_url: str = "redis://localhost:6379/0"
 
-    # Anthropic
+    # Anthropic (Claude)
     anthropic_api_key: str = ""
 
     # Stripe
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
 
-    # Cloudflare R2
-    r2_account_id: str = ""
-    r2_access_key_id: str = ""
-    r2_secret_access_key: str = ""
-    r2_bucket_name: str = "karini-files"
-    r2_public_url: str = ""
-
-    # OneSignal
+    # OneSignal (push notifications)
     onesignal_app_id: str = ""
     onesignal_rest_api_key: str = ""
+
+    # Resend (transactional email)
+    resend_api_key: str = ""
+    email_from: str = "noreply@karini.dz"
+
+    # Twilio (SMS)
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""
 
     # App
     secret_key: str = "super-secret-key-change-in-production"
     app_env: str = "development"
     app_url: str = "http://localhost:8000"
     frontend_url: str = "http://localhost:3000"
-    allowed_origins: str = "http://localhost:3000,https://yourdomain.com"
-
-    # Email
-    email_from: str = "noreply@karini.dz"
-    resend_api_key: str = ""
-
-    # SMS
-    sms_provider_api_key: str = ""
-    sms_provider_from: str = "+213"
+    allowed_origins: str = "http://localhost:3000,https://yourdomain.vercel.app"
 
     @property
     def allowed_origins_list(self) -> List[str]:
