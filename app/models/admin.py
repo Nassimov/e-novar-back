@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Optional
+from uuid import UUID, uuid4
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlmodel import Field, SQLModel
+
+
+class CmsPage(SQLModel, table=True):
+    """
+    Mirrors public.cms_pages.
+    Admin-editable static pages (terms, privacy, help, cookies).
+    slug is the unique identifier (e.g. 'terms-of-service').
+    """
+
+    __tablename__ = "cms_pages"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    slug: str = Field(sa_column=sa.Column(sa.String, unique=True, nullable=False))
+    title: str = Field()
+    body_md: Optional[str] = Field(default=None)
+    version: int = Field(default=1)
+    published_at: Optional[datetime] = Field(default=None)
+
+
+class LegalAcceptance(SQLModel, table=True):
+    """
+    Mirrors public.legal_acceptances.
+    UNIQUE on (user_id, page_slug, version) — tracks which legal version a user accepted.
+    """
+
+    __tablename__ = "legal_acceptances"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="profiles.id", index=True)
+    page_slug: str = Field()
+    version: int = Field()
+    accepted_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        sa.UniqueConstraint("user_id", "page_slug", "version", name="uq_legal_acceptance"),
+    )
+
+
+class PromoCode(SQLModel, table=True):
+    """
+    Mirrors public.promo_codes.
+    discount_type: 'percent' | 'fixed'
+    valid_from / valid_to: optional time window.
+    max_uses: None = unlimited.
+    """
+
+    __tablename__ = "promo_codes"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    code: str = Field(sa_column=sa.Column(sa.String, unique=True, nullable=False))
+    discount_type: str = Field()                         # 'percent' | 'fixed'
+    discount_value: int = Field()
+    valid_from: Optional[datetime] = Field(default=None)
+    valid_to: Optional[datetime] = Field(default=None)
+    max_uses: Optional[int] = Field(default=None)
+    uses: int = Field(default=0)
+    active: bool = Field(default=True)
+
+
+class PromoRedemption(SQLModel, table=True):
+    """
+    Mirrors public.promo_redemptions.
+    UNIQUE on (code_id, user_id) — a user can redeem a code only once.
+    """
+
+    __tablename__ = "promo_redemptions"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    code_id: UUID = Field(foreign_key="promo_codes.id", index=True)
+    user_id: UUID = Field(foreign_key="profiles.id", index=True)
+    booking_id: Optional[UUID] = Field(default=None, foreign_key="bookings.id")
+    redeemed_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        sa.UniqueConstraint("code_id", "user_id", name="uq_promo_redemption"),
+    )
+
+
+class AuditLog(SQLModel, table=True):
+    """
+    Mirrors public.audit_logs.
+    Immutable record of admin/system actions.
+    meta: jsonb — action-specific payload.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    actor_id: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    action: str = Field()
+    target_type: Optional[str] = Field(default=None)
+    target_id: Optional[UUID] = Field(default=None)
+    meta: Optional[Any] = Field(
+        default=None,
+        sa_column=sa.Column(JSONB, nullable=True, server_default="'{}'::jsonb"),
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Report(SQLModel, table=True):
+    """
+    Mirrors public.reports.
+    Moderation reports submitted by users against any entity.
+    target_type: 'review' | 'user' | 'teacher' | 'message' | 'challenge'
+    """
+
+    __tablename__ = "reports"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    reporter_id: UUID = Field(foreign_key="profiles.id", index=True)
+    target_type: str = Field()
+    target_id: UUID = Field()
+    reason: Optional[str] = Field(default=None)
+    status: str = Field(default="open")                  # public.report_status
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Invitation(SQLModel, table=True):
+    """
+    Mirrors public.invitations.
+    Direct email invitations (distinct from referral codes).
+    """
+
+    __tablename__ = "invitations"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    inviter_id: UUID = Field(foreign_key="profiles.id", index=True)
+    email: str = Field()
+    message: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
