@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = [
+  "libjpeg",
+  "zlib",
+  "freetype",
+  "libpng",
+  "gcc",
+]
