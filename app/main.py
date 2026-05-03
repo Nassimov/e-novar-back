@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from app.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -14,10 +15,174 @@ from app.core.exceptions import register_exception_handlers
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# ── OpenAPI tag groups ────────────────────────────────────────────────────────
+TAGS_METADATA = [
+    {
+        "name": "Auth",
+        "description": (
+            "Register, login, logout, OAuth, OTP, and token refresh. "
+            "All protected endpoints require a **Bearer** JWT issued by Supabase Auth. "
+            "Click **Authorize** at the top of this page and paste your access token."
+        ),
+    },
+    {
+        "name": "Profile",
+        "description": "Read and update the authenticated user's profile (name, avatar, wilaya, preferences).",
+    },
+    {
+        "name": "Onboarding",
+        "description": (
+            "Multi-step onboarding wizard for students, teachers, and parents. "
+            "Submit each step individually; the final step marks onboarding as complete."
+        ),
+    },
+    {
+        "name": "Teachers",
+        "description": (
+            "Public teacher catalogue with filtering (subject, wilaya, price, rating, mode). "
+            "Also covers teacher-specific actions: slot management, wallet, withdrawals, statistics."
+        ),
+    },
+    {
+        "name": "Bookings",
+        "description": (
+            "Full booking lifecycle: create → confirm → complete → cancel. "
+            "Formulas: `single`, `pack5`, `monthly`. Modes: `online`, `presentiel`, `hybrid`."
+        ),
+    },
+    {
+        "name": "Payments",
+        "description": (
+            "Payment processing (CIB, Edahabia, BaridiMob, Visa, transfer, cash). "
+            "Invoice download, payment history, and promo-code application."
+        ),
+    },
+    {
+        "name": "Sessions",
+        "description": (
+            "Session management and live-classroom lifecycle. "
+            "Statuses: `scheduled` → `waiting` → `live` → `completed` | `no_show` | `cancelled`."
+        ),
+    },
+    {
+        "name": "Homework",
+        "description": (
+            "Teacher assigns homework; student submits; teacher grades. "
+            "Includes hint system and automatic KP award via Supabase trigger."
+        ),
+    },
+    {
+        "name": "Evaluations",
+        "description": "Post-session formal evaluations sent by teachers to students (score 0–20, skill breakdown).",
+    },
+    {
+        "name": "Messages",
+        "description": (
+            "Persistent chat between users (student ↔ teacher, parent ↔ teacher). "
+            "Real-time delivery via WebSocket `wss://<host>/ws/messages?token=<jwt>`."
+        ),
+    },
+    {
+        "name": "Notifications",
+        "description": (
+            "In-app notification centre. "
+            "Real-time push via WebSocket `wss://<host>/ws/notifications?token=<jwt>`. "
+            "User preferences control push/email/SMS channels."
+        ),
+    },
+    {
+        "name": "E-NOVAR Points",
+        "description": (
+            "Gamification engine: KP balance, transaction history, level progression (7 levels). "
+            "Points are awarded automatically via Supabase triggers on booking completion, "
+            "homework grades, challenge approvals, and referral validation."
+        ),
+    },
+    {
+        "name": "Badges",
+        "description": "Badge catalogue and per-user progress tracking. Badges unlock automatically when conditions are met.",
+    },
+    {
+        "name": "Challenges",
+        "description": (
+            "Time-limited challenges for students and teachers. "
+            "Submit proof (image/PDF), admin reviews, KP awarded on approval."
+        ),
+    },
+    {
+        "name": "Store",
+        "description": (
+            "EP Marketplace — spend KP on powerups, digital rewards, physical prizes, services, and travel. "
+            "Categories: `powerups`, `digital`, `physical`, `services`, `travel`."
+        ),
+    },
+    {
+        "name": "Referrals",
+        "description": "Referral programme — share a unique code, earn KP when the invited user completes their first booking.",
+    },
+    {
+        "name": "Favorites",
+        "description": "Students can save/remove favourite teachers.",
+    },
+    {
+        "name": "Parent",
+        "description": (
+            "Parent-monitoring features: link to a child account via invite code, "
+            "view child sessions, homework, KP progress, and payment history."
+        ),
+    },
+    {
+        "name": "AI Tutor",
+        "description": (
+            "AI-powered tutoring assistant (Claude). Maintains conversation history per subject. "
+            "Also exposes AI progress tracking and practice attempt recording."
+        ),
+    },
+    {
+        "name": "Catalogs",
+        "description": "Public read-only catalogues: subjects, education levels, Algerian wilayas.",
+    },
+    {
+        "name": "Files",
+        "description": "Supabase Storage upload/download proxy for avatars, diplomas, homework attachments, and invoices.",
+    },
+    {
+        "name": "Admin — Users",
+        "description": "Admin: list, suspend, delete user accounts. View activity and analytics.",
+    },
+    {
+        "name": "Admin — Teachers",
+        "description": "Admin: validate teacher applications, approve/suspend, review uploaded diplomas.",
+    },
+    {
+        "name": "Admin — Reviews",
+        "description": "Admin: moderation queue for flagged reviews. Approve, hide, or remove.",
+    },
+    {
+        "name": "Admin — Challenges",
+        "description": "Admin: review challenge proof submissions, approve/decline, trigger KP award.",
+    },
+    {
+        "name": "Admin — Promos",
+        "description": "Admin: create and manage promotional discount codes.",
+    },
+    {
+        "name": "Admin — Content",
+        "description": "Admin: manage the learning catalogue (subjects, levels, goals) and CMS pages (terms, privacy, help).",
+    },
+    {
+        "name": "Admin — Stats",
+        "description": "Admin: platform KPIs — total users, revenue, sessions completed, average rating, activity feed.",
+    },
+    {
+        "name": "Health",
+        "description": "Service health check — used by Railway's health probe.",
+    },
+]
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown events."""
     logger.info("Starting Enovar API v1.0.0 ...")
     yield
     logger.info("Shutting down Enovar API ...")
@@ -26,15 +191,65 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Enovar API",
+    title="E-NOVAR API",
     version="1.0.0",
-    description="Backend API for Enovar - Algeria's premier tutoring platform",
+    description="""
+## Algeria's premier tutoring platform
+
+Connect students with qualified teachers for online and in-person tutoring sessions.
+
+### Authentication
+Every protected endpoint requires a **Supabase JWT** in the `Authorization` header:
+```
+Authorization: Bearer <access_token>
+```
+1. Call `POST /api/auth/login` to get your token.
+2. Click the **Authorize** button at the top of this page.
+3. Enter `Bearer <your_token>` and click **Authorize**.
+
+### User roles
+| Role | Access |
+|------|--------|
+| `student` | Search teachers, book sessions, homework, gamification |
+| `teacher` | Manage availability, sessions, homework, wallet |
+| `parent` | Monitor child's sessions, progress, payments |
+| `admin` | Full platform management |
+
+### Real-time WebSockets
+| Endpoint | Purpose |
+|----------|---------|
+| `wss://<host>/ws/messages?token=<jwt>` | Live chat |
+| `wss://<host>/ws/notifications?token=<jwt>` | Push notifications |
+
+### Database
+PostgreSQL hosted on **Supabase**. Schema is defined in `database-schema.sql`.
+Business logic (KP triggers, rating recompute, homework KP) runs as PostgreSQL functions inside Supabase.
+""",
+    openapi_tags=TAGS_METADATA,
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_url="/openapi.json",
+    swagger_ui_parameters={
+        "persistAuthorization": True,         # token survives page refresh
+        "displayRequestDuration": True,       # shows ms per request
+        "filter": True,                       # search bar above the endpoint list
+        "syntaxHighlight.theme": "monokai",
+        "tryItOutEnabled": True,              # "Try it out" open by default
+        "docExpansion": "list",               # show all tags collapsed but listed
+        "defaultModelsExpandDepth": 2,
+        "deepLinking": True,                  # shareable anchor links per endpoint
+    },
+    contact={
+        "name": "E-NOVAR Support",
+        "email": "nacimmessi1010@gmail.com",
+    },
+    license_info={
+        "name": "Proprietary",
+    },
     lifespan=lifespan,
 )
 
-# CORS middleware
+# ── Middleware ─────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
@@ -43,10 +258,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register custom exception handlers
 register_exception_handlers(app)
 
-# Import and register all routers
+# ── Routers ───────────────────────────────────────────────────────────────────
 from app.routers.auth import router as auth_router
 from app.routers.profile import router as profile_router
 from app.routers.onboarding import router as onboarding_router
@@ -65,8 +279,6 @@ from app.routers.referrals import router as referrals_router
 from app.routers.catalogs import router as catalogs_router
 from app.routers.parent import router as parent_router
 from app.routers.files import router as files_router
-
-# Admin routers
 from app.routers.admin.users import router as admin_users_router
 from app.routers.admin.teachers import router as admin_teachers_router
 from app.routers.admin.reviews import router as admin_reviews_router
@@ -75,47 +287,87 @@ from app.routers.admin.promos import router as admin_promos_router
 from app.routers.admin.content import router as admin_content_router
 from app.routers.admin.stats import router as admin_stats_router
 
-app.include_router(auth_router, prefix="/api/auth")
-app.include_router(profile_router, prefix="/api/profile")
-app.include_router(onboarding_router, prefix="/api/onboarding")
-app.include_router(teachers_router, prefix="/api/teachers")
-app.include_router(bookings_router, prefix="/api/bookings")
-app.include_router(payments_router, prefix="/api/payments")
-app.include_router(sessions_router, prefix="/api/sessions")
-app.include_router(messages_router, prefix="/api/messages")
-app.include_router(notifications_router, prefix="/api/notifications")
-app.include_router(kp_router, prefix="/api/kp")
-app.include_router(challenges_router, prefix="/api/challenges")
-app.include_router(homework_router, prefix="/api/homework")
-app.include_router(ai_router, prefix="/api/ai")
-app.include_router(favorites_router, prefix="/api/favorites")
-app.include_router(referrals_router, prefix="/api/referrals")
-app.include_router(catalogs_router, prefix="/api/catalogs")
-app.include_router(parent_router, prefix="/api/parent")
-app.include_router(files_router, prefix="/api/files")
+app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
+app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
+app.include_router(onboarding_router,    prefix="/api/onboarding",     tags=["Onboarding"])
+app.include_router(teachers_router,      prefix="/api/teachers",       tags=["Teachers"])
+app.include_router(bookings_router,      prefix="/api/bookings",       tags=["Bookings"])
+app.include_router(payments_router,      prefix="/api/payments",       tags=["Payments"])
+app.include_router(sessions_router,      prefix="/api/sessions",       tags=["Sessions"])
+app.include_router(homework_router,      prefix="/api/homework",       tags=["Homework"])
+app.include_router(messages_router,      prefix="/api/messages",       tags=["Messages"])
+app.include_router(notifications_router, prefix="/api/notifications",  tags=["Notifications"])
+app.include_router(kp_router,            prefix="/api/kp",             tags=["E-NOVAR Points"])
+app.include_router(challenges_router,    prefix="/api/challenges",     tags=["Challenges"])
+app.include_router(ai_router,            prefix="/api/ai",             tags=["AI Tutor"])
+app.include_router(favorites_router,     prefix="/api/favorites",      tags=["Favorites"])
+app.include_router(referrals_router,     prefix="/api/referrals",      tags=["Referrals"])
+app.include_router(catalogs_router,      prefix="/api/catalogs",       tags=["Catalogs"])
+app.include_router(parent_router,        prefix="/api/parent",         tags=["Parent"])
+app.include_router(files_router,         prefix="/api/files",          tags=["Files"])
 
-app.include_router(admin_users_router, prefix="/api/admin/users")
-app.include_router(admin_teachers_router, prefix="/api/admin/teachers")
-app.include_router(admin_reviews_router, prefix="/api/admin/reviews")
-app.include_router(admin_challenges_router, prefix="/api/admin/challenges")
-app.include_router(admin_promos_router, prefix="/api/admin/promos")
-app.include_router(admin_content_router, prefix="/api/admin/content")
-app.include_router(admin_stats_router, prefix="/api/admin/stats")
+app.include_router(admin_users_router,      prefix="/api/admin/users",      tags=["Admin — Users"])
+app.include_router(admin_teachers_router,   prefix="/api/admin/teachers",   tags=["Admin — Teachers"])
+app.include_router(admin_reviews_router,    prefix="/api/admin/reviews",    tags=["Admin — Reviews"])
+app.include_router(admin_challenges_router, prefix="/api/admin/challenges", tags=["Admin — Challenges"])
+app.include_router(admin_promos_router,     prefix="/api/admin/promos",     tags=["Admin — Promos"])
+app.include_router(admin_content_router,    prefix="/api/admin/content",    tags=["Admin — Content"])
+app.include_router(admin_stats_router,      prefix="/api/admin/stats",      tags=["Admin — Stats"])
 
 
-# Health check
-@app.get("/health", tags=["health"])
+# ── Custom OpenAPI schema (adds Bearer security globally) ─────────────────────
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        contact=app.contact,
+        license_info=app.license_info,
+        tags=TAGS_METADATA,
+        routes=app.routes,
+    )
+
+    # Inject Bearer JWT security scheme so the Authorize button appears globally
+    schema.setdefault("components", {}).setdefault("securitySchemes", {})
+    schema["components"]["securitySchemes"]["BearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": (
+            "Supabase JWT. Get it from `POST /api/auth/login` → `access_token`. "
+            "Format: `Bearer <token>`"
+        ),
+    }
+
+    # Apply the security scheme to every operation globally
+    for path_data in schema.get("paths", {}).values():
+        for operation in path_data.values():
+            if isinstance(operation, dict):
+                operation.setdefault("security", [{"BearerAuth": []}])
+
+    app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi  # type: ignore[method-assign]
+
+
+# ── Health check ──────────────────────────────────────────────────────────────
+@app.get("/health", tags=["Health"], summary="Service health check")
 async def health_check():
-    """Check if the API is running."""
+    """Returns `200 OK` with build info. Used by Railway's health probe."""
     return {
         "status": "ok",
         "version": "1.0.0",
-        "app": "Enovar API",
+        "app": "E-NOVAR API",
         "environment": settings.app_env,
     }
 
 
-# WebSocket connection manager
+# ── WebSocket connection manager ──────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, list[WebSocket]] = {}
@@ -154,7 +406,7 @@ notification_manager = ConnectionManager()
 
 @app.websocket("/ws/messages")
 async def websocket_messages(websocket: WebSocket, token: str = ""):
-    """WebSocket endpoint for real-time messaging."""
+    """Real-time messaging channel. Connect with `?token=<jwt>`."""
     from app.core.security import decode_supabase_jwt
 
     claims = decode_supabase_jwt(token) if token else None
@@ -168,7 +420,7 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
         return
 
     await message_manager.connect(user_id, websocket)
-    logger.info("WebSocket /messages connected: user=%s", user_id)
+    logger.info("WS /messages connected: user=%s", user_id)
 
     try:
         while True:
@@ -176,25 +428,23 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
             try:
                 msg = json.loads(data)
                 msg_type = msg.get("type")
-
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
                 elif msg_type == "typing":
-                    conversation_id = msg.get("conversation_id")
-                    # Broadcast typing indicator to other participants
-                    await websocket.send_json({"type": "typing_ack", "conversation_id": conversation_id})
-
+                    await websocket.send_json({
+                        "type": "typing_ack",
+                        "conversation_id": msg.get("conversation_id"),
+                    })
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "message": "Invalid JSON"})
-
     except WebSocketDisconnect:
         message_manager.disconnect(user_id, websocket)
-        logger.info("WebSocket /messages disconnected: user=%s", user_id)
+        logger.info("WS /messages disconnected: user=%s", user_id)
 
 
 @app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket, token: str = ""):
-    """WebSocket endpoint for real-time notifications."""
+    """Real-time notification channel. Connect with `?token=<jwt>`."""
     from app.core.security import decode_supabase_jwt
 
     claims = decode_supabase_jwt(token) if token else None
@@ -208,15 +458,13 @@ async def websocket_notifications(websocket: WebSocket, token: str = ""):
         return
 
     await notification_manager.connect(user_id, websocket)
-    logger.info("WebSocket /notifications connected: user=%s", user_id)
+    logger.info("WS /notifications connected: user=%s", user_id)
 
-    # Send unread notification count on connect
     try:
         from uuid import UUID as _UUID
-
+        from sqlmodel import select
         from app.database import get_session
         from app.models.notification import Notification
-        from sqlmodel import select
 
         profile_uuid = _UUID(user_id)
         with next(get_session()) as db:
@@ -241,7 +489,6 @@ async def websocket_notifications(websocket: WebSocket, token: str = ""):
                     await websocket.send_json({"type": "pong"})
             except json.JSONDecodeError:
                 pass
-
     except WebSocketDisconnect:
         notification_manager.disconnect(user_id, websocket)
-        logger.info("WebSocket /notifications disconnected: user=%s", user_id)
+        logger.info("WS /notifications disconnected: user=%s", user_id)
