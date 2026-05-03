@@ -212,25 +212,23 @@ async def websocket_notifications(websocket: WebSocket, token: str = ""):
 
     # Send unread notification count on connect
     try:
+        from uuid import UUID as _UUID
+
         from app.database import get_session
         from app.models.notification import Notification
-        from app.models.user import User
         from sqlmodel import select
 
+        profile_uuid = _UUID(user_id)
         with next(get_session()) as db:
-            stmt = select(User).where(User.supabase_id == user_id)
-            user = db.exec(stmt).first()
-            if user:
-                unread = db.exec(
+            unread_count = len(
+                db.exec(
                     select(Notification).where(
-                        Notification.user_id == user.id,
-                        Notification.is_read == False,
+                        Notification.user_id == profile_uuid,
+                        Notification.read_at.is_(None),
                     )
                 ).all()
-                await websocket.send_json({
-                    "type": "unread_count",
-                    "count": len(unread),
-                })
+            )
+            await websocket.send_json({"type": "unread_count", "count": unread_count})
     except Exception as exc:
         logger.warning("Could not fetch unread count: %s", exc)
 

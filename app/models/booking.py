@@ -1,53 +1,90 @@
 from __future__ import annotations
 
+import datetime as dt
 from datetime import datetime
-from enum import Enum
 from typing import Optional
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
 from sqlmodel import Field, SQLModel
 
-
-class BookingFormula(str, Enum):
-    single = "single"
-    pack5 = "pack5"
-    monthly = "monthly"
-
-
-class BookingStatus(str, Enum):
-    pending = "pending"
-    confirmed = "confirmed"
-    cancelled = "cancelled"
-    completed = "completed"
-
-
-class PaymentStatus(str, Enum):
-    pending = "pending"
-    completed = "completed"
-    failed = "failed"
-    refunded = "refunded"
+# Re-exports for backward compat
+from app.models.enums import (  # noqa: F401
+    BookingFormula,
+    BookingStatus,
+    SessionStatus,
+    SessionType,
+    TeachingMode,
+)
 
 
 class Booking(SQLModel, table=True):
+    """
+    Mirrors public.bookings.
+    payment_id is a circular FK to payments.id; the DB constraint lives in Supabase SQL only.
+    We store it as a plain UUID here to avoid SQLAlchemy circular-dependency issues.
+    """
+
     __tablename__ = "bookings"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    student_id: UUID = Field(foreign_key="users.id", index=True)
-    teacher_id: UUID = Field(foreign_key="users.id", index=True)
-    formula: str = Field(default="single")
-    mode: str = Field(default="online")  # online / in-person
-    date: Optional[str] = Field(default=None, sa_column=sa.Column(sa.String, nullable=True))  # YYYY-MM-DD
-    slot_time: Optional[str] = Field(default=None)  # "HH:MM"
-    duration_minutes: int = Field(default=60)
-    status: str = Field(default="pending")
-    amount_dzd: int = Field(default=0)
+    student_id: UUID = Field(foreign_key="profiles.id", index=True)
+    teacher_id: UUID = Field(foreign_key="profiles.id", index=True)
+    slot_id: Optional[UUID] = Field(default=None, foreign_key="teacher_slots.id")
+    formula: str = Field(default="single")               # public.booking_formula
+    mode: str = Field(default="online")                  # public.teaching_mode
+    session_type: str = Field(default="individual")      # public.session_type
+    booking_date: dt.date = Field(alias="date")          # 'date' in DB
+    slot_time: Optional[dt.time] = Field(default=None)
+    duration_min: int = Field(default=90)
+    amount: int = Field(default=0)                       # DZD
+    currency: str = Field(default="DZD")
     kp_reward: int = Field(default=0)
-    promo_code: Optional[str] = Field(default=None)
-    payment_method: Optional[str] = Field(default=None)  # cib/edahabia/transfer/cash
-    payment_status: str = Field(default="pending")
-    subject: Optional[str] = Field(default=None)
-    level: Optional[str] = Field(default=None)
-    notes: Optional[str] = Field(default=None)
+    status: str = Field(default="pending")               # public.booking_status
+    # Circular FK to payments.id — stored as plain UUID; constraint is in Supabase DB.
+    payment_id: Optional[UUID] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TutoringSession(SQLModel, table=True):
+    """
+    Mirrors public.sessions.
+    Named TutoringSession to avoid collision with sqlmodel.Session.
+    """
+
+    __tablename__ = "sessions"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    booking_id: Optional[UUID] = Field(default=None, foreign_key="bookings.id", index=True)
+    teacher_id: UUID = Field(foreign_key="profiles.id", index=True)
+    student_id: UUID = Field(foreign_key="profiles.id", index=True)
+    subject_id: Optional[UUID] = Field(default=None, foreign_key="subjects.id")
+    level_id: Optional[UUID] = Field(default=None, foreign_key="levels.id")
+    scheduled_at: datetime = Field()
+    started_at: Optional[datetime] = Field(default=None)
+    ended_at: Optional[datetime] = Field(default=None)
+    duration_min: Optional[int] = Field(default=None)
+    mode: str = Field(default="online")                  # public.teaching_mode
+    status: str = Field(default="scheduled")             # public.session_status
+    room_url: Optional[str] = Field(default=None)
+    summary: Optional[str] = Field(default=None)
+    notes_teacher: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionAttendee(SQLModel, table=True):
+    """
+    Mirrors public.session_attendees.
+    Tracks all students who joined a group session.
+    """
+
+    __tablename__ = "session_attendees"
+    __table_args__ = (
+        sa.UniqueConstraint("session_id", "student_id", name="uq_session_attendee"),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    session_id: UUID = Field(foreign_key="sessions.id", index=True)
+    student_id: UUID = Field(foreign_key="profiles.id", index=True)
+    joined_at: Optional[datetime] = Field(default=None)
+    left_at: Optional[datetime] = Field(default=None)

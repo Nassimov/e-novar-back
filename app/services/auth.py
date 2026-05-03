@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import string
 from typing import Any, Dict, Optional
+from uuid import UUID
 
 from sqlmodel import Session, select
 
@@ -10,39 +11,62 @@ from app.config import get_settings
 from app.core.redis import get_redis_client
 from app.core.security import decode_supabase_jwt
 from app.database import get_supabase_service
-from app.models.user import User, UserRole
+from app.models.profile import Profile, UserRole
 
 settings = get_settings()
 
 
 def verify_supabase_token(token: str) -> Optional[Dict[str, Any]]:
-    """Decode and verify a Supabase JWT. Returns claims dict or None."""
     return decode_supabase_jwt(token)
 
 
-def get_or_create_user(
+def get_or_create_profile(
     supabase_id: str,
     email: str,
     role: str,
-    full_name: str,
-    db: Session,
-) -> User:
-    """Upsert a user in the local database based on their Supabase ID."""
-    statement = select(User).where(User.supabase_id == supabase_id)
-    user = db.exec(statement).first()
+    first_name: str = "",
+    last_name: str = "",
+    db: Session = None,
+) -> Profile:
+    """
+    Fetch the profile row for `supabase_id`.
+    If the Supabase trigger didn't fire yet (edge case), insert a minimal profile.
+    The handle_new_user() trigger should have already created the row and a
+    kp_balances + notification_preferences row — we do NOT duplicate those here.
+    """
+    uid = UUID(supabase_id)
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
 
-    if user is None:
-        user = User(
-            supabase_id=supabase_id,
+    if profile is None:
+        # Trigger missed — create the minimal profile manually.
+        profile = Profile(
+            id=uid,
             email=email,
-            role=UserRole(role) if role in UserRole.__members__ else UserRole.student,
-            full_name=full_name or email.split("@")[0],
+            first_name=first_name or email.split("@")[0],
+            last_name=last_name,
         )
-        db.add(user)
+        db.add(profile)
+        # Register default role
+        existing_role = db.exec(
+            select(UserRole).where(UserRole.user_id == uid, UserRole.role == role)
+        ).first()
+        if not existing_role:
+            db.add(UserRole(user_id=uid, role=role))
         db.commit()
-        db.refresh(user)
+        db.refresh(profile)
 
-    return user
+    return profile
+
+
+def ensure_role(supabase_id: str, role: str, db: Session) -> None:
+    """Idempotently add a role entry to user_roles for the given user."""
+    uid = UUID(supabase_id)
+    existing = db.exec(
+        select(UserRole).where(UserRole.user_id == uid, UserRole.role == role)
+    ).first()
+    if not existing:
+        db.add(UserRole(user_id=uid, role=role))
+        db.commit()
 
 
 def generate_otp_code(length: int = 6) -> str:
@@ -50,16 +74,15 @@ def generate_otp_code(length: int = 6) -> str:
 
 
 def send_otp_email(email: str) -> str:
-    """Generate OTP, store in Redis with 10min TTL, return the code."""
+    """Generate OTP, store in Redis with 10-min TTL, return the code."""
     code = generate_otp_code()
     redis = get_redis_client()
-    redis.setex(f"otp:{email}", 600, code)  # 10 minutes
-    # In production, dispatch email_tasks.send_otp_email.delay(email, code)
+    redis.setex(f"otp:{email}", 600, code)
     return code
 
 
 def verify_otp(email: str, code: str) -> bool:
-    """Verify an OTP code for the given email. Deletes the code on success."""
+    """Verify OTP and delete on success."""
     redis = get_redis_client()
     stored = redis.get(f"otp:{email}")
     if stored and stored == code:
@@ -68,61 +91,60 @@ def verify_otp(email: str, code: str) -> bool:
     return False
 
 
-def register_user_in_supabase(email: str, password: str, role: str, full_name: str) -> Dict[str, Any]:
-    """Create a new user in Supabase Auth with metadata."""
+def register_user_in_supabase(
+    email: str, password: str, role: str, full_name: str
+) -> Any:
+    """Create a new user in Supabase Auth with role metadata."""
     client = get_supabase_service()
-    result = client.auth.admin.create_user(
+    # Split full_name into first/last for the profile trigger
+    parts = full_name.strip().split(" ", 1)
+    first_name = parts[0]
+    last_name = parts[1] if len(parts) > 1 else ""
+    return client.auth.admin.create_user(
         {
             "email": email,
             "password": password,
-            "user_metadata": {"role": role, "full_name": full_name},
+            "user_metadata": {
+                "role": role,
+                "full_name": full_name,
+                "first_name": first_name,
+                "last_name": last_name,
+            },
+            "app_metadata": {"role": role},
             "email_confirm": True,
         }
     )
-    return result
 
 
-def login_with_supabase(email: str, password: str) -> Dict[str, Any]:
-    """Sign in via Supabase Auth (anon key flow)."""
+def login_with_supabase(email: str, password: str) -> Any:
     from app.database import get_supabase_anon
 
     client = get_supabase_anon()
-    result = client.auth.sign_in_with_password({"email": email, "password": password})
-    return result
+    return client.auth.sign_in_with_password({"email": email, "password": password})
 
 
 def logout_from_supabase(access_token: str) -> None:
-    """Sign out and invalidate the user's session."""
     from app.database import get_supabase_anon
 
-    client = get_supabase_anon()
-    # Set the session so we can sign out
-    client.auth.sign_out()
+    get_supabase_anon().auth.sign_out()
 
 
-def refresh_supabase_token(refresh_token: str) -> Dict[str, Any]:
-    """Use a refresh token to get a new access token."""
+def refresh_supabase_token(refresh_token: str) -> Any:
     from app.database import get_supabase_anon
 
-    client = get_supabase_anon()
-    result = client.auth.refresh_session(refresh_token)
-    return result
+    return get_supabase_anon().auth.refresh_session(refresh_token)
 
 
 def send_password_reset(email: str) -> None:
-    """Send password reset email via Supabase."""
     from app.database import get_supabase_anon
 
-    client = get_supabase_anon()
-    client.auth.reset_password_email(
+    get_supabase_anon().auth.reset_password_email(
         email,
         options={"redirect_to": f"{settings.frontend_url}/reset-password"},
     )
 
 
 def reset_password_with_token(token: str, new_password: str) -> None:
-    """Reset password using the token from email."""
     from app.database import get_supabase_anon
 
-    client = get_supabase_anon()
-    client.auth.update_user({"password": new_password})
+    get_supabase_anon().auth.update_user({"password": new_password})

@@ -1,26 +1,16 @@
 from logging.config import fileConfig
 import os
-from sqlalchemy import engine_from_config, pool
+
 from alembic import context
 from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
+from sqlmodel import SQLModel
 
 load_dotenv()
 
-# Import all models so they register with SQLModel metadata
-from app.models.user import User  # noqa: F401
-from app.models.teacher import TeacherProfile  # noqa: F401
-from app.models.booking import Booking  # noqa: F401
-from app.models.session import Session  # noqa: F401
-from app.models.payment import Payment  # noqa: F401
-from app.models.message import Conversation, Message  # noqa: F401
-from app.models.kp import KpAccount, KpTransaction  # noqa: F401
-from app.models.homework import Homework, HomeworkSubmission, HomeworkGrade  # noqa: F401
-from app.models.challenge import ChallengeDef, ChallengeSubmission  # noqa: F401
-from app.models.review import Review  # noqa: F401
-from app.models.notification import Notification  # noqa: F401
-from app.models.promo import PromoCode, Referral  # noqa: F401
-
-from sqlmodel import SQLModel
+# Import ALL models so SQLModel.metadata is fully populated for autogenerate.
+# This must cover every table class in the project.
+import app.models  # noqa: F401 — registers all table metadata via __init__.py
 
 config = context.config
 
@@ -40,8 +30,9 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        # Supabase schema is 'public'; ignore auth.* tables during autogenerate.
+        include_schemas=False,
     )
-
     with context.begin_transaction():
         context.run_migrations()
 
@@ -52,13 +43,12 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
-
     with connectable.connect() as connection:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            include_schemas=False,
         )
-
         with context.begin_transaction():
             context.run_migrations()
 

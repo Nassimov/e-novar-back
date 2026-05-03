@@ -41,18 +41,19 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     if supabase_user is None:
         raise HTTPException(status_code=400, detail="Registration failed")
 
-    user = auth_service.get_or_create_user(
+    parts = payload.full_name.strip().split(" ", 1) if payload.full_name else ["", ""]
+    profile = auth_service.get_or_create_profile(
         supabase_id=supabase_user.id,
         email=payload.email,
         role=payload.role,
-        full_name=payload.full_name,
+        first_name=parts[0],
+        last_name=parts[1] if len(parts) > 1 else "",
         db=db,
     )
 
-    # Dispatch welcome email async
     try:
         from app.workers.email_tasks import send_welcome_email
-        send_welcome_email.delay(payload.email, payload.full_name)
+        send_welcome_email.delay(payload.email, payload.full_name or "")
     except Exception:
         pass
 
@@ -61,12 +62,12 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         access_token=session.access_token if session else "",
         refresh_token=session.refresh_token if session else None,
         user=UserBrief(
-            id=str(user.id),
-            email=user.email,
-            full_name=user.full_name,
-            role=user.role.value,
-            avatar_url=user.avatar_url,
-            is_verified=user.is_verified,
+            id=str(profile.id),
+            email=profile.email or payload.email,
+            full_name=profile.full_name or payload.full_name or "",
+            role=payload.role,
+            avatar_url=profile.avatar_url,
+            is_verified=False,
         ),
     )
 
@@ -92,12 +93,14 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
         or "student"
     )
     full_name = supabase_user.user_metadata.get("full_name", payload.email.split("@")[0])
+    parts = full_name.strip().split(" ", 1)
 
-    user = auth_service.get_or_create_user(
+    profile = auth_service.get_or_create_profile(
         supabase_id=supabase_user.id,
         email=supabase_user.email or payload.email,
         role=role,
-        full_name=full_name,
+        first_name=parts[0],
+        last_name=parts[1] if len(parts) > 1 else "",
         db=db,
     )
 
@@ -106,12 +109,12 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
         access_token=session.access_token if session else "",
         refresh_token=session.refresh_token if session else None,
         user=UserBrief(
-            id=str(user.id),
-            email=user.email,
-            full_name=user.full_name,
-            role=user.role.value,
-            avatar_url=user.avatar_url,
-            is_verified=user.is_verified,
+            id=str(profile.id),
+            email=profile.email or payload.email,
+            full_name=profile.full_name or full_name,
+            role=role,
+            avatar_url=profile.avatar_url,
+            is_verified=False,
         ),
     )
 
@@ -143,12 +146,14 @@ async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_
         or "student"
     )
     full_name = supabase_user.user_metadata.get("full_name", "")
+    parts = full_name.strip().split(" ", 1)
 
-    user = auth_service.get_or_create_user(
+    profile = auth_service.get_or_create_profile(
         supabase_id=supabase_user.id,
         email=supabase_user.email or "",
         role=role,
-        full_name=full_name,
+        first_name=parts[0],
+        last_name=parts[1] if len(parts) > 1 else "",
         db=db,
     )
 
@@ -157,12 +162,12 @@ async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_
         access_token=session.access_token if session else "",
         refresh_token=session.refresh_token if session else None,
         user=UserBrief(
-            id=str(user.id),
-            email=user.email,
-            full_name=user.full_name,
-            role=user.role.value,
-            avatar_url=user.avatar_url,
-            is_verified=user.is_verified,
+            id=str(profile.id),
+            email=profile.email or "",
+            full_name=profile.full_name or full_name,
+            role=role,
+            avatar_url=profile.avatar_url,
+            is_verified=False,
         ),
     )
 
@@ -225,19 +230,21 @@ async def get_me(
     db: Session = Depends(get_db),
 ):
     """Get the current authenticated user's basic info."""
+    from uuid import UUID
     from sqlmodel import select
-    from app.models.user import User
+    from app.models.profile import Profile
 
-    statement = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(statement).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    profile = db.exec(
+        select(Profile).where(Profile.id == UUID(current_user["id"]))
+    ).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
 
     return UserBrief(
-        id=str(user.id),
-        email=user.email,
-        full_name=user.full_name,
-        role=user.role.value,
-        avatar_url=user.avatar_url,
-        is_verified=user.is_verified,
+        id=str(profile.id),
+        email=profile.email or "",
+        full_name=profile.full_name or "",
+        role=current_user["role"],
+        avatar_url=profile.avatar_url,
+        is_verified=False,
     )
