@@ -38,7 +38,7 @@ def send_sms(self, to_phone: str, message: str) -> bool:
 def send_otp_sms(self, to_phone: str, code: str) -> bool:
     """Send an OTP code via SMS."""
     message = (
-        f"Karini - Votre code de vérification : {code}\n"
+        f"Enovar - Votre code de vérification : {code}\n"
         "Valable 10 minutes. Ne le partagez jamais."
     )
     try:
@@ -53,7 +53,7 @@ def send_booking_sms(
 ) -> bool:
     """Send a booking confirmation SMS."""
     message = (
-        f"Karini : Session confirmée avec {teacher_name} "
+        f"Enovar : Session confirmée avec {teacher_name} "
         f"le {date_str} à {time_str}. Bon courage !"
     )
     try:
@@ -68,7 +68,7 @@ def send_session_reminder_sms(
 ) -> bool:
     """Send a 30-minute reminder before a session starts."""
     message = (
-        f"Karini : Rappel — votre session avec {teacher_name} commence dans 30 minutes ({time_str})."
+        f"Enovar : Rappel — votre session avec {teacher_name} commence dans 30 minutes ({time_str})."
     )
     try:
         return send_sms.apply(args=[to_phone, message]).get()

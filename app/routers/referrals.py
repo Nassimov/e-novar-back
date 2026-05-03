@@ -22,7 +22,7 @@ REFEREE_KP_REWARD = 100
 
 def _generate_referral_code(name: str) -> str:
     suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-    prefix = name.split()[0].upper()[:6] if name else "KARINI"
+    prefix = name.split()[0].upper()[:6] if name else "ENOVAR"
     return f"{prefix}{suffix}"
 
 
@@ -53,7 +53,7 @@ async def get_referral_code(
         db.commit()
         db.refresh(referral)
 
-    referral_link = f"https://karini.dz/join?ref={referral.code}"
+    referral_link = f"https://enovar.dz/join?ref={referral.code}"
     return {
         "code": referral.code,
         "link": referral_link,

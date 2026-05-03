@@ -43,11 +43,11 @@ def _send_via_resend(to: str, subject: str, html: str) -> bool:
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_welcome_email(self, to: str, name: str) -> bool:
     """Send a welcome email to a newly registered user."""
-    subject = "Bienvenue sur Karini !"
+    subject = "Bienvenue sur Enovar !"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
-      <h1 style="color:#4F46E5;">Bienvenue sur Karini, {name} !</h1>
+      <h1 style="color:#4F46E5;">Bienvenue sur Enovar, {name} !</h1>
       <p>Nous sommes ravis de vous accueillir sur la plateforme de tutorat la plus complète d'Algérie.</p>
       <h2 style="color:#374151;">Ce que vous pouvez faire</h2>
       <ul>
@@ -63,7 +63,7 @@ def send_welcome_email(self, to: str, name: str) -> bool:
           Commencer maintenant
         </a>
       </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Karini</p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
     </body>
     </html>
     """
@@ -76,7 +76,7 @@ def send_welcome_email(self, to: str, name: str) -> bool:
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_booking_confirmation(self, to: str, booking_data: Dict[str, Any]) -> bool:
     """Send a booking confirmation email."""
-    subject = "Confirmation de réservation — Karini"
+    subject = "Confirmation de réservation — Enovar"
     teacher_name = booking_data.get("teacher_name", "votre tuteur")
     date_str = booking_data.get("date", "")
     time_str = booking_data.get("slot_time", "")
@@ -112,7 +112,7 @@ def send_booking_confirmation(self, to: str, booking_data: Dict[str, Any]) -> bo
           Voir mes sessions
         </a>
       </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Karini</p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
     </body>
     </html>
     """
@@ -125,7 +125,7 @@ def send_booking_confirmation(self, to: str, booking_data: Dict[str, Any]) -> bo
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
 def send_otp_email(self, to: str, code: str) -> bool:
     """Send an OTP verification code by email."""
-    subject = "Votre code de vérification — Karini"
+    subject = "Votre code de vérification — Enovar"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
@@ -150,7 +150,7 @@ def send_otp_email(self, to: str, code: str) -> bool:
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_password_reset_email(self, to: str, reset_link: str) -> bool:
     """Send a password reset link by email."""
-    subject = "Réinitialisation de mot de passe — Karini"
+    subject = "Réinitialisation de mot de passe — Enovar"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
@@ -196,7 +196,7 @@ def send_session_reminder_email(
           Voir les détails
         </a>
       </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Karini</p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
     </body>
     </html>
     """
@@ -212,7 +212,7 @@ def send_withdrawal_processed_email(
 ) -> bool:
     """Notify a teacher that their withdrawal was processed."""
     status_label = "approuvée" if status == "approved" else "refusée"
-    subject = f"Demande de retrait {status_label} — Karini"
+    subject = f"Demande de retrait {status_label} — Enovar"
     color = "#10B981" if status == "approved" else "#EF4444"
     html = f"""
     <html>
@@ -226,7 +226,7 @@ def send_withdrawal_processed_email(
           Voir mon portefeuille
         </a>
       </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Karini</p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
     </body>
     </html>
     """

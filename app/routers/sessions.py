@@ -217,7 +217,7 @@ async def join_session(
 
     # Generate a join token (integrate with Daily.co / Jitsi / Whereby in production)
     join_token = str(uuid.uuid4())
-    join_url = f"https://meet.karini.dz/{session.video_room_id}?token={join_token}"
+    join_url = f"https://meet.enovar.dz/{session.video_room_id}?token={join_token}"
 
     return JoinSessionResponse(
         session_id=session.id,

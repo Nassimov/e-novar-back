@@ -36,9 +36,9 @@ def _build_invoice_pdf(invoice_data: Dict[str, Any]) -> bytes:
 
     # Header
     header_data = [
-        ["KARINI", f"FACTURE N° {invoice_data.get('reference', 'N/A')}"],
+        ["ENOVAR", f"FACTURE N° {invoice_data.get('reference', 'N/A')}"],
         ["Plateforme de tutorat en ligne", f"Date: {invoice_data.get('date', datetime.utcnow().strftime('%d/%m/%Y'))}"],
-        ["contact@karini.dz", ""],
+        ["contact@enovar.dz", ""],
     ]
     header_table = Table(header_data, colWidths=[10 * cm, 7 * cm])
     header_table.setStyle(TableStyle([
@@ -100,8 +100,8 @@ def _build_invoice_pdf(invoice_data: Dict[str, Any]) -> bytes:
 
     # Footer
     story.append(Paragraph(
-        "<font size=9 color='grey'>Karini - Plateforme de tutorat en ligne - Algérie | "
-        "contact@karini.dz | karini.dz</font>",
+        "<font size=9 color='grey'>Enovar - Plateforme de tutorat en ligne - Algérie | "
+        "contact@enovar.dz | enovar.dz</font>",
         styles["Normal"],
     ))
 
@@ -132,7 +132,7 @@ def generate_invoice_pdf(self, invoice_id: str) -> str:
                 "reference": str(payment.id)[:8].upper(),
                 "date": payment.created_at.strftime("%d/%m/%Y"),
                 "amount_dzd": payment.amount,
-                "client_name": "Client Karini",
+                "client_name": "Client Enovar",
                 "client_email": "",
             }
 

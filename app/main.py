@@ -18,17 +18,17 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    logger.info("Starting Karini API v1.0.0 ...")
+    logger.info("Starting Enovar API v1.0.0 ...")
     yield
-    logger.info("Shutting down Karini API ...")
+    logger.info("Shutting down Enovar API ...")
     from app.core.redis import close_redis
     close_redis()
 
 
 app = FastAPI(
-    title="Karini API",
+    title="Enovar API",
     version="1.0.0",
-    description="Backend API for Karini - Algeria's premier tutoring platform",
+    description="Backend API for Enovar - Algeria's premier tutoring platform",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -110,7 +110,7 @@ async def health_check():
     return {
         "status": "ok",
         "version": "1.0.0",
-        "app": "Karini API",
+        "app": "Enovar API",
         "environment": settings.app_env,
     }
 

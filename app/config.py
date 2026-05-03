@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     # Supabase Storage
-    supabase_storage_bucket: str = "karini-files"
+    supabase_storage_bucket: str = "enovar-files"
 
     # Redis (Railway Redis add-on or external)
     redis_url: str = "redis://localhost:6379/0"
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # Resend (transactional email)
     resend_api_key: str = ""
-    email_from: str = "noreply@karini.dz"
+    email_from: str = "noreply@enovar.dz"
 
     # Twilio (SMS)
     twilio_account_sid: str = ""

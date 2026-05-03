@@ -97,11 +97,11 @@ def mock_admin_user() -> Dict[str, Any]:
     """Mock admin user for testing."""
     return {
         "id": "admin-supabase-user-id",
-        "email": "admin@karini.dz",
+        "email": "admin@enovar.dz",
         "role": "admin",
         "claims": {
             "sub": "admin-supabase-user-id",
-            "email": "admin@karini.dz",
+            "email": "admin@enovar.dz",
         },
     }
 
