@@ -57,6 +57,12 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     except Exception:
         pass
 
+    try:
+        from app.services.onesignal import register_user
+        register_user(str(profile.id), email=payload.email, role=payload.role)
+    except Exception:
+        pass
+
     session = result.session
     return TokenResponse(
         access_token=session.access_token if session else "",
@@ -103,6 +109,12 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
         last_name=parts[1] if len(parts) > 1 else "",
         db=db,
     )
+
+    try:
+        from app.services.onesignal import register_user
+        register_user(str(profile.id), email=profile.email or payload.email, role=role)
+    except Exception:
+        pass
 
     session = result.session
     return TokenResponse(

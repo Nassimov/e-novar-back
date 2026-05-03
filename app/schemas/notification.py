@@ -4,26 +4,34 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, computed_field
 
 
 class NotificationResponse(BaseModel):
     id: UUID
     user_id: UUID
-    title: str
-    body: str
+    title: Optional[str] = None
+    body: Optional[str] = None
     type: str
-    is_read: bool
+    channel: str = "in_app"
+    read_at: Optional[datetime] = None
     data: Optional[dict] = None
     created_at: datetime
+
+    @computed_field
+    @property
+    def is_read(self) -> bool:
+        return self.read_at is not None
 
     model_config = {"from_attributes": True}
 
 
 class NotificationPrefsUpdate(BaseModel):
-    booking_reminders: bool = True
-    new_messages: bool = True
-    kp_updates: bool = True
-    promotions: bool = False
-    push_enabled: bool = True
-    email_enabled: bool = True
+    push: bool = True
+    email: bool = True
+    sms: bool = False
+    reminders: bool = True
+    sessions: bool = True
+    kp: bool = True
+    rewards: bool = True
+    messages: bool = True

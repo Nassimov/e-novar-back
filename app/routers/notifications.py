@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-import json
 import math
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
-from app.core.redis import get_redis_client
 from app.dependencies import get_current_user, get_db
-from app.models.notification import Notification
-from app.models.user import User
+from app.models.notification import Notification, NotificationPreference
+from app.models.profile import Profile
 from app.schemas.notification import NotificationPrefsUpdate, NotificationResponse
 
-router = APIRouter(tags=["notifications"])
+router = APIRouter(tags=["Notifications"])
 
 
 @router.get("/", response_model=Dict)
@@ -25,44 +24,23 @@ async def list_notifications(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List notifications for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    """List notifications for the current user, newest first."""
+    user_id = UUID(current_user["id"])
 
-    query = select(Notification).where(Notification.user_id == user.id)
+    query = select(Notification).where(Notification.user_id == user_id)
     if unread_only:
-        query = query.where(Notification.is_read == False)
+        query = query.where(Notification.read_at == None)  # noqa: E711
     query = query.order_by(Notification.created_at.desc())
 
     notifications = db.exec(query).all()
     total = len(notifications)
     offset = (page - 1) * size
-    paginated = notifications[offset: offset + size]
-
-    def _notification_to_response(n: Notification) -> NotificationResponse:
-        data = None
-        if n.data:
-            try:
-                data = json.loads(n.data)
-            except Exception:
-                pass
-        return NotificationResponse(
-            id=n.id,
-            user_id=n.user_id,
-            title=n.title,
-            body=n.body,
-            type=n.type,
-            is_read=n.is_read,
-            data=data,
-            created_at=n.created_at,
-        )
+    paginated = notifications[offset : offset + size]
 
     return {
-        "items": [_notification_to_response(n) for n in paginated],
+        "items": [NotificationResponse.model_validate(n) for n in paginated],
         "total": total,
-        "unread_count": sum(1 for n in notifications if not n.is_read),
+        "unread_count": sum(1 for n in notifications if n.read_at is None),
         "page": page,
         "size": size,
         "pages": math.ceil(total / size) if total else 0,
@@ -75,17 +53,15 @@ async def mark_notification_read(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Mark a notification as read."""
+    """Mark a single notification as read."""
+    user_id = UUID(current_user["id"])
     notification = db.get(Notification, notification_id)
     if notification is None:
         raise HTTPException(status_code=404, detail="Notification not found")
-
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None or notification.user_id != user.id:
+    if notification.user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    notification.is_read = True
+    notification.read_at = datetime.now(timezone.utc)
     db.add(notification)
     db.commit()
     return {"message": "Marked as read"}
@@ -96,23 +72,33 @@ async def mark_all_notifications_read(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Mark all notifications as read."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
+    """Mark all unread notifications as read."""
+    user_id = UUID(current_user["id"])
     notifications = db.exec(
         select(Notification).where(
-            Notification.user_id == user.id,
-            Notification.is_read == False,
+            Notification.user_id == user_id,
+            Notification.read_at == None,  # noqa: E711
         )
     ).all()
+    now = datetime.now(timezone.utc)
     for n in notifications:
-        n.is_read = True
+        n.read_at = now
         db.add(n)
     db.commit()
     return {"message": f"Marked {len(notifications)} notifications as read"}
+
+
+@router.get("/preferences")
+async def get_notification_preferences(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get the current user's notification preferences."""
+    user_id = UUID(current_user["id"])
+    prefs = db.get(NotificationPreference, user_id)
+    if prefs is None:
+        raise HTTPException(status_code=404, detail="Preferences not found")
+    return prefs
 
 
 @router.put("/preferences")
@@ -121,16 +107,16 @@ async def update_notification_preferences(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update notification preferences."""
-    from datetime import datetime
+    """Update the current user's notification preferences."""
+    user_id = UUID(current_user["id"])
+    prefs = db.get(NotificationPreference, user_id)
+    if prefs is None:
+        prefs = NotificationPreference(user_id=user_id)
+        db.add(prefs)
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    user.notification_prefs = json.dumps(payload.model_dump())
-    user.updated_at = datetime.utcnow()
-    db.add(user)
+    for field, value in payload.model_dump().items():
+        setattr(prefs, field, value)
+    db.add(prefs)
     db.commit()
-    return {"message": "Preferences updated", "prefs": payload.model_dump()}
+    db.refresh(prefs)
+    return prefs

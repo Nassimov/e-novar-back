@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+"""
+Email tasks — all emails are sent via OneSignal (push + email centralized).
+Resend is intentionally NOT used here; it is kept in config for medium-term migration.
+"""
+
 import logging
 from typing import Any, Dict
-
-import httpx
 
 from app.config import get_settings
 from app.workers.celery_app import celery_app
@@ -11,39 +14,20 @@ from app.workers.celery_app import celery_app
 settings = get_settings()
 logger = logging.getLogger(__name__)
 
-RESEND_API_URL = "https://api.resend.com/emails"
 
-
-def _send_via_resend(to: str, subject: str, html: str) -> bool:
-    """Send a transactional email using the Resend API."""
-    if not settings.resend_api_key:
-        logger.warning("RESEND_API_KEY not set — skipping email to %s", to)
+def _send(to: str, subject: str, html: str) -> bool:
+    from app.services.onesignal import send_email
+    result = send_email(to=to, subject=subject, html=html)
+    if result.get("status") == "error":
+        logger.error("OneSignal email failed to %s: %s", to, result.get("reason"))
         return False
+    return True
 
-    headers = {
-        "Authorization": f"Bearer {settings.resend_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "from": settings.email_from,
-        "to": [to],
-        "subject": subject,
-        "html": html,
-    }
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            response = client.post(RESEND_API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-            return True
-    except Exception as exc:
-        logger.error("Failed to send email to %s: %s", to, exc)
-        return False
 
+# ─── Transactional emails ─────────────────────────────────────────────────────
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_welcome_email(self, to: str, name: str) -> bool:
-    """Send a welcome email to a newly registered user."""
-    subject = "Bienvenue sur Enovar !"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
@@ -68,15 +52,13 @@ def send_welcome_email(self, to: str, name: str) -> bool:
     </html>
     """
     try:
-        return _send_via_resend(to, subject, html)
+        return _send(to, "Bienvenue sur Enovar !", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_booking_confirmation(self, to: str, booking_data: Dict[str, Any]) -> bool:
-    """Send a booking confirmation email."""
-    subject = "Confirmation de réservation — Enovar"
     teacher_name = booking_data.get("teacher_name", "votre tuteur")
     date_str = booking_data.get("date", "")
     time_str = booking_data.get("slot_time", "")
@@ -117,15 +99,13 @@ def send_booking_confirmation(self, to: str, booking_data: Dict[str, Any]) -> bo
     </html>
     """
     try:
-        return _send_via_resend(to, subject, html)
+        return _send(to, "Confirmation de réservation — Enovar", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
 def send_otp_email(self, to: str, code: str) -> bool:
-    """Send an OTP verification code by email."""
-    subject = "Votre code de vérification — Enovar"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
@@ -142,15 +122,13 @@ def send_otp_email(self, to: str, code: str) -> bool:
     </html>
     """
     try:
-        return _send_via_resend(to, subject, html)
+        return _send(to, "Votre code de vérification — Enovar", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_password_reset_email(self, to: str, reset_link: str) -> bool:
-    """Send a password reset link by email."""
-    subject = "Réinitialisation de mot de passe — Enovar"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
@@ -170,7 +148,7 @@ def send_password_reset_email(self, to: str, reset_link: str) -> bool:
     </html>
     """
     try:
-        return _send_via_resend(to, subject, html)
+        return _send(to, "Réinitialisation de mot de passe — Enovar", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
@@ -179,8 +157,6 @@ def send_password_reset_email(self, to: str, reset_link: str) -> bool:
 def send_session_reminder_email(
     self, to: str, name: str, teacher_name: str, date_str: str, time_str: str
 ) -> bool:
-    """Send a session reminder email 24h before."""
-    subject = f"Rappel de session demain — {teacher_name}"
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
@@ -201,18 +177,14 @@ def send_session_reminder_email(
     </html>
     """
     try:
-        return _send_via_resend(to, subject, html)
+        return _send(to, f"Rappel de session demain — {teacher_name}", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_withdrawal_processed_email(
-    self, to: str, name: str, amount: int, status: str
-) -> bool:
-    """Notify a teacher that their withdrawal was processed."""
+def send_withdrawal_processed_email(self, to: str, name: str, amount: int, status: str) -> bool:
     status_label = "approuvée" if status == "approved" else "refusée"
-    subject = f"Demande de retrait {status_label} — Enovar"
     color = "#10B981" if status == "approved" else "#EF4444"
     html = f"""
     <html>
@@ -231,6 +203,6 @@ def send_withdrawal_processed_email(
     </html>
     """
     try:
-        return _send_via_resend(to, subject, html)
+        return _send(to, f"Demande de retrait {status_label} — Enovar", html)
     except Exception as exc:
         raise self.retry(exc=exc)
