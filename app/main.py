@@ -356,15 +356,11 @@ app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
-@app.get("/health", tags=["Health"], summary="Service health check")
+@app.get("/health", tags=["Health"], summary="Service health check", include_in_schema=False)
 async def health_check():
-    """Returns `200 OK` with build info. Used by Railway's health probe."""
-    return {
-        "status": "ok",
-        "version": "1.0.0",
-        "app": "E-NOVAR API",
-        "environment": settings.app_env,
-    }
+    """Minimal probe for Railway — no DB, no Redis, no env vars required."""
+    import os
+    return {"status": "ok", "version": "1.0.0", "env": os.getenv("APP_ENV", "production")}
 
 
 # ── WebSocket connection manager ──────────────────────────────────────────────

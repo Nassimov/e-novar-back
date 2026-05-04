@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+"""
+Configuration — reads EXCLUSIVELY from environment variables.
+
+On Railway: set values in the service Variables tab.
+            pydantic-settings picks them up automatically.
+Locally:    create a .env file (copied from .env.example).
+            The .env file is optional and ignored if absent.
+
+Priority: environment variables > .env file > default values.
+All fields have safe defaults so the app starts even with no vars set
+(features that need a key will be skipped at runtime, not at startup).
+"""
+
+import os
 from functools import lru_cache
 from typing import List
 
@@ -8,55 +22,59 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # .env is optional — only used locally. On Railway, env vars are injected directly.
+        env_file=".env" if os.path.exists(".env") else None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
 
-    # Supabase
+    # ── Supabase ──────────────────────────────────────────────────────────────
+    # Set these in Railway → Variables (copy from Supabase dashboard → Settings → API)
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
-    # JWT secret from Supabase dashboard → Settings → API → JWT Secret
-    supabase_jwt_secret: str = ""
-    database_url: str = ""
+    supabase_jwt_secret: str = ""   # Settings → API → JWT Settings → JWT Secret
+    database_url: str = ""          # Settings → Database → URI connection string
 
-    # Supabase Storage
+    # ── Supabase Storage ──────────────────────────────────────────────────────
     supabase_storage_bucket: str = "enovar-files"
 
-    # Redis (Railway Redis add-on or external)
+    # ── Redis ─────────────────────────────────────────────────────────────────
+    # Railway Redis add-on: copy REDIS_URL from the Redis service Variables tab
     redis_url: str = "redis://localhost:6379/0"
 
-    # Anthropic (Claude)
+    # ── Anthropic (Claude AI) ─────────────────────────────────────────────────
     anthropic_api_key: str = ""
 
-    # Stripe
+    # ── Stripe ────────────────────────────────────────────────────────────────
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
 
-    # OneSignal (push notifications)
+    # ── OneSignal (push + email) ──────────────────────────────────────────────
     onesignal_app_id: str = ""
     onesignal_rest_api_key: str = ""
 
-    # Resend (transactional email)
+    # ── Resend (kept for medium-term migration, not used currently) ───────────
     resend_api_key: str = ""
     email_from: str = "noreply@enovar.dz"
 
-    # Twilio (SMS)
+    # ── Twilio (SMS) ──────────────────────────────────────────────────────────
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_from_number: str = ""
 
-    # App
-    secret_key: str = "super-secret-key-change-in-production"
-    app_env: str = "development"
-    app_url: str = "http://localhost:8000"
-    frontend_url: str = "http://localhost:3000"
-    allowed_origins: str = "http://localhost:3000,https://yourdomain.vercel.app"
+    # ── App ───────────────────────────────────────────────────────────────────
+    secret_key: str = "change-this-in-production"
+    app_env: str = "production"     # set to "production" in Railway Variables
+    app_url: str = ""               # your Railway domain, e.g. https://xxx.up.railway.app
+    frontend_url: str = ""          # your Vercel/frontend domain
+    allowed_origins: str = "*"      # comma-separated list of allowed CORS origins
 
     @property
     def allowed_origins_list(self) -> List[str]:
+        if self.allowed_origins.strip() == "*":
+            return ["*"]
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
     @property

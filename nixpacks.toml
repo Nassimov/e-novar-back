@@ -1,8 +1,11 @@
 [phases.setup]
 nixPkgs = [
+  "postgresql",
+  "openssl",
   "libjpeg",
   "zlib",
   "freetype",
   "libpng",
   "gcc",
+  "stdenv.cc.cc.lib",
 ]
