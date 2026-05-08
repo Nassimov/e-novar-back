@@ -355,6 +355,13 @@ def custom_openapi():
 app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
+# ── Root redirect ─────────────────────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+async def root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
+
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health", tags=["Health"], summary="Service health check", include_in_schema=False)
 async def health_check():
