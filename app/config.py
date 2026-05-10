@@ -69,13 +69,14 @@ class Settings(BaseSettings):
     app_env: str = "production"     # set to "production" in Railway Variables
     app_url: str = ""               # your Railway domain, e.g. https://xxx.up.railway.app
     frontend_url: str = ""          # your Vercel/frontend domain
-    allowed_origins: str = "*"      # comma-separated list of allowed CORS origins
+    # Comma-separated explicit origins (e.g. "https://e-novar.com,http://localhost:5173").
+    # The wildcard "*" is no longer used here — *.e-novar.com is handled by regex in main.py.
+    allowed_origins: str = ""
 
     @property
     def allowed_origins_list(self) -> List[str]:
-        if self.allowed_origins.strip() == "*":
-            return ["*"]
-        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+        origins = [o.strip() for o in self.allowed_origins.split(",") if o.strip() and o.strip() != "*"]
+        return origins
 
     @property
     def is_production(self) -> bool:

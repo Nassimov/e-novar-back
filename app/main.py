@@ -250,9 +250,19 @@ Business logic (KP triggers, rating recompute, homework KP) runs as PostgreSQL f
 )
 
 # ── Middleware ─────────────────────────────────────────────────────────────────
+# allow_credentials=True + allow_origins=["*"] is rejected by browsers.
+# Instead we use a regex that matches every *.e-novar.com subdomain and localhost
+# so prod / preprod / recette / local all work without manually listing each origin.
+_CORS_ORIGIN_REGEX = (
+    r"^https?://localhost(:\d+)?$"          # local dev (any port)
+    r"|^https://e-novar\.com$"              # production apex
+    r"|^https://[a-z0-9-]+\.e-novar\.com$"  # preprod, recette, any branch
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins_list,
+    allow_origins=settings.allowed_origins_list,   # explicit extras from env var
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
