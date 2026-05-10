@@ -10,11 +10,13 @@ from app.config import get_settings
 from app.dependencies import get_current_user, get_db
 from app.schemas.auth import (
     ForgotPasswordRequest,
+    GoogleExchangeRequest,
     LoginRequest,
     OtpVerifyRequest,
     RefreshTokenRequest,
     RegisterRequest,
     ResetPasswordRequest,
+    SignInRequest,
     TokenResponse,
     UserBrief,
 )
@@ -208,6 +210,233 @@ async def reset_password(payload: ResetPasswordRequest):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"message": "Password reset successfully"}
+
+
+@router.post("/google/exchange", response_model=TokenResponse)
+async def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(get_db)):
+    """
+    Exchange a Google OAuth code **or** existing Supabase tokens for a session.
+
+    **Mode 1 — raw OAuth code (PKCE):**
+    Send `code` + `code_verifier` (the verifier your app generated before opening
+    the OAuth browser). Supabase exchanges the code and returns a fresh session.
+
+    **Mode 2 — already-exchanged tokens:**
+    If the Supabase SDK on your frontend already called `exchangeCodeForSession()`
+    and gave you `access_token` / `refresh_token`, send those directly.
+
+    In both cases the user is **auto-registered** on first login (no separate
+    registration step needed for Google users).
+    """
+    supabase_user = None
+    session_access = None
+    session_refresh = None
+
+    if payload.code:
+        # ── Mode 1: exchange the OAuth code ───────────────────────────────────
+        try:
+            result = auth_service.exchange_google_code(
+                payload.code, payload.code_verifier
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Code exchange failed: {exc}")
+
+        if not result.session or not result.user:
+            raise HTTPException(status_code=400, detail="Code exchange returned no session")
+
+        supabase_user = result.user
+        session_access = result.session.access_token
+        session_refresh = result.session.refresh_token
+
+    elif payload.access_token:
+        # ── Mode 2: validate already-obtained Supabase tokens ─────────────────
+        try:
+            user_resp = auth_service.get_supabase_user_from_token(payload.access_token)
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail=f"Invalid access token: {exc}")
+
+        if not user_resp.user:
+            raise HTTPException(status_code=401, detail="Token validation returned no user")
+
+        supabase_user = user_resp.user
+        session_access = payload.access_token
+        session_refresh = payload.refresh_token
+
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide either 'code' (OAuth code) or 'access_token' (Supabase token)",
+        )
+
+    # ── resolve role & name from Supabase metadata ────────────────────────────
+    role = (
+        supabase_user.app_metadata.get("role")
+        or supabase_user.user_metadata.get("role")
+        or payload.role
+    )
+    full_name = (
+        supabase_user.user_metadata.get("full_name")
+        or supabase_user.user_metadata.get("name")
+        or (supabase_user.email or "").split("@")[0]
+    )
+    parts = full_name.strip().split(" ", 1)
+    avatar_url = supabase_user.user_metadata.get("avatar_url") or supabase_user.user_metadata.get("picture")
+
+    # ── get or create local profile (auto-registration) ───────────────────────
+    profile = auth_service.get_or_create_profile(
+        supabase_id=supabase_user.id,
+        email=supabase_user.email or "",
+        role=role,
+        first_name=parts[0],
+        last_name=parts[1] if len(parts) > 1 else "",
+        db=db,
+    )
+    if avatar_url and not profile.avatar_url:
+        profile.avatar_url = avatar_url
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
+
+    try:
+        from app.services.onesignal import register_user
+        register_user(str(profile.id), email=profile.email or "", role=role)
+    except Exception:
+        pass
+
+    return TokenResponse(
+        access_token=session_access,
+        refresh_token=session_refresh,
+        user=UserBrief(
+            id=str(profile.id),
+            email=profile.email or supabase_user.email or "",
+            full_name=profile.full_name or full_name,
+            role=role,
+            avatar_url=profile.avatar_url,
+            is_verified=True,
+        ),
+    )
+
+
+@router.post("/signin", response_model=TokenResponse)
+async def signin(payload: SignInRequest, db: Session = Depends(get_db)):
+    """
+    Unified sign-in endpoint — choose one method:
+
+    **Email / password:**
+    ```json
+    { "email": "user@example.com", "password": "secret123" }
+    ```
+
+    **Google (Supabase token):**
+    ```json
+    { "provider": "google", "access_token": "<supabase_jwt>", "refresh_token": "<optional>" }
+    ```
+    The `access_token` is the one returned by Supabase after the Google OAuth flow
+    (call `POST /api/auth/google/exchange` first if you only have the raw OAuth code).
+    """
+    # ── Google path ───────────────────────────────────────────────────────────
+    if payload.provider == "google":
+        if not payload.access_token:
+            raise HTTPException(
+                status_code=422,
+                detail="'access_token' is required when provider is 'google'",
+            )
+        try:
+            user_resp = auth_service.get_supabase_user_from_token(payload.access_token)
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail=f"Invalid Google token: {exc}")
+
+        if not user_resp.user:
+            raise HTTPException(status_code=401, detail="Token validation failed")
+
+        supabase_user = user_resp.user
+        role = (
+            supabase_user.app_metadata.get("role")
+            or supabase_user.user_metadata.get("role")
+            or payload.role
+        )
+        full_name = (
+            supabase_user.user_metadata.get("full_name")
+            or supabase_user.user_metadata.get("name")
+            or (supabase_user.email or "").split("@")[0]
+        )
+        parts = full_name.strip().split(" ", 1)
+        profile = auth_service.get_or_create_profile(
+            supabase_id=supabase_user.id,
+            email=supabase_user.email or "",
+            role=role,
+            first_name=parts[0],
+            last_name=parts[1] if len(parts) > 1 else "",
+            db=db,
+        )
+        try:
+            from app.services.onesignal import register_user
+            register_user(str(profile.id), email=profile.email or "", role=role)
+        except Exception:
+            pass
+
+        return TokenResponse(
+            access_token=payload.access_token,
+            refresh_token=payload.refresh_token,
+            user=UserBrief(
+                id=str(profile.id),
+                email=profile.email or supabase_user.email or "",
+                full_name=profile.full_name or full_name,
+                role=role,
+                avatar_url=profile.avatar_url,
+                is_verified=True,
+            ),
+        )
+
+    # ── Email / password path ─────────────────────────────────────────────────
+    if not payload.email or not payload.password:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide 'email' + 'password', or 'provider' + 'access_token'",
+        )
+    try:
+        result = auth_service.login_with_supabase(payload.email, payload.password)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    supabase_user = result.user
+    if supabase_user is None:
+        raise HTTPException(status_code=401, detail="Login failed")
+
+    role = (
+        supabase_user.app_metadata.get("role")
+        or supabase_user.user_metadata.get("role")
+        or "student"
+    )
+    full_name = supabase_user.user_metadata.get("full_name", payload.email.split("@")[0])
+    parts = full_name.strip().split(" ", 1)
+    profile = auth_service.get_or_create_profile(
+        supabase_id=supabase_user.id,
+        email=supabase_user.email or str(payload.email),
+        role=role,
+        first_name=parts[0],
+        last_name=parts[1] if len(parts) > 1 else "",
+        db=db,
+    )
+    try:
+        from app.services.onesignal import register_user
+        register_user(str(profile.id), email=profile.email or str(payload.email), role=role)
+    except Exception:
+        pass
+
+    session = result.session
+    return TokenResponse(
+        access_token=session.access_token if session else "",
+        refresh_token=session.refresh_token if session else None,
+        user=UserBrief(
+            id=str(profile.id),
+            email=profile.email or str(payload.email),
+            full_name=profile.full_name or full_name,
+            role=role,
+            avatar_url=profile.avatar_url,
+            is_verified=False,
+        ),
+    )
 
 
 @router.get("/google")

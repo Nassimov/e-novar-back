@@ -148,3 +148,24 @@ def reset_password_with_token(token: str, new_password: str) -> None:
     from app.database import get_supabase_anon
 
     get_supabase_anon().auth.update_user({"password": new_password})
+
+
+def exchange_google_code(code: str, code_verifier: Optional[str] = None) -> Any:
+    """
+    Exchange a Supabase OAuth code for a session (PKCE flow).
+    `code_verifier` is required when the frontend initiated OAuth with PKCE
+    (Supabase default). Omit only for implicit/non-PKCE flows.
+    """
+    from app.database import get_supabase_anon
+
+    params: Dict[str, Any] = {"auth_code": code}
+    if code_verifier:
+        params["code_verifier"] = code_verifier
+    return get_supabase_anon().auth.exchange_code_for_session(params)
+
+
+def get_supabase_user_from_token(access_token: str) -> Any:
+    """Validate a Supabase JWT and return the matching auth.users record."""
+    from app.database import get_supabase_service
+
+    return get_supabase_service().auth.get_user(access_token)

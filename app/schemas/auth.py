@@ -77,3 +77,61 @@ class RefreshTokenRequest(BaseModel):
 class GoogleCallbackParams(BaseModel):
     code: str
     state: Optional[str] = None
+
+
+class GoogleExchangeRequest(BaseModel):
+    """
+    Exchange a Google OAuth code for a Supabase session.
+
+    Send EITHER:
+    - `code` + optional `code_verifier` — when the frontend has the raw OAuth code
+      (PKCE flow: also pass the code_verifier generated at OAuth start)
+    - `access_token` + optional `refresh_token` — when the Supabase SDK on the
+      frontend already exchanged the code and returned the session tokens
+    """
+    code: Optional[str] = None
+    code_verifier: Optional[str] = None
+    access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
+    role: str = Field(default="student")
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        allowed = {"student", "teacher", "parent"}
+        if v not in allowed:
+            raise ValueError(f"Role must be one of: {allowed}")
+        return v
+
+
+class SignInRequest(BaseModel):
+    """
+    Unified sign-in — choose one method:
+    - Email / password : fill `email` + `password`
+    - Google (Supabase) : fill `provider="google"` + `access_token`
+      (the token returned by Supabase after the OAuth flow)
+    """
+    # ── email / password ──────────────────────────────────────────────────────
+    email: Optional[EmailStr] = None
+    password: Optional[str] = None
+    # ── google ────────────────────────────────────────────────────────────────
+    provider: Optional[str] = None          # "google"
+    access_token: Optional[str] = None      # Supabase JWT from Google OAuth
+    refresh_token: Optional[str] = None
+    # ── common ────────────────────────────────────────────────────────────────
+    role: str = Field(default="student")    # used only for first-time Google users
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v != "google":
+            raise ValueError("Only 'google' is supported as provider")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        allowed = {"student", "teacher", "parent"}
+        if v not in allowed:
+            raise ValueError(f"Role must be one of: {allowed}")
+        return v
