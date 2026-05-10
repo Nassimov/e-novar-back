@@ -21,8 +21,19 @@ class Profile(SQLModel, table=True):
     id: UUID = Field(primary_key=True)
     first_name: Optional[str] = Field(default=None)
     last_name: Optional[str] = Field(default=None)
-    # Computed by PostgreSQL GENERATED ALWAYS AS — never write this field.
-    full_name: Optional[str] = Field(default=None)
+    # GENERATED ALWAYS AS (coalesce(first_name,'') || ' ' || coalesce(last_name,'')) STORED
+    # sa.Computed tells SQLAlchemy never to include this column in INSERT/UPDATE.
+    full_name: Optional[str] = Field(
+        default=None,
+        sa_column=sa.Column(
+            sa.Text,
+            sa.Computed(
+                "coalesce(first_name,'') || ' ' || coalesce(last_name,'')",
+                persisted=True,
+            ),
+            nullable=True,
+        ),
+    )
     birth_date: Optional[date] = Field(default=None)
     gender: Optional[str] = Field(default=None)          # public.gender enum value
     email: Optional[str] = Field(

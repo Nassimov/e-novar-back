@@ -283,19 +283,26 @@ async def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(
     avatar_url = supabase_user.user_metadata.get("avatar_url") or supabase_user.user_metadata.get("picture")
 
     # ── get or create local profile (auto-registration) ───────────────────────
-    profile = auth_service.get_or_create_profile(
-        supabase_id=supabase_user.id,
-        email=supabase_user.email or "",
-        role=role,
-        first_name=parts[0],
-        last_name=parts[1] if len(parts) > 1 else "",
-        db=db,
-    )
+    try:
+        profile = auth_service.get_or_create_profile(
+            supabase_id=supabase_user.id,
+            email=supabase_user.email or "",
+            role=role,
+            first_name=parts[0],
+            last_name=parts[1] if len(parts) > 1 else "",
+            db=db,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Profile creation failed: {exc}")
+
     if avatar_url and not profile.avatar_url:
-        profile.avatar_url = avatar_url
-        db.add(profile)
-        db.commit()
-        db.refresh(profile)
+        try:
+            profile.avatar_url = avatar_url
+            db.add(profile)
+            db.commit()
+            db.refresh(profile)
+        except Exception:
+            db.rollback()
 
     try:
         from app.services.onesignal import register_user
@@ -361,14 +368,18 @@ async def signin(payload: SignInRequest, db: Session = Depends(get_db)):
             or (supabase_user.email or "").split("@")[0]
         )
         parts = full_name.strip().split(" ", 1)
-        profile = auth_service.get_or_create_profile(
-            supabase_id=supabase_user.id,
-            email=supabase_user.email or "",
-            role=role,
-            first_name=parts[0],
-            last_name=parts[1] if len(parts) > 1 else "",
-            db=db,
-        )
+        try:
+            profile = auth_service.get_or_create_profile(
+                supabase_id=supabase_user.id,
+                email=supabase_user.email or "",
+                role=role,
+                first_name=parts[0],
+                last_name=parts[1] if len(parts) > 1 else "",
+                db=db,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Profile creation failed: {exc}")
+
         try:
             from app.services.onesignal import register_user
             register_user(str(profile.id), email=profile.email or "", role=role)
