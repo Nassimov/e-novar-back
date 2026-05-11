@@ -134,6 +134,11 @@ class ParentProfile(SQLModel, table=True):
 
     user_id: UUID = Field(primary_key=True, foreign_key="profiles.id")
     relationship: Optional[str] = Field(default=None)
+    # Unique code (KRN-P-XXXX) shown to the parent, used by students to link.
+    parent_code: Optional[str] = Field(
+        default=None,
+        sa_column=sa.Column(sa.String, unique=True, nullable=True),
+    )
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
