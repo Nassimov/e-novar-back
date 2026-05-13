@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.profile import Profile
+from app.models.profile import Profile, StudentProfile
 from app.services.storage import upload_file
 
 router = APIRouter(tags=["profile"])
@@ -86,6 +86,73 @@ def _to_response(profile: Profile, role: str) -> ProfileResponse:
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
+
+class StudentFullProfileResponse(BaseModel):
+    id: str
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    birth_date: Optional[str] = None
+    gender: Optional[str] = None
+    avatar_url: Optional[str] = None
+    wilaya: Optional[str] = None
+    student_code: Optional[str] = None
+    parent_link_code: Optional[str] = None
+    monitoring_mode: Optional[str] = None
+    level_main: Optional[str] = None
+    level_detail: Optional[str] = None
+    speciality: Optional[str] = None
+    subjects_interested: Optional[List[str]] = None
+    goals: Optional[List[str]] = None
+    online_only: bool = False
+    budget_tier: Optional[str] = None
+    budget_min: Optional[int] = None
+    budget_max: Optional[int] = None
+    available_days: Optional[List[int]] = None
+    available_slots: Optional[List[str]] = None
+
+
+@router.get("/student", response_model=StudentFullProfileResponse, tags=["Profile"])
+async def get_student_profile(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the full profile + student-specific fields for the authenticated student."""
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
+    birth = str(profile.birth_date) if profile.birth_date else None
+    return StudentFullProfileResponse(
+        id=str(profile.id),
+        email=profile.email or "",
+        first_name=profile.first_name,
+        last_name=profile.last_name,
+        full_name=profile.full_name,
+        phone=profile.phone,
+        birth_date=birth,
+        gender=profile.gender,
+        avatar_url=profile.avatar_url,
+        wilaya=profile.wilaya,
+        student_code=sp.student_code if sp else None,
+        parent_link_code=sp.parent_link_code if sp else None,
+        monitoring_mode=sp.monitoring_mode if sp else None,
+        level_main=sp.level_main if sp else None,
+        level_detail=sp.level_detail if sp else None,
+        speciality=sp.speciality if sp else None,
+        subjects_interested=sp.subjects_interested if sp else None,
+        goals=sp.goals if sp else None,
+        online_only=sp.online_only if sp else False,
+        budget_tier=sp.budget_tier if sp else None,
+        budget_min=sp.budget_min if sp else None,
+        budget_max=sp.budget_max if sp else None,
+        available_days=sp.available_days if sp else None,
+        available_slots=sp.available_slots if sp else None,
+    )
+
 
 @router.get("/", response_model=ProfileResponse)
 async def get_profile(

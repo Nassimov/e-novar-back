@@ -113,6 +113,8 @@ class StudentOnboardingRequest(BaseModel):
     budget_tier: Optional[str] = None
     budget_min: Optional[int] = None
     budget_max: Optional[int] = None
+    available_days: Optional[List[int]] = None
+    available_slots: Optional[List[str]] = None
     # Parent linking — student enters the parent's KRN-P-XXXX code
     parent_code: Optional[str] = None
 
@@ -217,6 +219,10 @@ async def complete_student_onboarding(
         sp.budget_min = payload.budget_min
     if payload.budget_max is not None:
         sp.budget_max = payload.budget_max
+    if payload.available_days is not None:
+        sp.available_days = payload.available_days
+    if payload.available_slots is not None:
+        sp.available_slots = payload.available_slots
 
     db.add(sp)
 

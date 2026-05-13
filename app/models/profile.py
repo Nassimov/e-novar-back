@@ -98,6 +98,14 @@ class StudentProfile(SQLModel, table=True):
         sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="{}"),
     )
     online_only: bool = Field(default=False)
+    available_days: Optional[List[int]] = Field(
+        default=None,
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=True, server_default="{}"),
+    )
+    available_slots: Optional[List[str]] = Field(
+        default=None,
+        sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="{}"),
+    )
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
