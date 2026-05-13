@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import json
+import base64
+import logging
 import random
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -13,9 +15,8 @@ from sqlmodel import Session, select
 from app.dependencies import get_current_user, get_db
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import ParentProfile, Profile, StudentProfile
-from app.models.teacher import TeacherProfile
-from app.models.user import User
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["onboarding"])
 
 
@@ -45,6 +46,50 @@ def _generate_parent_code(db: Session) -> str:
     return f"KRN-P-{random.randint(10000, 99999)}"
 
 
+def _upload_base64_avatar(data_url: str, user_id: str) -> Optional[str]:
+    """
+    Decode a base64 data URL and upload to Supabase Storage.
+    Returns the public URL, or None on failure.
+    """
+    try:
+        match = re.match(r"data:([^;]+);base64,(.+)", data_url, re.DOTALL)
+        if not match:
+            return None
+        content_type = match.group(1)
+        file_bytes = base64.b64decode(match.group(2))
+        ext = content_type.split("/")[-1].replace("jpeg", "jpg") if "/" in content_type else "jpg"
+        from app.services.storage import upload_file
+        return upload_file(
+            file_bytes=file_bytes,
+            filename=f"avatar.{ext}",
+            content_type=content_type,
+            folder=f"avatars/{user_id}",
+        )
+    except Exception as exc:
+        logger.warning("Base64 avatar upload failed for %s: %s", user_id, exc)
+        return None
+
+
+def _award_welcome_kp(user_id: UUID, db: Session, amount: int = 30) -> None:
+    """Insert a KP transaction for the onboarding welcome bonus.
+    The apply_kp_transaction Supabase trigger updates kp_balances automatically.
+    """
+    try:
+        from app.models.kp import KpTransaction
+        tx = KpTransaction(
+            user_id=user_id,
+            amount=amount,
+            source="bonus",
+            label="Bienvenue sur E-NOVAR ! 🎉",
+            ref_type="onboarding",
+        )
+        db.add(tx)
+        db.commit()
+    except Exception as exc:
+        logger.warning("Welcome KP bonus failed for %s: %s", user_id, exc)
+        db.rollback()
+
+
 # ─────────────────────────── schemas ─────────────────────────────────────────
 
 class StudentOnboardingRequest(BaseModel):
@@ -54,7 +99,7 @@ class StudentOnboardingRequest(BaseModel):
     phone: Optional[str] = None
     birth_date: Optional[str] = None   # ISO date "YYYY-MM-DD"
     gender: Optional[str] = None
-    avatar_url: Optional[str] = None
+    avatar_url: Optional[str] = None   # real URL or base64 data URL
     wilaya: Optional[str] = None
     # StudentProfile fields
     student_code: Optional[str] = None  # client-proposed (honoured if unique)
@@ -72,20 +117,6 @@ class StudentOnboardingRequest(BaseModel):
     parent_code: Optional[str] = None
 
 
-class OnboardingCompleteRequest(BaseModel):
-    full_name: Optional[str] = None
-    wilaya: Optional[str] = None
-    phone: Optional[str] = None
-    bio: Optional[str] = None
-    subjects: Optional[List[str]] = None
-    levels: Optional[List[str]] = None
-    price_per_session: Optional[int] = None
-    modes: Optional[List[str]] = None
-    experience_years: Optional[int] = None
-    child_name: Optional[str] = None
-    child_level: Optional[str] = None
-
-
 class OnboardingStatusResponse(BaseModel):
     completed: bool
     role: str
@@ -101,15 +132,26 @@ async def complete_student_onboarding(
     db: Session = Depends(get_db),
 ):
     """
-    Save all student onboarding data in one call.
-    Updates Profile + creates/updates StudentProfile.
-    Optionally links to a parent via their KRN-P-XXXX code.
-    Sends a welcome email (non-fatal).
+    Save all student onboarding data in one call (called from the Welcome page).
+
+    - Updates Profile (name, phone, birth date, gender, avatar, wilaya).
+    - Creates / updates StudentProfile (level, subjects, goals, budget, monitoring).
+    - Optionally links the student to a parent via their KRN-P-XXXX code.
+    - If avatar_url is a base64 data URL it is uploaded to Supabase Storage.
+    - Awards 30 EP welcome bonus via a KP transaction (trigger updates balance).
+    - Sends a welcome email (non-fatal).
+
     Returns { student_code, parent_linked }.
     """
     uid = UUID(current_user["id"])
 
-    # ── Profile ───────────────────────────────────────────────────────────────
+    # ── 1. Resolve avatar URL ─────────────────────────────────────────────────
+    avatar_url = payload.avatar_url
+    if avatar_url and avatar_url.startswith("data:"):
+        uploaded = _upload_base64_avatar(avatar_url, str(uid))
+        avatar_url = uploaded  # None = upload failed, we skip the field
+
+    # ── 2. Profile ────────────────────────────────────────────────────────────
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -122,8 +164,8 @@ async def complete_student_onboarding(
         profile.phone = payload.phone
     if payload.gender:
         profile.gender = payload.gender
-    if payload.avatar_url:
-        profile.avatar_url = payload.avatar_url
+    if avatar_url:
+        profile.avatar_url = avatar_url
     if payload.wilaya:
         profile.wilaya = payload.wilaya
     if payload.birth_date:
@@ -131,16 +173,17 @@ async def complete_student_onboarding(
             profile.birth_date = date.fromisoformat(payload.birth_date)
         except ValueError:
             pass
+
     profile.onboarding_completed = True
     profile.updated_at = datetime.utcnow()
     db.add(profile)
 
-    # ── StudentProfile ────────────────────────────────────────────────────────
+    # ── 3. StudentProfile ─────────────────────────────────────────────────────
     sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
     if sp is None:
         sp = StudentProfile(user_id=uid)
 
-    # Honour proposed student_code only if unique (not taken by another user)
+    # Honour client-proposed student_code only if unique
     if not sp.student_code:
         proposed = (payload.student_code or "").strip().upper()
         if proposed:
@@ -177,7 +220,7 @@ async def complete_student_onboarding(
 
     db.add(sp)
 
-    # ── Parent link ───────────────────────────────────────────────────────────
+    # ── 4. Parent link ────────────────────────────────────────────────────────
     parent_linked = False
     if payload.parent_code:
         code = payload.parent_code.strip().upper()
@@ -198,6 +241,7 @@ async def complete_student_onboarding(
                 ))
             parent_linked = True
 
+    # ── 5. Commit ─────────────────────────────────────────────────────────────
     try:
         db.commit()
         db.refresh(sp)
@@ -205,7 +249,10 @@ async def complete_student_onboarding(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
 
-    # Welcome email (non-fatal)
+    # ── 6. Welcome KP bonus (30 EP) ───────────────────────────────────────────
+    _award_welcome_kp(uid, db, amount=30)
+
+    # ── 7. Welcome email (non-fatal) ──────────────────────────────────────────
     try:
         from app.workers.email_tasks import send_welcome_email
         send_welcome_email.delay(profile.email or "", profile.full_name or "")
@@ -238,84 +285,55 @@ async def find_parent_by_code(
     return {"parent_id": str(parent_prof.user_id), "name": name}
 
 
-# ─────────────────────────── legacy endpoints ────────────────────────────────
-
-@router.post("/complete")
-async def complete_onboarding(
-    payload: OnboardingCompleteRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Legacy teacher/parent onboarding endpoint."""
-    statement = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(statement).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if payload.full_name:
-        user.full_name = payload.full_name
-    if payload.wilaya:
-        user.wilaya = payload.wilaya
-    if payload.phone:
-        user.phone = payload.phone
-    if payload.bio:
-        user.bio = payload.bio
-
-    user.onboarding_completed = True
-    user.updated_at = datetime.utcnow()
-    db.add(user)
-
-    if user.role.value == "teacher" and any([payload.subjects, payload.levels, payload.price_per_session]):
-        stmt = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-        tp = db.exec(stmt).first()
-        if tp is None:
-            tp = TeacherProfile(user_id=user.id)
-        if payload.subjects:
-            tp.subjects = json.dumps(payload.subjects)
-        if payload.levels:
-            tp.levels = json.dumps(payload.levels)
-        if payload.price_per_session is not None:
-            tp.price_per_session = payload.price_per_session
-        if payload.modes:
-            tp.modes = json.dumps(payload.modes)
-        if payload.experience_years is not None:
-            tp.experience_years = payload.experience_years
-        tp.bio = payload.bio or tp.bio
-        tp.updated_at = datetime.utcnow()
-        db.add(tp)
-
-    db.commit()
-    return {"message": "Onboarding completed", "role": user.role.value}
-
+# ─────────────────────────── status ──────────────────────────────────────────
 
 @router.get("/status", response_model=OnboardingStatusResponse)
 async def get_onboarding_status(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    statement = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(statement).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    """Return onboarding completion status and any missing required fields."""
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
 
-    missing = []
-    if not user.full_name:
-        missing.append("full_name")
-    if not user.wilaya:
+    role = current_user["role"]
+    missing: List[str] = []
+
+    if not profile.first_name:
+        missing.append("first_name")
+    if not profile.wilaya:
         missing.append("wilaya")
-    if not user.phone:
+    if not profile.phone:
         missing.append("phone")
 
-    if user.role.value == "teacher":
-        stmt = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-        tp = db.exec(stmt).first()
-        if tp is None or not tp.subjects or tp.subjects == "[]":
-            missing.append("subjects")
-        if tp is None or not tp.price_per_session:
-            missing.append("price_per_session")
+    if role == "student":
+        sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
+        if sp is None or not sp.level_main:
+            missing.append("level_main")
+        if sp is None or not sp.subjects_interested:
+            missing.append("subjects_interested")
 
     return OnboardingStatusResponse(
-        completed=user.onboarding_completed,
-        role=user.role.value,
+        completed=profile.onboarding_completed,
+        role=role,
         missing_fields=missing,
     )
+
+
+# ─────────────────────────── legacy no-op ────────────────────────────────────
+
+@router.post("/complete")
+async def complete_onboarding_legacy(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Deprecated — use /api/onboarding/student/complete for students.
+    Kept for backward compatibility; returns a redirect hint.
+    """
+    role = current_user.get("role", "student")
+    return {
+        "message": "This endpoint is deprecated. Use /api/onboarding/student/complete.",
+        "redirect": f"/api/onboarding/{role}/complete",
+    }

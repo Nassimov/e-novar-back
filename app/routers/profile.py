@@ -1,132 +1,191 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.user import User
-from app.schemas.user import (
-    NotificationPrefsUpdate,
-    PaymentMethodCreate,
-    PaymentMethodResponse,
-    ProfileUpdateRequest,
-    UserResponse,
-)
+from app.models.profile import Profile
 from app.services.storage import upload_file
 
 router = APIRouter(tags=["profile"])
 
 
-def _get_user_from_supabase_id(supabase_id: str, db: Session) -> User:
-    statement = select(User).where(User.supabase_id == supabase_id)
-    user = db.exec(statement).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
+# ── Response schema compatible with frontend AuthUser ─────────────────────────
+
+class ProfileResponse(BaseModel):
+    id: str
+    email: str
+    full_name: str
+    role: str
+    avatar_url: Optional[str] = None
+    wilaya: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    onboarding_completed: bool = False
+    is_verified: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
 
-@router.get("/", response_model=UserResponse)
+class ProfileUpdateRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    wilaya: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
+class PaymentMethodCreate(BaseModel):
+    type: str
+    holder_name: str
+    card_last4: Optional[str] = None
+    iban: Optional[str] = None
+    bank_name: Optional[str] = None
+
+
+class PaymentMethodResponse(BaseModel):
+    id: str
+    type: str
+    holder_name: str
+    card_last4: Optional[str] = None
+    bank_name: Optional[str] = None
+    is_default: bool = False
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _get_profile(user_id_str: str, db: Session) -> Profile:
+    uid = UUID(user_id_str)
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile
+
+
+def _to_response(profile: Profile, role: str) -> ProfileResponse:
+    return ProfileResponse(
+        id=str(profile.id),
+        email=profile.email or "",
+        full_name=profile.full_name or "",
+        role=role,
+        avatar_url=profile.avatar_url,
+        wilaya=profile.wilaya,
+        phone=profile.phone,
+        bio=profile.bio,
+        onboarding_completed=profile.onboarding_completed,
+        is_verified=False,
+        created_at=profile.created_at,
+        updated_at=profile.updated_at,
+    )
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@router.get("/", response_model=ProfileResponse)
 async def get_profile(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Get the current user's profile."""
-    user = _get_user_from_supabase_id(current_user["id"], db)
-    return UserResponse.model_validate(user)
+    profile = _get_profile(current_user["id"], db)
+    return _to_response(profile, current_user["role"])
 
 
-@router.put("/", response_model=UserResponse)
+@router.put("/", response_model=ProfileResponse)
 async def update_profile(
     payload: ProfileUpdateRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Update the current user's profile."""
-    from datetime import datetime
+    profile = _get_profile(current_user["id"], db)
 
-    user = _get_user_from_supabase_id(current_user["id"], db)
+    if payload.first_name is not None:
+        profile.first_name = payload.first_name
+    if payload.last_name is not None:
+        profile.last_name = payload.last_name
+    if payload.wilaya is not None:
+        profile.wilaya = payload.wilaya
+    if payload.phone is not None:
+        profile.phone = payload.phone
+    if payload.bio is not None:
+        profile.bio = payload.bio
+    if payload.avatar_url is not None:
+        profile.avatar_url = payload.avatar_url
 
-    update_data = payload.model_dump(exclude_none=True)
-    for field, value in update_data.items():
-        setattr(user, field, value)
-    user.updated_at = datetime.utcnow()
-
-    db.add(user)
+    profile.updated_at = datetime.utcnow()
+    db.add(profile)
     db.commit()
-    db.refresh(user)
-    return UserResponse.model_validate(user)
+    db.refresh(profile)
+    return _to_response(profile, current_user["role"])
 
 
-@router.post("/avatar", response_model=UserResponse)
+@router.post("/avatar", response_model=ProfileResponse)
 async def upload_avatar(
     file: UploadFile,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Upload and update user avatar."""
-    from datetime import datetime
-
     if file.content_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
         raise HTTPException(status_code=400, detail="Only image files are allowed")
 
     contents = await file.read()
-    if len(contents) > 5 * 1024 * 1024:  # 5 MB limit
+    if len(contents) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 5MB)")
 
-    url = upload_file(contents, file.filename or "avatar.jpg", file.content_type, folder="avatars")
+    url = upload_file(
+        contents,
+        file.filename or "avatar.jpg",
+        file.content_type,
+        folder=f"avatars/{current_user['id']}",
+    )
 
-    user = _get_user_from_supabase_id(current_user["id"], db)
-    user.avatar_url = url
-    user.updated_at = datetime.utcnow()
-    db.add(user)
+    profile = _get_profile(current_user["id"], db)
+    profile.avatar_url = url
+    profile.updated_at = datetime.utcnow()
+    db.add(profile)
     db.commit()
-    db.refresh(user)
-    return UserResponse.model_validate(user)
+    db.refresh(profile)
+    return _to_response(profile, current_user["role"])
 
 
 @router.put("/notifications")
 async def update_notification_prefs(
-    payload: NotificationPrefsUpdate,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Update notification preferences."""
-    from datetime import datetime
-
-    user = _get_user_from_supabase_id(current_user["id"], db)
-    user.notification_prefs = json.dumps(payload.model_dump())
-    user.updated_at = datetime.utcnow()
-    db.add(user)
-    db.commit()
-    return {"message": "Notification preferences updated", "prefs": payload.model_dump()}
+    """Update notification preferences (stub — prefs stored in notification_preferences table)."""
+    return {"message": "Notification preferences updated"}
 
 
 @router.get("/payment-methods", response_model=List[PaymentMethodResponse])
 async def list_payment_methods(
     current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    """List saved payment methods for current user."""
-    user = _get_user_from_supabase_id(current_user["id"], db)
-    # Payment methods stored in Redis or a separate table in production
-    # Returning empty list as placeholder for DB-backed implementation
+    """List saved payment methods (stub — full implementation in payments router)."""
     return []
 
 
-@router.post("/payment-methods", response_model=PaymentMethodResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/payment-methods",
+    response_model=PaymentMethodResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def add_payment_method(
     payload: PaymentMethodCreate,
     current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
 ):
-    """Add a new payment method."""
-    import uuid
-    method_id = str(uuid.uuid4())
+    """Add a payment method (stub)."""
+    import uuid as _uuid
     return PaymentMethodResponse(
-        id=method_id,
+        id=str(_uuid.uuid4()),
         type=payload.type,
         holder_name=payload.holder_name,
         card_last4=payload.card_last4,
@@ -140,5 +199,5 @@ async def delete_payment_method(
     method_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Remove a saved payment method."""
+    """Remove a saved payment method (stub)."""
     return None

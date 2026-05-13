@@ -76,6 +76,7 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
             role=payload.role,
             avatar_url=profile.avatar_url,
             is_verified=False,
+            onboarding_completed=profile.onboarding_completed,
         ),
     )
 
@@ -129,6 +130,7 @@ async def login(payload: LoginRequest, db: Session = Depends(get_db)):
             role=role,
             avatar_url=profile.avatar_url,
             is_verified=False,
+            onboarding_completed=profile.onboarding_completed,
         ),
     )
 
@@ -182,6 +184,7 @@ async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_
             role=role,
             avatar_url=profile.avatar_url,
             is_verified=False,
+            onboarding_completed=profile.onboarding_completed,
         ),
     )
 
@@ -320,6 +323,7 @@ async def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(
             role=role,
             avatar_url=profile.avatar_url,
             is_verified=True,
+            onboarding_completed=profile.onboarding_completed,
         ),
     )
 
@@ -396,6 +400,7 @@ async def signin(payload: SignInRequest, db: Session = Depends(get_db)):
                 role=role,
                 avatar_url=profile.avatar_url,
                 is_verified=True,
+                onboarding_completed=profile.onboarding_completed,
             ),
         )
 
@@ -446,6 +451,7 @@ async def signin(payload: SignInRequest, db: Session = Depends(get_db)):
             role=role,
             avatar_url=profile.avatar_url,
             is_verified=False,
+            onboarding_completed=profile.onboarding_completed,
         ),
     )
 
@@ -499,4 +505,5 @@ async def get_me(
         role=current_user["role"],
         avatar_url=profile.avatar_url,
         is_verified=False,
+        onboarding_completed=profile.onboarding_completed,
     )

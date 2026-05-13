@@ -40,6 +40,7 @@ class UserBrief(BaseModel):
     role: str
     avatar_url: Optional[str] = None
     is_verified: bool = False
+    onboarding_completed: bool = False
 
 
 class TokenResponse(BaseModel):
