@@ -1,10 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy import text
+from sqlmodel import Session
+
+from app.dependencies import get_db
 
 router = APIRouter(tags=["catalogs"])
 
-SUBJECTS = [
+# ── Fallback hardcoded data (used only if DB tables are empty) ────────────────
+
+_FB_SUBJECTS = [
     "Mathématiques", "Physique", "Chimie", "Sciences naturelles",
     "Français", "Arabe", "Anglais", "Tamazight",
     "Histoire-Géographie", "Philosophie", "Économie",
@@ -12,20 +18,26 @@ SUBJECTS = [
     "Éducation civique", "Sport", "Musique", "Arts plastiques",
 ]
 
-LEVELS = [
-    # Primaire
-    "1ère AP", "2ème AP", "3ème AP", "4ème AP", "5ème AP",
-    # Moyen
-    "1ère AM", "2ème AM", "3ème AM", "4ème AM",
-    # Secondaire
-    "1ère AS", "2ème AS", "3ème AS",
-    # Supérieur
-    "Licence 1", "Licence 2", "Licence 3", "Master 1", "Master 2",
-    # Adulte / Autre
-    "Adulte", "Professionnel",
+_FB_GROUPS: dict[str, list[str]] = {
+    "primaire":   ["1ère AP", "2ème AP", "3ème AP", "4ème AP", "5ème AP"],
+    "moyen":      ["1ère AM", "2ème AM", "3ème AM", "4ème AM"],
+    "secondaire": ["1ère AS", "2ème AS", "3ème AS"],
+    "superieur":  ["Licence 1", "Licence 2", "Licence 3", "Master 1", "Master 2", "Doctorat"],
+    "autre":      ["Adulte", "Professionnel"],
+}
+
+_FB_GOALS = [
+    {"id": "bac",              "label": "Réussir mon BAC"},
+    {"id": "bem",              "label": "Réussir mon BEM"},
+    {"id": "improve_grades",   "label": "Améliorer mes notes"},
+    {"id": "regular_support",  "label": "Soutien scolaire régulier"},
+    {"id": "fill_gaps",        "label": "Combler des lacunes"},
+    {"id": "deepen",           "label": "Approfondir une matière"},
+    {"id": "competition",      "label": "Préparer un concours"},
+    {"id": "certification",    "label": "Certification professionnelle"},
 ]
 
-ALGERIAN_WILAYAS = [
+_FB_WILAYAS = [
     {"code": "01", "name": "Adrar"},
     {"code": "02", "name": "Chlef"},
     {"code": "03", "name": "Laghouat"},
@@ -74,47 +86,83 @@ ALGERIAN_WILAYAS = [
     {"code": "46", "name": "Aïn Témouchent"},
     {"code": "47", "name": "Ghardaïa"},
     {"code": "48", "name": "Relizane"},
+    {"code": "49", "name": "Timimoun"},
+    {"code": "50", "name": "Bordj Badji Mokhtar"},
+    {"code": "51", "name": "Ouled Djellal"},
+    {"code": "52", "name": "Béni Abbès"},
+    {"code": "53", "name": "In Salah"},
+    {"code": "54", "name": "In Guezzam"},
+    {"code": "55", "name": "Touggourt"},
+    {"code": "56", "name": "Djanet"},
+    {"code": "57", "name": "El M'Ghair"},
+    {"code": "58", "name": "El Meniaa"},
 ]
 
 STORE_REWARDS = [
-    {"id": "discount_10", "name": "Réduction 10%", "description": "10% de réduction sur la prochaine session", "kp_cost": 500, "type": "discount", "icon": "🏷️"},
-    {"id": "discount_20", "name": "Réduction 20%", "description": "20% de réduction sur la prochaine session", "kp_cost": 900, "type": "discount", "icon": "🎫"},
-    {"id": "free_session", "name": "Session gratuite", "description": "Une session de 60 min offerte", "kp_cost": 2000, "type": "session", "icon": "🎓"},
-    {"id": "priority_match", "name": "Matching prioritaire", "description": "En tête des résultats pendant 7 jours", "kp_cost": 400, "type": "perk", "icon": "⭐"},
-    {"id": "avatar_frame", "name": "Cadre avatar premium", "description": "Cadre exclusif pour votre profil", "kp_cost": 200, "type": "cosmetic", "icon": "🖼️"},
-    {"id": "analytics_report", "name": "Rapport d'analyse", "description": "Rapport détaillé de vos progrès", "kp_cost": 300, "type": "report", "icon": "📊"},
+    {"id": "discount_10",    "name": "Réduction 10%",       "description": "10% de réduction sur la prochaine session",   "kp_cost": 500,  "type": "discount",  "icon": "🏷️"},
+    {"id": "discount_20",    "name": "Réduction 20%",       "description": "20% de réduction sur la prochaine session",   "kp_cost": 900,  "type": "discount",  "icon": "🎫"},
+    {"id": "free_session",   "name": "Session gratuite",    "description": "Une session de 60 min offerte",               "kp_cost": 2000, "type": "session",   "icon": "🎓"},
+    {"id": "priority_match", "name": "Matching prioritaire","description": "En tête des résultats pendant 7 jours",       "kp_cost": 400,  "type": "perk",      "icon": "⭐"},
+    {"id": "avatar_frame",   "name": "Cadre avatar premium","description": "Cadre exclusif pour votre profil",            "kp_cost": 200,  "type": "cosmetic",  "icon": "🖼️"},
+    {"id": "analytics_report","name": "Rapport d'analyse",  "description": "Rapport détaillé de vos progrès",            "kp_cost": 300,  "type": "report",    "icon": "📊"},
 ]
 
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
 @router.get("/subjects")
-async def get_subjects():
-    """Get all available subjects."""
-    return {"subjects": SUBJECTS, "total": len(SUBJECTS)}
+def get_subjects(db: Session = Depends(get_db)):
+    """Return all subjects ordered by position."""
+    rows = db.execute(
+        text("SELECT name FROM public.subjects ORDER BY position, name")
+    ).fetchall()
+    subjects = [r[0] for r in rows] if rows else _FB_SUBJECTS
+    return {"subjects": subjects, "total": len(subjects)}
 
 
 @router.get("/levels")
-async def get_levels():
-    """Get all school levels."""
-    return {
-        "levels": LEVELS,
-        "total": len(LEVELS),
-        "groups": {
-            "primaire": LEVELS[:5],
-            "moyen": LEVELS[5:9],
-            "secondaire": LEVELS[9:12],
-            "superieur": LEVELS[12:17],
-            "autre": LEVELS[17:],
-        },
+def get_levels(db: Session = Depends(get_db)):
+    """Return school levels grouped by main category."""
+    rows = db.execute(
+        text("SELECT label, main_group FROM public.levels ORDER BY position")
+    ).fetchall()
+
+    if not rows:
+        all_levels = [lbl for g in _FB_GROUPS.values() for lbl in g]
+        return {"levels": all_levels, "total": len(all_levels), "groups": _FB_GROUPS}
+
+    groups: dict[str, list[str]] = {
+        "primaire": [], "moyen": [], "secondaire": [], "superieur": [], "autre": [],
     }
+    for label, main_group in rows:
+        key = main_group if main_group in groups else "autre"
+        groups[key].append(label)
+
+    all_levels = [r[0] for r in rows]
+    return {"levels": all_levels, "total": len(all_levels), "groups": groups}
+
+
+@router.get("/goals")
+def get_goals(db: Session = Depends(get_db)):
+    """Return learning goals ordered by position."""
+    rows = db.execute(
+        text("SELECT id, label FROM public.goal_definitions ORDER BY position")
+    ).fetchall()
+    goals = [{"id": r[0], "label": r[1]} for r in rows] if rows else _FB_GOALS
+    return {"goals": goals, "total": len(goals)}
 
 
 @router.get("/wilayas")
-async def get_wilayas():
-    """Get all 48 Algerian wilayas."""
-    return {"wilayas": ALGERIAN_WILAYAS, "total": len(ALGERIAN_WILAYAS)}
+def get_wilayas(db: Session = Depends(get_db)):
+    """Return all 58 Algerian wilayas ordered by code."""
+    rows = db.execute(
+        text("SELECT code, name FROM public.wilayas ORDER BY code")
+    ).fetchall()
+    wilayas = [{"code": r[0], "name": r[1]} for r in rows] if rows else _FB_WILAYAS
+    return {"wilayas": wilayas, "total": len(wilayas)}
 
 
 @router.get("/store/rewards")
 async def get_store_rewards():
-    """Get all available KP store rewards."""
+    """Return KP store rewards (static catalogue)."""
     return {"rewards": STORE_REWARDS, "total": len(STORE_REWARDS)}
