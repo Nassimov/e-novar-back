@@ -265,7 +265,11 @@ async def complete_student_onboarding(
     except Exception:
         pass
 
-    return {"student_code": sp.student_code, "parent_linked": parent_linked}
+    return {
+        "student_code": sp.student_code,
+        "parent_linked": parent_linked,
+        "avatar_url": profile.avatar_url,
+    }
 
 
 # ─────────────────────────── find parent by code ─────────────────────────────
