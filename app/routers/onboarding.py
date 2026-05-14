@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
@@ -47,10 +48,7 @@ def _generate_parent_code(db: Session) -> str:
 
 
 def _upload_base64_avatar(data_url: str, user_id: str) -> Optional[str]:
-    """
-    Decode a base64 data URL and upload to Supabase Storage.
-    Returns the public URL, or None on failure.
-    """
+    """Decode a base64 data URL and upload to Supabase Storage. Returns public URL or None."""
     try:
         match = re.match(r"data:([^;]+);base64,(.+)", data_url, re.DOTALL)
         if not match:
@@ -71,9 +69,7 @@ def _upload_base64_avatar(data_url: str, user_id: str) -> Optional[str]:
 
 
 def _award_welcome_kp(user_id: UUID, db: Session, amount: int = 30) -> None:
-    """Insert a KP transaction for the onboarding welcome bonus.
-    The apply_kp_transaction Supabase trigger updates kp_balances automatically.
-    """
+    """Insert KP transaction. The apply_kp_transaction Supabase trigger updates kp_balances."""
     try:
         from app.models.kp import KpTransaction
         tx = KpTransaction(
@@ -90,6 +86,64 @@ def _award_welcome_kp(user_id: UUID, db: Session, amount: int = 30) -> None:
         db.rollback()
 
 
+def _insert_user_role(uid: UUID, db: Session) -> None:
+    """Ensure (user_id, student) row exists in user_roles."""
+    db.execute(
+        text(
+            "INSERT INTO public.user_roles (user_id, role) "
+            "VALUES (:uid, 'student') "
+            "ON CONFLICT (user_id, role) DO NOTHING"
+        ),
+        {"uid": str(uid)},
+    )
+
+
+def _insert_student_subjects(uid: UUID, subjects: List[str], db: Session) -> None:
+    """Populate student_subjects table from the names list."""
+    # Clear previous entries so a re-submit replaces them cleanly
+    db.execute(
+        text("DELETE FROM public.student_subjects WHERE student_id = :sid"),
+        {"sid": str(uid)},
+    )
+    for priority, name in enumerate(subjects, start=1):
+        row = db.execute(
+            text("SELECT id FROM public.subjects WHERE name = :name LIMIT 1"),
+            {"name": name},
+        ).fetchone()
+        if row:
+            db.execute(
+                text(
+                    "INSERT INTO public.student_subjects (student_id, subject_id, priority) "
+                    "VALUES (:sid, :subj_id, :pri) "
+                    "ON CONFLICT DO NOTHING"
+                ),
+                {"sid": str(uid), "subj_id": str(row[0]), "pri": priority},
+            )
+
+
+def _insert_student_goals(uid: UUID, goals: List[str], db: Session) -> None:
+    """Populate student_goals table from the labels list."""
+    # Clear previous entries so a re-submit replaces them cleanly
+    db.execute(
+        text("DELETE FROM public.student_goals WHERE student_id = :sid"),
+        {"sid": str(uid)},
+    )
+    for label in goals:
+        row = db.execute(
+            text("SELECT id FROM public.goal_definitions WHERE label = :label LIMIT 1"),
+            {"label": label},
+        ).fetchone()
+        if row:
+            db.execute(
+                text(
+                    "INSERT INTO public.student_goals (student_id, goal_id) "
+                    "VALUES (:sid, :gid) "
+                    "ON CONFLICT DO NOTHING"
+                ),
+                {"sid": str(uid), "gid": row[0]},
+            )
+
+
 # ─────────────────────────── schemas ─────────────────────────────────────────
 
 class StudentOnboardingRequest(BaseModel):
@@ -97,12 +151,12 @@ class StudentOnboardingRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone: Optional[str] = None
-    birth_date: Optional[str] = None   # ISO date "YYYY-MM-DD"
+    birth_date: Optional[str] = None   # ISO "YYYY-MM-DD"
     gender: Optional[str] = None
-    avatar_url: Optional[str] = None   # real URL or base64 data URL
+    avatar_url: Optional[str] = None   # Supabase Storage URL (NOT base64 — upload separately)
     wilaya: Optional[str] = None
     # StudentProfile fields
-    student_code: Optional[str] = None  # client-proposed (honoured if unique)
+    student_code: Optional[str] = None
     monitoring_mode: Optional[str] = None
     level_main: Optional[str] = None
     level_detail: Optional[str] = None
@@ -115,7 +169,6 @@ class StudentOnboardingRequest(BaseModel):
     budget_max: Optional[int] = None
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
-    # Parent linking — student enters the parent's KRN-P-XXXX code
     parent_code: Optional[str] = None
 
 
@@ -134,24 +187,31 @@ async def complete_student_onboarding(
     db: Session = Depends(get_db),
 ):
     """
-    Save all student onboarding data in one call (called from the Welcome page).
+    Save ALL student onboarding data in one atomic call (called from the Welcome page).
 
-    - Updates Profile (name, phone, birth date, gender, avatar, wilaya).
-    - Creates / updates StudentProfile (level, subjects, goals, budget, monitoring).
-    - Optionally links the student to a parent via their KRN-P-XXXX code.
-    - If avatar_url is a base64 data URL it is uploaded to Supabase Storage.
-    - Awards 30 EP welcome bonus via a KP transaction (trigger updates balance).
-    - Sends a welcome email (non-fatal).
+    Writes to:
+      - public.profiles           (name, phone, birth_date, gender, avatar_url, wilaya)
+      - public.student_profiles   (level, subjects, goals, budget, monitoring, availability)
+      - public.user_roles         (role = 'student')
+      - public.student_subjects   (normalised subject links)
+      - public.student_goals      (normalised goal links)
+      - public.parent_student_links (if parent_code provided)
+      - public.kp_transactions    (+30 EP welcome bonus → trigger updates kp_balances)
 
-    Returns { student_code, parent_linked }.
+    NOTE: avatar must be pre-uploaded via POST /api/profile/avatar.
+    If avatar_url starts with 'data:' it will be uploaded here as a fallback.
+
+    Returns { student_code, parent_linked, avatar_url }.
     """
     uid = UUID(current_user["id"])
 
     # ── 1. Resolve avatar URL ─────────────────────────────────────────────────
+    # Prefer pre-uploaded URL. Fallback: upload inline base64 (should rarely happen).
     avatar_url = payload.avatar_url
     if avatar_url and avatar_url.startswith("data:"):
+        logger.warning("Received base64 avatar for %s — uploading inline (slow path)", uid)
         uploaded = _upload_base64_avatar(avatar_url, str(uid))
-        avatar_url = uploaded  # None = upload failed, we skip the field
+        avatar_url = uploaded  # None = upload failed → skip field
 
     # ── 2. Profile ────────────────────────────────────────────────────────────
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
@@ -185,7 +245,6 @@ async def complete_student_onboarding(
     if sp is None:
         sp = StudentProfile(user_id=uid)
 
-    # Honour client-proposed student_code only if unique
     if not sp.student_code:
         proposed = (payload.student_code or "").strip().upper()
         if proposed:
@@ -226,7 +285,10 @@ async def complete_student_onboarding(
 
     db.add(sp)
 
-    # ── 4. Parent link ────────────────────────────────────────────────────────
+    # ── 4. user_roles (role = student) ───────────────────────────────────────
+    _insert_user_role(uid, db)
+
+    # ── 5. Parent link ────────────────────────────────────────────────────────
     parent_linked = False
     if payload.parent_code:
         code = payload.parent_code.strip().upper()
@@ -247,23 +309,42 @@ async def complete_student_onboarding(
                 ))
             parent_linked = True
 
-    # ── 5. Commit ─────────────────────────────────────────────────────────────
+    # ── 6. Main commit ────────────────────────────────────────────────────────
     try:
         db.commit()
         db.refresh(sp)
     except Exception as exc:
         db.rollback()
+        logger.error("Onboarding commit failed for %s: %s", uid, exc)
         raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
 
-    # ── 6. Welcome KP bonus (30 EP) ───────────────────────────────────────────
+    # ── 7. student_subjects + student_goals (separate transaction) ────────────
+    try:
+        if sp.subjects_interested:
+            _insert_student_subjects(uid, sp.subjects_interested, db)
+        if sp.goals:
+            _insert_student_goals(uid, sp.goals, db)
+        db.commit()
+    except Exception as exc:
+        logger.warning("student_subjects/goals insert failed for %s: %s", uid, exc)
+        db.rollback()
+
+    # ── 8. Welcome KP bonus (+30 EP) ─────────────────────────────────────────
     _award_welcome_kp(uid, db, amount=30)
 
-    # ── 7. Welcome email (non-fatal) ──────────────────────────────────────────
+    # ── 9. Welcome email (non-fatal) ──────────────────────────────────────────
     try:
         from app.workers.email_tasks import send_welcome_email
         send_welcome_email.delay(profile.email or "", profile.full_name or "")
     except Exception:
         pass
+
+    logger.info(
+        "Student onboarding complete: uid=%s code=%s subjects=%s goals=%s",
+        uid, sp.student_code,
+        sp.subjects_interested or [],
+        sp.goals or [],
+    )
 
     return {
         "student_code": sp.student_code,
@@ -280,16 +361,11 @@ async def find_parent_by_code(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Resolve a KRN-P-XXXX parent code.
-    Returns { parent_id, name } if found, 404 otherwise.
-    """
     parent_prof = db.exec(
         select(ParentProfile).where(ParentProfile.parent_code == code.strip().upper())
     ).first()
     if not parent_prof:
         raise HTTPException(status_code=404, detail="Aucun parent trouvé avec ce code.")
-
     profile = db.exec(select(Profile).where(Profile.id == parent_prof.user_id)).first()
     name = (profile.full_name or "Parent").strip() if profile else "Parent"
     return {"parent_id": str(parent_prof.user_id), "name": name}
@@ -302,7 +378,6 @@ async def get_onboarding_status(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return onboarding completion status and any missing required fields."""
     uid = UUID(current_user["id"])
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
     if profile is None:
@@ -338,10 +413,6 @@ async def get_onboarding_status(
 async def complete_onboarding_legacy(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """
-    Deprecated — use /api/onboarding/student/complete for students.
-    Kept for backward compatibility; returns a redirect hint.
-    """
     role = current_user.get("role", "student")
     return {
         "message": "This endpoint is deprecated. Use /api/onboarding/student/complete.",
