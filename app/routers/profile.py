@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.dependencies import get_current_user, get_db
-from app.models.profile import Profile, StudentProfile
+from app.dependencies import get_current_user, get_db, require_role
+from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.services.storage import upload_file
 
 router = APIRouter(tags=["profile"])
@@ -221,6 +221,81 @@ async def upload_avatar(
     db.commit()
     db.refresh(profile)
     return _to_response(profile, current_user["role"])
+
+
+@router.get("/teacher", tags=["Profile"])
+async def get_teacher_profile(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return teacher-specific profile fields (status, cover_letter, etc.)."""
+    uid = UUID(current_user["id"])
+    tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == uid)).first()
+    if tp is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    return {
+        "status": tp.status,
+        "teaching_wilaya": tp.teaching_wilaya,
+        "cv_url": tp.cv_url,
+        "cover_letter": tp.cover_letter,
+        "headline": tp.headline,
+        "experience_years": tp.experience_years,
+        "rating_avg": tp.rating_avg,
+        "reviews_count": tp.reviews_count,
+    }
+
+
+@router.post("/teacher/{teacher_user_id}/approve", tags=["Admin — Teachers"])
+async def approve_teacher(
+    teacher_user_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Approve a teacher account: set status='approved' and award 50 EP."""
+    from datetime import datetime
+    from app.models.kp import KpTransaction
+
+    tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == teacher_user_id)).first()
+    if tp is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    tp.status = "approved"
+    tp.verified = True
+    db.add(tp)
+
+    # Award 50 EP
+    try:
+        kp = KpTransaction(
+            user_id=teacher_user_id,
+            amount=50,
+            source="bonus",
+            label="Profil enseignant validé — Bienvenue sur E-NOVAR !",
+            ref_type="admin_approval",
+        )
+        db.add(kp)
+    except Exception:
+        pass
+
+    db.commit()
+    return {"status": "approved", "teacher_user_id": str(teacher_user_id)}
+
+
+@router.post("/teacher/{teacher_user_id}/reject", tags=["Admin — Teachers"])
+async def reject_teacher(
+    teacher_user_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """Reject a teacher account: set status='rejected'."""
+    tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == teacher_user_id)).first()
+    if tp is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    tp.status = "rejected"
+    tp.verified = False
+    db.add(tp)
+    db.commit()
+    return {"status": "rejected", "teacher_user_id": str(teacher_user_id)}
 
 
 @router.put("/notifications")

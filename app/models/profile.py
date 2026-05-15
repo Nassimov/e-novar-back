@@ -134,6 +134,7 @@ class TeacherProfile(SQLModel, table=True):
     status: str = Field(default="pending")                # public.teacher_status
     teaching_wilaya: Optional[str] = Field(default=None)
     cv_url: Optional[str] = Field(default=None)
+    cover_letter: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

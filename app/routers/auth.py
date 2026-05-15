@@ -518,6 +518,7 @@ async def get_me(
         full_name=profile.full_name or "",
         role=role,
         avatar_url=profile.avatar_url,
+        phone=profile.phone,
         is_verified=False,
         onboarding_completed=profile.onboarding_completed,
     )

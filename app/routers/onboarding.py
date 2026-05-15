@@ -142,14 +142,8 @@ def _upsert_level(code: str, db: Session) -> str:
     return str(result[0])
 
 
-# Frontend teaching-mode values → DB enum (teaching_mode)
-_MODE_MAP = {
-    "at_student": "presentiel",
-    "at_home": "presentiel",
-    "online": "online",
-    "hybrid": "hybrid",
-    "presentiel": "presentiel",
-}
+# Valid teaching_mode enum values (migration 008 added at_student and at_home)
+_VALID_MODES = {"online", "presentiel", "hybrid", "at_student", "at_home"}
 
 
 def _insert_user_role(uid: UUID, db: Session) -> None:
@@ -498,6 +492,8 @@ class TeacherOnboardingRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone: Optional[str] = None
+    gender: Optional[str] = None
+    birth_date: Optional[str] = None   # ISO "YYYY-MM-DD"
     wilaya: Optional[str] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
@@ -607,6 +603,13 @@ async def complete_teacher_onboarding(
         profile.last_name = data.last_name
     if data.phone:
         profile.phone = data.phone
+    if data.gender:
+        profile.gender = data.gender
+    if data.birth_date:
+        try:
+            profile.birth_date = date.fromisoformat(data.birth_date)
+        except ValueError:
+            pass
     if data.bio:
         profile.bio = data.bio
     if avatar_url:
@@ -628,6 +631,8 @@ async def complete_teacher_onboarding(
         tp.teaching_wilaya = data.teaching_wilaya
     if cv_url:
         tp.cv_url = cv_url
+    if data.cover_letter is not None:
+        tp.cover_letter = data.cover_letter
     db.add(tp)
 
     # ── 6. Main commit (profile + teacher_profile) ────────────────────────────
@@ -646,16 +651,17 @@ async def complete_teacher_onboarding(
         )
         seen_modes: set = set()
         for mode in (data.teaching_modes or []):
-            db_mode = _MODE_MAP.get(mode, mode)
-            if db_mode in seen_modes:
+            if mode not in _VALID_MODES:
                 continue
-            seen_modes.add(db_mode)
+            if mode in seen_modes:
+                continue
+            seen_modes.add(mode)
             db.execute(
                 text(
                     "INSERT INTO public.teacher_modes (teacher_id, mode) "
                     "VALUES (:tid, :mode) ON CONFLICT DO NOTHING"
                 ),
-                {"tid": str(uid), "mode": db_mode},
+                {"tid": str(uid), "mode": mode},
             )
         db.commit()
     except Exception as exc:

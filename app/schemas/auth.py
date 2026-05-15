@@ -40,6 +40,7 @@ class UserBrief(BaseModel):
     full_name: str
     role: str
     avatar_url: Optional[str] = None
+    phone: Optional[str] = None
     is_verified: bool = False
     onboarding_completed: bool = False
 

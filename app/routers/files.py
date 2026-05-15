@@ -65,11 +65,17 @@ async def delete_file_endpoint(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Delete a file from Supabase Storage by path."""
-    # Security: ensure the file belongs to this user or user is admin
+    # Security: file path must start with the user's UUID segment (exact prefix, not substring match)
     user_id = current_user["id"]
     role = current_user.get("role", "student")
 
-    if role != "admin" and user_id not in key:
+    # Normalise separators and check that the key belongs to this user.
+    # Accepted patterns: "{user_id}/...", "avatars/{user_id}/...", etc.
+    # We require the user_id to appear as a complete path segment (surrounded by '/' or at start/end).
+    import re as _re
+    owns_file = bool(_re.search(r"(^|/)" + _re.escape(user_id) + r"(/|$)", key))
+
+    if role != "admin" and not owns_file:
         raise HTTPException(
             status_code=403,
             detail="You can only delete your own files",
