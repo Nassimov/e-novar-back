@@ -114,14 +114,11 @@ def register_user_in_supabase(
 ) -> Any:
     """Register a new user and always return a valid session.
 
-    Flow:
-    1. sign_up() with anon key  → creates user + fires handle_new_user trigger.
-    2. If Supabase requires email confirmation (session is None):
-       a. Confirm the email via admin API (service_role key).
-       b. sign_in_with_password() → returns a valid session.
+    Uses admin.create_user() with email_confirm=True so Supabase never sends
+    a confirmation email (avoids the email rate limit on free plan).
+    The handle_new_user DB trigger still fires on auth.users INSERT.
     """
     from app.database import get_supabase_anon
-    client = get_supabase_anon()
     parts = full_name.strip().split(" ", 1)
     user_metadata: Dict[str, Any] = {
         "role": role,
@@ -132,28 +129,22 @@ def register_user_in_supabase(
     if phone:
         user_metadata["phone"] = phone
 
-    result = client.auth.sign_up({
+    admin_client = get_supabase_service()
+    result = admin_client.auth.admin.create_user({
         "email": email,
         "password": password,
-        "options": {"data": user_metadata},
+        "email_confirm": True,
+        "user_metadata": user_metadata,
+        "app_metadata": {"role": role},
     })
 
-    # If sign_up returned no session (email confirmation required),
-    # auto-confirm via admin API then sign in immediately.
-    if result.user and (not result.session or not getattr(result.session, "access_token", None)):
-        try:
-            admin_client = get_supabase_service()
-            admin_client.auth.admin.update_user_by_id(
-                str(result.user.id),
-                {"email_confirm": True, "app_metadata": {"role": role}},
-            )
-            login_result = client.auth.sign_in_with_password({"email": email, "password": password})
-            if login_result.session:
-                return login_result
-        except Exception as exc:
-            logger.warning("Auto-confirm fallback failed for %s: %s", email, exc)
+    if not result.user:
+        raise Exception("User creation failed")
 
-    return result
+    # Sign in with the anon client to get a valid session
+    anon_client = get_supabase_anon()
+    login_result = anon_client.auth.sign_in_with_password({"email": email, "password": password})
+    return login_result
 
 
 def login_with_supabase(email: str, password: str) -> Any:
