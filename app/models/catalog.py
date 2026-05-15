@@ -43,38 +43,38 @@ class Wilaya(SQLModel, table=True):
     name: str = Field()
 
 
-# ── Teacher junction tables ───────────────────────────────────────────────────
+# ── Teacher offerings ─────────────────────────────────────────────────────────
 
-class TeacherSubject(SQLModel, table=True):
-    """Mirrors public.teacher_subjects (many-to-many)."""
+class TeacherSubjectPrice(SQLModel, table=True):
+    """
+    Mirrors public.teacher_subject_prices.
+    Single source of truth for teacher offerings:
+      one row = teacher can teach (subject) to (level) at (prices).
 
-    __tablename__ = "teacher_subjects"
+    Replaces the old teacher_subjects + teacher_levels split which could not
+    express "teacher teaches Physics specifically to 1AS and 3AS".
 
-    teacher_id: UUID = Field(
-        foreign_key="teacher_profiles.user_id",
-        primary_key=True,
-    )
-    subject_id: UUID = Field(
-        foreign_key="subjects.id",
-        primary_key=True,
-    )
+    Useful queries:
+      - Subjects a teacher offers:       SELECT DISTINCT subject_id WHERE teacher_id = X
+      - Levels for a given subject:      SELECT level_id WHERE teacher_id = X AND subject_id = Y
+      - Full catalogue with names:       JOIN subjects s, levels l WHERE teacher_id = X
+    """
+
+    __tablename__ = "teacher_subject_prices"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    teacher_id: UUID = Field(foreign_key="teacher_profiles.user_id", index=True)
+    subject_id: UUID = Field(foreign_key="subjects.id", index=True)
+    level_id: UUID = Field(foreign_key="levels.id", index=True)
     price_single: int = Field(default=0)
     price_pack5: int = Field(default=0)
     price_monthly: int = Field(default=0)
+    active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-
-class TeacherLevel(SQLModel, table=True):
-    """Mirrors public.teacher_levels (many-to-many)."""
-
-    __tablename__ = "teacher_levels"
-
-    teacher_id: UUID = Field(
-        foreign_key="teacher_profiles.user_id",
-        primary_key=True,
-    )
-    level_id: UUID = Field(
-        foreign_key="levels.id",
-        primary_key=True,
+    __table_args__ = (
+        sa.UniqueConstraint("teacher_id", "subject_id", "level_id", name="uq_teacher_subject_level"),
     )
 
 

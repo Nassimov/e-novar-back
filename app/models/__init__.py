@@ -64,10 +64,9 @@ from app.models.catalog import (  # noqa: F401
     Level,
     Subject,
     TeacherDiploma,
-    TeacherLevel,
     TeacherMode,
     TeacherSessionType,
-    TeacherSubject,
+    TeacherSubjectPrice,
     Wilaya,
 )
 

@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.catalog import TeacherDiploma, TeacherLevel, TeacherMode, TeacherSubject
+from app.models.catalog import TeacherDiploma, TeacherMode, TeacherSubjectPrice
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import ParentProfile, Profile, StudentProfile, TeacherProfile
 
@@ -574,8 +574,7 @@ async def complete_teacher_onboarding(
       - public.profiles           (name, phone, bio, avatar_url, wilaya)
       - public.teacher_profiles   (status=pending, teaching_wilaya, cv_url, onboarding_completed=True)
       - public.teacher_modes      (teaching modes)
-      - public.teacher_subjects   (subjects with pricing)
-      - public.teacher_levels     (all unique levels)
+      - public.teacher_subject_prices (teacher×subject×level with pricing)
       - public.teacher_diplomas   (diploma records with pre-uploaded Storage URLs)
       - public.user_roles         (role = 'teacher')
     """
@@ -663,47 +662,42 @@ async def complete_teacher_onboarding(
         logger.warning("Teacher modes insert failed for %s: %s", uid, exc)
         db.rollback()
 
-    # ── 8. Subjects + levels + pricing ────────────────────────────────────────
+    # ── 8. Offerings: teacher × subject × level × pricing ────────────────────
+    # One row per (subject, level) combination in teacher_subject_prices.
+    # This replaces the old split teacher_subjects + teacher_levels tables and
+    # preserves the exact "teacher teaches Physics to 1AS and 3AS" relationship.
     try:
         db.execute(
-            text("DELETE FROM public.teacher_subjects WHERE teacher_id = :tid"),
+            text("DELETE FROM public.teacher_subject_prices WHERE teacher_id = :tid"),
             {"tid": str(uid)},
         )
-        db.execute(
-            text("DELETE FROM public.teacher_levels WHERE teacher_id = :tid"),
-            {"tid": str(uid)},
-        )
-        all_level_codes: set = set()
         for entry in (data.subjects or []):
             subj_id = _upsert_subject(entry.subject, db)
-            db.execute(
-                text(
-                    "INSERT INTO public.teacher_subjects "
-                    "(teacher_id, subject_id, price_single, price_pack5, price_monthly) "
-                    "VALUES (:tid, :sid, :ps, :pp, :pm) ON CONFLICT DO NOTHING"
-                ),
-                {
-                    "tid": str(uid),
-                    "sid": subj_id,
-                    "ps": entry.price_single or 0,
-                    "pp": entry.price_pack5 or 0,
-                    "pm": entry.price_monthly or 0,
-                },
-            )
-            all_level_codes.update(entry.levels)
-
-        for level_code in all_level_codes:
-            level_id = _upsert_level(level_code, db)
-            db.execute(
-                text(
-                    "INSERT INTO public.teacher_levels (teacher_id, level_id) "
-                    "VALUES (:tid, :lid) ON CONFLICT DO NOTHING"
-                ),
-                {"tid": str(uid), "lid": level_id},
-            )
+            for level_code in entry.levels:
+                level_id = _upsert_level(level_code, db)
+                db.execute(
+                    text(
+                        "INSERT INTO public.teacher_subject_prices "
+                        "(teacher_id, subject_id, level_id, price_single, price_pack5, price_monthly) "
+                        "VALUES (:tid, :sid, :lid, :ps, :pp, :pm) "
+                        "ON CONFLICT (teacher_id, subject_id, level_id) DO UPDATE SET "
+                        "price_single = EXCLUDED.price_single, "
+                        "price_pack5  = EXCLUDED.price_pack5, "
+                        "price_monthly = EXCLUDED.price_monthly, "
+                        "updated_at   = now()"
+                    ),
+                    {
+                        "tid": str(uid),
+                        "sid": subj_id,
+                        "lid": level_id,
+                        "ps": entry.price_single or 0,
+                        "pp": entry.price_pack5 or 0,
+                        "pm": entry.price_monthly or 0,
+                    },
+                )
         db.commit()
     except Exception as exc:
-        logger.warning("Teacher subjects/levels insert failed for %s: %s", uid, exc)
+        logger.warning("Teacher offerings insert failed for %s: %s", uid, exc)
         db.rollback()
 
     # ── 9. Diploma records ────────────────────────────────────────────────────
