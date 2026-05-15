@@ -5,9 +5,10 @@ import json
 import logging
 import random
 import re
+import unicodedata
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -86,6 +87,69 @@ def _award_welcome_kp(user_id: UUID, db: Session, amount: int = 30) -> None:
     except Exception as exc:
         logger.warning("Welcome KP bonus failed for %s: %s", user_id, exc)
         db.rollback()
+
+
+def _slugify(text: str) -> str:
+    """Convert text to a DB-safe slug: remove accents, lowercase, replace non-alphanum with _."""
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def _upsert_subject(name: str, db: Session) -> str:
+    """Get or create a subject by name (case-insensitive). Returns subject UUID as str."""
+    row = db.execute(
+        text("SELECT id FROM public.subjects WHERE LOWER(name) = LOWER(:name) LIMIT 1"),
+        {"name": name},
+    ).fetchone()
+    if row:
+        return str(row[0])
+    slug = _slugify(name)
+    # Resolve slug conflicts
+    base = slug
+    for i in range(1, 20):
+        conflict = db.execute(
+            text("SELECT 1 FROM public.subjects WHERE slug = :slug"), {"slug": slug}
+        ).fetchone()
+        if not conflict:
+            break
+        slug = f"{base}_{i}"
+    result = db.execute(
+        text(
+            "INSERT INTO public.subjects (id, slug, name, position) "
+            "VALUES (:id, :slug, :name, 99) "
+            "ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name "
+            "RETURNING id"
+        ),
+        {"id": str(uuid4()), "slug": slug, "name": name},
+    ).fetchone()
+    return str(result[0])
+
+
+def _upsert_level(code: str, db: Session) -> str:
+    """Get or create a level by code. Returns level UUID as str."""
+    result = db.execute(
+        text(
+            "INSERT INTO public.levels (id, code, label, position) "
+            "VALUES (:id, :code, :code, 99) "
+            "ON CONFLICT (code) DO UPDATE SET label = public.levels.label "
+            "RETURNING id"
+        ),
+        {"id": str(uuid4()), "code": code},
+    ).fetchone()
+    return str(result[0])
+
+
+# Frontend teaching-mode values → DB enum (teaching_mode)
+_MODE_MAP = {
+    "at_student": "presentiel",
+    "at_home": "presentiel",
+    "online": "online",
+    "hybrid": "hybrid",
+    "presentiel": "presentiel",
+}
 
 
 def _insert_user_role(uid: UUID, db: Session) -> None:
@@ -581,13 +645,18 @@ async def complete_teacher_onboarding(
             text("DELETE FROM public.teacher_modes WHERE teacher_id = :tid"),
             {"tid": str(uid)},
         )
+        seen_modes: set = set()
         for mode in (data.teaching_modes or []):
+            db_mode = _MODE_MAP.get(mode, mode)
+            if db_mode in seen_modes:
+                continue
+            seen_modes.add(db_mode)
             db.execute(
                 text(
                     "INSERT INTO public.teacher_modes (teacher_id, mode) "
                     "VALUES (:tid, :mode) ON CONFLICT DO NOTHING"
                 ),
-                {"tid": str(uid), "mode": mode},
+                {"tid": str(uid), "mode": db_mode},
             )
         db.commit()
     except Exception as exc:
@@ -606,40 +675,32 @@ async def complete_teacher_onboarding(
         )
         all_level_codes: set = set()
         for entry in (data.subjects or []):
-            subj_row = db.execute(
-                text("SELECT id FROM public.subjects WHERE name = :name LIMIT 1"),
-                {"name": entry.subject},
-            ).fetchone()
-            if subj_row:
-                db.execute(
-                    text(
-                        "INSERT INTO public.teacher_subjects "
-                        "(teacher_id, subject_id, price_single, price_pack5, price_monthly) "
-                        "VALUES (:tid, :sid, :ps, :pp, :pm) ON CONFLICT DO NOTHING"
-                    ),
-                    {
-                        "tid": str(uid),
-                        "sid": str(subj_row[0]),
-                        "ps": entry.price_single or 0,
-                        "pp": entry.price_pack5 or 0,
-                        "pm": entry.price_monthly or 0,
-                    },
-                )
+            subj_id = _upsert_subject(entry.subject, db)
+            db.execute(
+                text(
+                    "INSERT INTO public.teacher_subjects "
+                    "(teacher_id, subject_id, price_single, price_pack5, price_monthly) "
+                    "VALUES (:tid, :sid, :ps, :pp, :pm) ON CONFLICT DO NOTHING"
+                ),
+                {
+                    "tid": str(uid),
+                    "sid": subj_id,
+                    "ps": entry.price_single or 0,
+                    "pp": entry.price_pack5 or 0,
+                    "pm": entry.price_monthly or 0,
+                },
+            )
             all_level_codes.update(entry.levels)
 
         for level_code in all_level_codes:
-            level_row = db.execute(
-                text("SELECT id FROM public.levels WHERE code = :code LIMIT 1"),
-                {"code": level_code},
-            ).fetchone()
-            if level_row:
-                db.execute(
-                    text(
-                        "INSERT INTO public.teacher_levels (teacher_id, level_id) "
-                        "VALUES (:tid, :lid) ON CONFLICT DO NOTHING"
-                    ),
-                    {"tid": str(uid), "lid": str(level_row[0])},
-                )
+            level_id = _upsert_level(level_code, db)
+            db.execute(
+                text(
+                    "INSERT INTO public.teacher_levels (teacher_id, level_id) "
+                    "VALUES (:tid, :lid) ON CONFLICT DO NOTHING"
+                ),
+                {"tid": str(uid), "lid": level_id},
+            )
         db.commit()
     except Exception as exc:
         logger.warning("Teacher subjects/levels insert failed for %s: %s", uid, exc)
