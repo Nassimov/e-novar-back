@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_db, require_role
-from app.models.teacher import TeacherWithdrawal
+from app.models.teacher import TeacherPayout, TeacherWithdrawal
 from app.models.user import User
 from app.schemas.admin import WithdrawalProcessRequest
 
@@ -135,7 +135,7 @@ async def create_store_reward(
     return reward
 
 
-# Withdrawals management
+# Payout management (EP → DZD)
 @router.get("/withdrawals")
 async def list_withdrawals(
     page: int = Query(1, ge=1),
@@ -144,29 +144,31 @@ async def list_withdrawals(
     current_user: Dict[str, Any] = Depends(admin_required),
     db: Session = Depends(get_db),
 ):
-    """List all withdrawal requests."""
-    query = select(TeacherWithdrawal)
+    """List all EP→DZD payout requests."""
+    query = select(TeacherPayout)
     if status_filter:
-        query = query.where(TeacherWithdrawal.status == status_filter)
+        query = query.where(TeacherPayout.status == status_filter)
 
-    withdrawals = db.exec(query.order_by(TeacherWithdrawal.created_at.desc())).all()
-    total = len(withdrawals)
+    payouts = db.exec(query.order_by(TeacherPayout.requested_at.desc())).all()
+    total = len(payouts)
     offset = (page - 1) * size
-    paginated = withdrawals[offset: offset + size]
+    paginated = payouts[offset: offset + size]
 
     return {
         "items": [
             {
-                "id": str(w.id),
-                "teacher_id": str(w.teacher_id),
-                "amount": w.amount,
-                "status": w.status,
-                "iban": w.iban,
-                "holder": w.holder,
-                "notes": w.notes,
-                "created_at": w.created_at.isoformat(),
+                "id": str(p.id),
+                "teacher_id": str(p.teacher_id),
+                "ep_amount": p.ep_amount,
+                "dzd_amount": p.dzd_amount,
+                "status": p.status,
+                "iban": p.iban,
+                "bank_holder": p.bank_holder,
+                "admin_note": p.admin_note,
+                "requested_at": p.requested_at.isoformat(),
+                "processed_at": p.processed_at.isoformat() if p.processed_at else None,
             }
-            for w in paginated
+            for p in paginated
         ],
         "total": total,
         "page": page,
@@ -182,35 +184,44 @@ async def process_withdrawal(
     current_user: Dict[str, Any] = Depends(admin_required),
     db: Session = Depends(get_db),
 ):
-    """Process (approve or reject) a withdrawal request."""
+    """Approve or reject an EP→DZD payout request.
+    On approve: deducts EP via kp_transactions (trigger updates kp_balances).
+    """
     from datetime import datetime
 
-    withdrawal = db.get(TeacherWithdrawal, withdrawal_id)
-    if withdrawal is None:
-        raise HTTPException(status_code=404, detail="Withdrawal not found")
+    payout = db.get(TeacherPayout, withdrawal_id)
+    if payout is None:
+        raise HTTPException(status_code=404, detail="Payout request not found")
+    if payout.status != "pending":
+        raise HTTPException(status_code=400, detail="Only pending payouts can be processed")
 
     if payload.action == "approve":
-        withdrawal.status = "approved"
-        withdrawal.processed_at = datetime.utcnow()
+        if payload.dzd_amount is None:
+            raise HTTPException(status_code=400, detail="dzd_amount requis pour approuver un retrait")
+        payout.status = "approved"
+        payout.dzd_amount = payload.dzd_amount
+        payout.processed_at = datetime.utcnow()
 
-        # Deduct from teacher's wallet
-        from app.models.teacher import TeacherProfile
-        profile = db.exec(
-            select(TeacherProfile).where(TeacherProfile.user_id == withdrawal.teacher_id)
-        ).first()
-        if profile and profile.withdrawal_balance >= withdrawal.amount:
-            profile.withdrawal_balance -= withdrawal.amount
-            db.add(profile)
+        # Deduct EP from teacher's balance via kp_transactions
+        from app.models.kp import KpTransaction
+        db.add(KpTransaction(
+            user_id=payout.teacher_id,
+            amount=-payout.ep_amount,
+            source="reward",
+            label=f"Retrait EP → DZD ({payload.dzd_amount} DZD)",
+            ref_type="payout",
+            ref_id=payout.id,
+        ))
 
     elif payload.action == "reject":
-        withdrawal.status = "rejected"
-        withdrawal.processed_at = datetime.utcnow()
+        payout.status = "rejected"
+        payout.processed_at = datetime.utcnow()
     else:
-        raise HTTPException(status_code=400, detail="Invalid action. Use 'approve' or 'reject'")
+        raise HTTPException(status_code=400, detail="action invalide. Utilise 'approve' ou 'reject'")
 
-    if payload.notes:
-        withdrawal.notes = payload.notes
+    if payload.admin_note:
+        payout.admin_note = payload.admin_note
 
-    db.add(withdrawal)
+    db.add(payout)
     db.commit()
-    return {"message": f"Withdrawal {payload.action}d", "withdrawal_id": str(withdrawal_id)}
+    return {"message": f"Payout {payload.action}d", "payout_id": str(withdrawal_id)}

@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
-from app.models.teacher import TeacherProfile, TeacherSlot, TeacherWithdrawal
+from app.models.teacher import TeacherPayout, TeacherProfile, TeacherSlot
 from app.models.user import User
 from app.models.review import Review
 from app.schemas.teacher import (
@@ -410,23 +410,20 @@ async def get_wallet(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Get the teacher's wallet balance."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    """Get the teacher's EP balance and bank info."""
+    from app.models.kp import KpBalance
+    from app.models.profile import TeacherProfile as _TeacherProfile
 
-    stmt2 = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-    profile = db.exec(stmt2).first()
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    uid = UUID(current_user["id"])
+    kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
+    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == uid)).first()
 
     return {
-        "balance": profile.withdrawal_balance,
-        "currency": "DZD",
-        "bank_iban": profile.bank_iban,
-        "bank_holder": profile.bank_holder,
-        "bank_last4": profile.bank_last4,
+        "ep_balance": kp.balance if kp else 0,
+        "ep_total_earned": kp.total_earned if kp else 0,
+        "iban": tp.iban if tp else None,
+        "bank_holder": tp.bank_holder if tp else None,
+        "bank_last4": tp.bank_last4 if tp else None,
     }
 
 
@@ -435,16 +432,14 @@ async def list_withdrawals(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """List withdrawal requests for the teacher."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    withdrawals = db.exec(
-        select(TeacherWithdrawal).where(TeacherWithdrawal.teacher_id == user.id)
+    """List payout requests for the teacher."""
+    uid = UUID(current_user["id"])
+    payouts = db.exec(
+        select(TeacherPayout)
+        .where(TeacherPayout.teacher_id == uid)
+        .order_by(TeacherPayout.requested_at.desc())
     ).all()
-    return [WithdrawalResponse.model_validate(w) for w in withdrawals]
+    return [WithdrawalResponse.model_validate(p) for p in payouts]
 
 
 @router.post("/me/withdrawals", response_model=WithdrawalResponse, status_code=status.HTTP_201_CREATED)
@@ -453,33 +448,44 @@ async def request_withdrawal(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Request a withdrawal."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    """Request an EP → DZD payout. Requires at least 1 completed session."""
+    from app.models.kp import KpBalance
+    from app.models.profile import TeacherProfile as _TeacherProfile
 
-    stmt2 = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-    profile = db.exec(stmt2).first()
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    uid = UUID(current_user["id"])
 
-    if profile.withdrawal_balance < payload.amount:
-        raise HTTPException(status_code=400, detail="Insufficient wallet balance")
+    # Verify at least 1 completed session
+    from app.models.booking import Booking
+    done = db.exec(
+        select(Booking)
+        .where(Booking.teacher_id == uid)
+        .where(Booking.status == "completed")
+    ).first()
+    if done is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Au moins une séance complétée est requise avant de demander un retrait.",
+        )
 
-    iban = payload.iban or profile.bank_iban
-    holder = payload.holder or profile.bank_holder
+    # Check EP balance
+    kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
+    available = kp.balance if kp else 0
+    if available < payload.ep_amount:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solde EP insuffisant. Disponible : {available} EP.",
+        )
 
-    withdrawal = TeacherWithdrawal(
-        teacher_id=user.id,
-        amount=payload.amount,
-        iban=iban,
-        holder=holder,
+    payout = TeacherPayout(
+        teacher_id=uid,
+        ep_amount=payload.ep_amount,
+        iban=payload.iban,
+        bank_holder=payload.bank_holder,
     )
-    db.add(withdrawal)
+    db.add(payout)
     db.commit()
-    db.refresh(withdrawal)
-    return WithdrawalResponse.model_validate(withdrawal)
+    db.refresh(payout)
+    return WithdrawalResponse.model_validate(payout)
 
 
 @router.get("/me/evaluations")

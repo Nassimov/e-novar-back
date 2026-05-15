@@ -60,5 +60,6 @@ class StatsResponse(BaseModel):
 
 
 class WithdrawalProcessRequest(BaseModel):
-    action: str  # "approve" or "reject"
-    notes: Optional[str] = None
+    action: str                       # "approve" or "reject"
+    dzd_amount: Optional[int] = None  # obligatoire si action == "approve"
+    admin_note: Optional[str] = None

@@ -108,18 +108,21 @@ class DiplomaResponse(BaseModel):
 
 
 class WithdrawalRequest(BaseModel):
-    amount: int = Field(gt=0)
-    iban: Optional[str] = None
-    holder: Optional[str] = None
+    ep_amount: int = Field(gt=0, description="Nombre d'EP à convertir en DZD")
+    iban: str
+    bank_holder: str
 
 
 class WithdrawalResponse(BaseModel):
     id: UUID
-    amount: int
+    ep_amount: int
+    dzd_amount: Optional[int] = None
     status: str
-    iban: Optional[str] = None
-    holder: Optional[str] = None
-    created_at: datetime
+    iban: str
+    bank_holder: str
+    admin_note: Optional[str] = None
+    requested_at: datetime
+    processed_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 

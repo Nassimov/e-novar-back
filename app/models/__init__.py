@@ -96,8 +96,8 @@ from app.models.payment import (  # noqa: F401
     Invoice,
     Payment,
     PaymentMethod,
-    Wallet,
-    Withdrawal,
+    TeacherPayout,
+    Withdrawal,  # legacy alias → TeacherPayout
 )
 
 # Live classroom

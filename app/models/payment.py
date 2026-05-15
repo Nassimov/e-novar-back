@@ -78,33 +78,26 @@ class Invoice(SQLModel, table=True):
     issued_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-class Wallet(SQLModel, table=True):
+class TeacherPayout(SQLModel, table=True):
     """
-    Mirrors public.wallets.
-    Teacher's DZD earnings wallet. One wallet per user (PK = user_id).
-    """
-
-    __tablename__ = "wallets"
-
-    user_id: UUID = Field(primary_key=True, foreign_key="profiles.id")
-    balance: int = Field(default=0)
-    total_earned: int = Field(default=0)
-    pending_amount: int = Field(default=0)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-class Withdrawal(SQLModel, table=True):
-    """
-    Mirrors public.withdrawals.
-    Teacher requests a DZD payout to their bank account.
+    Mirrors public.teacher_payouts.
+    Teacher requests to convert EP → DZD. Admin approves and sets dzd_amount.
+    Requires at least 1 completed session (enforced at API level).
     """
 
-    __tablename__ = "withdrawals"
+    __tablename__ = "teacher_payouts"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     teacher_id: UUID = Field(foreign_key="profiles.id", index=True)
-    amount: int = Field()                                # DZD
+    ep_amount: int = Field()                             # EP à convertir
+    dzd_amount: Optional[int] = Field(default=None)     # DZD fixé par l'admin
+    iban: str = Field()
+    bank_holder: str = Field()
     status: str = Field(default="pending")               # public.withdrawal_status
-    iban: Optional[str] = Field(default=None)
+    admin_note: Optional[str] = Field(default=None)
     requested_at: datetime = Field(default_factory=datetime.utcnow)
     processed_at: Optional[datetime] = Field(default=None)
+
+
+# Legacy aliases — kept for import compatibility during transition
+Withdrawal = TeacherPayout
