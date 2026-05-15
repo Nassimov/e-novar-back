@@ -424,6 +424,12 @@ class TeacherSubjectPayload(BaseModel):
     price_monthly: Optional[int] = None
 
 
+class TeacherDiplomaUpload(BaseModel):
+    name: str
+    url: str
+    file_type: Optional[str] = None
+
+
 class TeacherOnboardingRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -435,37 +441,81 @@ class TeacherOnboardingRequest(BaseModel):
     teaching_wilaya: Optional[str] = None
     subjects: Optional[List[TeacherSubjectPayload]] = None
     cover_letter: Optional[str] = None
+    # Pre-uploaded file URLs (uploaded via /teacher/upload-document)
+    cv_url: Optional[str] = None
+    diploma_uploads: Optional[List[TeacherDiplomaUpload]] = None
+
+
+# ─────────────────────────── teacher upload-document ─────────────────────────
+
+@router.post("/teacher/upload-document")
+async def upload_teacher_document(
+    file: UploadFile = File(...),
+    doc_type: str = Form("diploma"),   # "cv" or "diploma"
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Upload a single document (CV or diploma) to Supabase Storage.
+    Returns the public URL to be stored in the teacher onboarding store.
+    CV uploads use a fixed path (overwrite on re-upload).
+    Diploma uploads use a unique path per file.
+    """
+    from app.services.storage import upload_file as _upload
+    uid = current_user["id"]
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    file_bytes = await file.read()
+    if len(file_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    if doc_type == "cv":
+        ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "pdf")
+        folder = f"documents/{uid}/cv"
+        filename = f"cv.{ext}"
+    else:
+        folder = f"documents/{uid}/diplomas"
+        filename = file.filename
+
+    try:
+        url = _upload(
+            file_bytes=file_bytes,
+            filename=filename,
+            content_type=file.content_type or "application/octet-stream",
+            folder=folder,
+        )
+    except Exception as exc:
+        logger.error("Document upload failed for %s: %s", uid, exc)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {exc}")
+
+    return {"url": url, "name": file.filename, "doc_type": doc_type}
 
 
 # ─────────────────────────── teacher complete ─────────────────────────────────
 
 @router.post("/teacher/complete")
 async def complete_teacher_onboarding(
-    payload: str = Form(...),
-    cv: Optional[UploadFile] = File(None),
-    diplomas: Optional[List[UploadFile]] = File(None),
+    payload: TeacherOnboardingRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Save ALL teacher onboarding data in one call (from the documents step).
+    Save ALL teacher onboarding data in one JSON call (from the pending page).
+
+    Files are pre-uploaded via POST /api/onboarding/teacher/upload-document.
+    This endpoint receives the resulting URLs (cv_url, diploma_uploads).
 
     Writes to:
       - public.profiles           (name, phone, bio, avatar_url, wilaya)
-      - public.teacher_profiles   (status=pending, teaching_wilaya, cv_url)
+      - public.teacher_profiles   (status=pending, teaching_wilaya, cv_url, onboarding_completed=True)
       - public.teacher_modes      (teaching modes)
       - public.teacher_subjects   (subjects with pricing)
       - public.teacher_levels     (all unique levels)
-      - public.teacher_diplomas   (diploma records with Storage URLs)
+      - public.teacher_diplomas   (diploma records with pre-uploaded Storage URLs)
       - public.user_roles         (role = 'teacher')
-
-    NOTE: onboarding_completed stays False — admin must approve via /admin/teachers/{id}/approve.
     """
-    try:
-        data = TeacherOnboardingRequest(**json.loads(payload))
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid payload: {exc}")
-
+    data = payload
     uid = UUID(current_user["id"])
 
     # ── 1. Resolve avatar ─────────────────────────────────────────────────────
@@ -474,42 +524,14 @@ async def complete_teacher_onboarding(
         uploaded = _upload_base64_avatar(avatar_url, str(uid))
         avatar_url = uploaded
 
-    # ── 2. Upload CV ──────────────────────────────────────────────────────────
-    cv_url: Optional[str] = None
-    if cv and cv.filename:
-        try:
-            from app.services.storage import upload_file as _upload
-            cv_bytes = await cv.read()
-            cv_url = _upload(
-                file_bytes=cv_bytes,
-                filename=cv.filename,
-                content_type=cv.content_type or "application/pdf",
-                folder=f"documents/{uid}/cv",
-            )
-        except Exception as exc:
-            logger.warning("CV upload failed for %s: %s", uid, exc)
+    # ── 2. CV URL (pre-uploaded) ──────────────────────────────────────────────
+    cv_url: Optional[str] = data.cv_url
 
-    # ── 3. Upload diplomas ────────────────────────────────────────────────────
-    diploma_records: List[Dict] = []
-    for diploma in (diplomas or []):
-        if not diploma.filename:
-            continue
-        try:
-            from app.services.storage import upload_file as _upload
-            diploma_bytes = await diploma.read()
-            url = _upload(
-                file_bytes=diploma_bytes,
-                filename=diploma.filename,
-                content_type=diploma.content_type or "application/octet-stream",
-                folder=f"documents/{uid}/diplomas",
-            )
-            diploma_records.append({
-                "name": diploma.filename,
-                "file_url": url,
-                "file_type": diploma.content_type,
-            })
-        except Exception as exc:
-            logger.warning("Diploma upload failed for %s: %s", uid, exc)
+    # ── 3. Diploma records (pre-uploaded) ────────────────────────────────────
+    diploma_records: List[Dict] = [
+        {"name": d.name, "file_url": d.url, "file_type": d.file_type}
+        for d in (data.diploma_uploads or [])
+    ]
 
     # ── 4. Profile ────────────────────────────────────────────────────────────
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
