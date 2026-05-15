@@ -489,22 +489,34 @@ async def get_me(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get the current authenticated user's basic info."""
+    """Get the current authenticated user's basic info.
+
+    Role is read from user_roles table (authoritative) — not from the JWT.
+    This ensures the correct role is returned immediately after onboarding
+    completes, even before the Supabase JWT is refreshed.
+    """
     from uuid import UUID
     from sqlmodel import select
-    from app.models.profile import Profile
+    from app.models.profile import Profile, UserRole
 
-    profile = db.exec(
-        select(Profile).where(Profile.id == UUID(current_user["id"]))
-    ).first()
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Role priority: admin > teacher > parent > student
+    _priority = {"admin": 4, "teacher": 3, "parent": 2, "student": 1}
+    role_rows = db.exec(select(UserRole).where(UserRole.user_id == uid)).all()
+    if role_rows:
+        role = max(role_rows, key=lambda r: _priority.get(r.role, 0)).role
+    else:
+        role = current_user["role"]  # fallback to JWT if no row yet
 
     return UserBrief(
         id=str(profile.id),
         email=profile.email or "",
         full_name=profile.full_name or "",
-        role=current_user["role"],
+        role=role,
         avatar_url=profile.avatar_url,
         is_verified=False,
         onboarding_completed=profile.onboarding_completed,
