@@ -132,6 +132,8 @@ class TeacherProfile(SQLModel, table=True):
     bank_holder: Optional[str] = Field(default=None)
     bank_last4: Optional[str] = Field(default=None)
     status: str = Field(default="pending")                # public.teacher_status
+    teaching_wilaya: Optional[str] = Field(default=None)
+    cv_url: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -147,6 +149,9 @@ class ParentProfile(SQLModel, table=True):
         default=None,
         sa_column=sa.Column(sa.String, unique=True, nullable=True),
     )
+    budget_tier: Optional[str] = Field(default=None)
+    budget_min: Optional[int] = Field(default=None)
+    budget_max: Optional[int] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

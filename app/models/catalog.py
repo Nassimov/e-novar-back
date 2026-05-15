@@ -58,6 +58,9 @@ class TeacherSubject(SQLModel, table=True):
         foreign_key="subjects.id",
         primary_key=True,
     )
+    price_single: int = Field(default=0)
+    price_pack5: int = Field(default=0)
+    price_monthly: int = Field(default=0)
 
 
 class TeacherLevel(SQLModel, table=True):

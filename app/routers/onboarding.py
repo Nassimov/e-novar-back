@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import random
 import re
@@ -8,14 +9,15 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
+from app.models.catalog import TeacherDiploma, TeacherLevel, TeacherMode, TeacherSubject
 from app.models.parent_link import ParentStudentLink
-from app.models.profile import ParentProfile, Profile, StudentProfile
+from app.models.profile import ParentProfile, Profile, StudentProfile, TeacherProfile
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["onboarding"])
@@ -88,13 +90,18 @@ def _award_welcome_kp(user_id: UUID, db: Session, amount: int = 30) -> None:
 
 def _insert_user_role(uid: UUID, db: Session) -> None:
     """Ensure (user_id, student) row exists in user_roles."""
+    _insert_role(uid, "student", db)
+
+
+def _insert_role(uid: UUID, role: str, db: Session) -> None:
+    """Idempotently insert a role into user_roles."""
     db.execute(
         text(
             "INSERT INTO public.user_roles (user_id, role) "
-            "VALUES (:uid, 'student') "
+            "VALUES (:uid, :role) "
             "ON CONFLICT (user_id, role) DO NOTHING"
         ),
-        {"uid": str(uid)},
+        {"uid": str(uid), "role": role},
     )
 
 
@@ -405,6 +412,397 @@ async def get_onboarding_status(
         role=role,
         missing_fields=missing,
     )
+
+
+# ─────────────────────────── teacher schemas ─────────────────────────────────
+
+class TeacherSubjectPayload(BaseModel):
+    subject: str
+    levels: List[str] = []
+    price_single: Optional[int] = None
+    price_pack5: Optional[int] = None
+    price_monthly: Optional[int] = None
+
+
+class TeacherOnboardingRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    wilaya: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+    teaching_modes: Optional[List[str]] = None
+    teaching_wilaya: Optional[str] = None
+    subjects: Optional[List[TeacherSubjectPayload]] = None
+    cover_letter: Optional[str] = None
+
+
+# ─────────────────────────── teacher complete ─────────────────────────────────
+
+@router.post("/teacher/complete")
+async def complete_teacher_onboarding(
+    payload: str = Form(...),
+    cv: Optional[UploadFile] = File(None),
+    diplomas: Optional[List[UploadFile]] = File(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Save ALL teacher onboarding data in one call (from the documents step).
+
+    Writes to:
+      - public.profiles           (name, phone, bio, avatar_url, wilaya)
+      - public.teacher_profiles   (status=pending, teaching_wilaya, cv_url)
+      - public.teacher_modes      (teaching modes)
+      - public.teacher_subjects   (subjects with pricing)
+      - public.teacher_levels     (all unique levels)
+      - public.teacher_diplomas   (diploma records with Storage URLs)
+      - public.user_roles         (role = 'teacher')
+
+    NOTE: onboarding_completed stays False — admin must approve via /admin/teachers/{id}/approve.
+    """
+    try:
+        data = TeacherOnboardingRequest(**json.loads(payload))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid payload: {exc}")
+
+    uid = UUID(current_user["id"])
+
+    # ── 1. Resolve avatar ─────────────────────────────────────────────────────
+    avatar_url = data.avatar_url
+    if avatar_url and avatar_url.startswith("data:"):
+        uploaded = _upload_base64_avatar(avatar_url, str(uid))
+        avatar_url = uploaded
+
+    # ── 2. Upload CV ──────────────────────────────────────────────────────────
+    cv_url: Optional[str] = None
+    if cv and cv.filename:
+        try:
+            from app.services.storage import upload_file as _upload
+            cv_bytes = await cv.read()
+            cv_url = _upload(
+                file_bytes=cv_bytes,
+                filename=cv.filename,
+                content_type=cv.content_type or "application/pdf",
+                folder=f"documents/{uid}/cv",
+            )
+        except Exception as exc:
+            logger.warning("CV upload failed for %s: %s", uid, exc)
+
+    # ── 3. Upload diplomas ────────────────────────────────────────────────────
+    diploma_records: List[Dict] = []
+    for diploma in (diplomas or []):
+        if not diploma.filename:
+            continue
+        try:
+            from app.services.storage import upload_file as _upload
+            diploma_bytes = await diploma.read()
+            url = _upload(
+                file_bytes=diploma_bytes,
+                filename=diploma.filename,
+                content_type=diploma.content_type or "application/octet-stream",
+                folder=f"documents/{uid}/diplomas",
+            )
+            diploma_records.append({
+                "name": diploma.filename,
+                "file_url": url,
+                "file_type": diploma.content_type,
+            })
+        except Exception as exc:
+            logger.warning("Diploma upload failed for %s: %s", uid, exc)
+
+    # ── 4. Profile ────────────────────────────────────────────────────────────
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if data.first_name:
+        profile.first_name = data.first_name
+    if data.last_name is not None:
+        profile.last_name = data.last_name
+    if data.phone:
+        profile.phone = data.phone
+    if data.bio:
+        profile.bio = data.bio
+    if avatar_url:
+        profile.avatar_url = avatar_url
+    if data.wilaya:
+        profile.wilaya = data.wilaya
+    profile.updated_at = datetime.utcnow()
+    db.add(profile)
+
+    # ── 5. TeacherProfile ─────────────────────────────────────────────────────
+    tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == uid)).first()
+    if tp is None:
+        tp = TeacherProfile(user_id=uid)
+
+    tp.status = "pending"
+    tp.headline = data.bio or ""
+    tp.bio_long = data.bio or ""
+    if data.teaching_wilaya:
+        tp.teaching_wilaya = data.teaching_wilaya
+    if cv_url:
+        tp.cv_url = cv_url
+    db.add(tp)
+
+    # ── 6. Main commit (profile + teacher_profile) ────────────────────────────
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Teacher onboarding profile commit failed for %s: %s", uid, exc)
+        raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
+
+    # ── 7. Teaching modes (delete + re-insert) ────────────────────────────────
+    try:
+        db.execute(
+            text("DELETE FROM public.teacher_modes WHERE teacher_id = :tid"),
+            {"tid": str(uid)},
+        )
+        for mode in (data.teaching_modes or []):
+            db.execute(
+                text(
+                    "INSERT INTO public.teacher_modes (teacher_id, mode) "
+                    "VALUES (:tid, :mode) ON CONFLICT DO NOTHING"
+                ),
+                {"tid": str(uid), "mode": mode},
+            )
+        db.commit()
+    except Exception as exc:
+        logger.warning("Teacher modes insert failed for %s: %s", uid, exc)
+        db.rollback()
+
+    # ── 8. Subjects + levels + pricing ────────────────────────────────────────
+    try:
+        db.execute(
+            text("DELETE FROM public.teacher_subjects WHERE teacher_id = :tid"),
+            {"tid": str(uid)},
+        )
+        db.execute(
+            text("DELETE FROM public.teacher_levels WHERE teacher_id = :tid"),
+            {"tid": str(uid)},
+        )
+        all_level_codes: set = set()
+        for entry in (data.subjects or []):
+            subj_row = db.execute(
+                text("SELECT id FROM public.subjects WHERE name = :name LIMIT 1"),
+                {"name": entry.subject},
+            ).fetchone()
+            if subj_row:
+                db.execute(
+                    text(
+                        "INSERT INTO public.teacher_subjects "
+                        "(teacher_id, subject_id, price_single, price_pack5, price_monthly) "
+                        "VALUES (:tid, :sid, :ps, :pp, :pm) ON CONFLICT DO NOTHING"
+                    ),
+                    {
+                        "tid": str(uid),
+                        "sid": str(subj_row[0]),
+                        "ps": entry.price_single or 0,
+                        "pp": entry.price_pack5 or 0,
+                        "pm": entry.price_monthly or 0,
+                    },
+                )
+            all_level_codes.update(entry.levels)
+
+        for level_code in all_level_codes:
+            level_row = db.execute(
+                text("SELECT id FROM public.levels WHERE code = :code LIMIT 1"),
+                {"code": level_code},
+            ).fetchone()
+            if level_row:
+                db.execute(
+                    text(
+                        "INSERT INTO public.teacher_levels (teacher_id, level_id) "
+                        "VALUES (:tid, :lid) ON CONFLICT DO NOTHING"
+                    ),
+                    {"tid": str(uid), "lid": str(level_row[0])},
+                )
+        db.commit()
+    except Exception as exc:
+        logger.warning("Teacher subjects/levels insert failed for %s: %s", uid, exc)
+        db.rollback()
+
+    # ── 9. Diploma records ────────────────────────────────────────────────────
+    try:
+        for d in diploma_records:
+            db.execute(
+                text(
+                    "INSERT INTO public.teacher_diplomas (teacher_id, name, file_url, file_type) "
+                    "VALUES (:tid, :name, :url, :ftype)"
+                ),
+                {"tid": str(uid), "name": d["name"], "url": d["file_url"], "ftype": d["file_type"]},
+            )
+        db.commit()
+    except Exception as exc:
+        logger.warning("Diploma records insert failed for %s: %s", uid, exc)
+        db.rollback()
+
+    # ── 10. user_roles ────────────────────────────────────────────────────────
+    try:
+        _insert_role(uid, "teacher", db)
+        db.commit()
+    except Exception as exc:
+        logger.warning("Teacher role insert failed for %s: %s", uid, exc)
+        db.rollback()
+
+    logger.info(
+        "Teacher onboarding submitted: uid=%s modes=%s subjects=%s diplomas=%d",
+        uid,
+        data.teaching_modes or [],
+        [s.subject for s in (data.subjects or [])],
+        len(diploma_records),
+    )
+
+    return {"status": "pending", "teacher_id": str(uid)}
+
+
+# ─────────────────────────── parent schemas ───────────────────────────────────
+
+class ParentChildPayload(BaseModel):
+    student_code: str
+    nickname: Optional[str] = None
+
+
+class ParentOnboardingRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    wilaya: Optional[str] = None
+    avatar_url: Optional[str] = None
+    children: Optional[List[ParentChildPayload]] = None
+    budget_tier: Optional[str] = None
+    budget_min: Optional[int] = None
+    budget_max: Optional[int] = None
+
+
+# ─────────────────────────── parent complete ──────────────────────────────────
+
+@router.post("/parent/complete")
+async def complete_parent_onboarding(
+    payload: ParentOnboardingRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Save ALL parent onboarding data in one call (from the welcome step).
+
+    Writes to:
+      - public.profiles              (name, phone, avatar_url, wilaya)
+      - public.parent_profiles       (parent_code, budget)
+      - public.parent_student_links  (for each matched student code)
+      - public.user_roles            (role = 'parent')
+      - public.kp_transactions       (+20 EP welcome bonus)
+
+    Sets onboarding_completed = True immediately (parents don't need admin approval).
+    """
+    uid = UUID(current_user["id"])
+
+    # ── 1. Resolve avatar ─────────────────────────────────────────────────────
+    avatar_url = payload.avatar_url
+    if avatar_url and avatar_url.startswith("data:"):
+        uploaded = _upload_base64_avatar(avatar_url, str(uid))
+        avatar_url = uploaded
+
+    # ── 2. Profile ────────────────────────────────────────────────────────────
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    if payload.first_name:
+        profile.first_name = payload.first_name
+    if payload.last_name is not None:
+        profile.last_name = payload.last_name
+    if payload.phone:
+        profile.phone = payload.phone
+    if avatar_url:
+        profile.avatar_url = avatar_url
+    if payload.wilaya:
+        profile.wilaya = payload.wilaya
+    profile.onboarding_completed = True
+    profile.updated_at = datetime.utcnow()
+    db.add(profile)
+
+    # ── 3. ParentProfile ──────────────────────────────────────────────────────
+    pp = db.exec(select(ParentProfile).where(ParentProfile.user_id == uid)).first()
+    if pp is None:
+        pp = ParentProfile(
+            user_id=uid,
+            parent_code=_generate_parent_code(db),
+        )
+
+    if payload.budget_tier:
+        pp.budget_tier = payload.budget_tier
+    if payload.budget_min is not None:
+        pp.budget_min = payload.budget_min
+    if payload.budget_max is not None:
+        pp.budget_max = payload.budget_max
+    db.add(pp)
+
+    # ── 4. Commit profile + parent_profile ────────────────────────────────────
+    try:
+        db.commit()
+        db.refresh(pp)
+    except Exception as exc:
+        db.rollback()
+        logger.error("Parent onboarding commit failed for %s: %s", uid, exc)
+        raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
+
+    # ── 5. Link children by student code ──────────────────────────────────────
+    children_linked = 0
+    try:
+        for child in (payload.children or []):
+            sp = db.exec(
+                select(StudentProfile).where(
+                    StudentProfile.student_code == child.student_code.strip().upper()
+                )
+            ).first()
+            if sp:
+                existing = db.exec(
+                    select(ParentStudentLink)
+                    .where(ParentStudentLink.parent_id == uid)
+                    .where(ParentStudentLink.student_id == sp.user_id)
+                ).first()
+                if not existing:
+                    db.add(ParentStudentLink(
+                        parent_id=uid,
+                        student_id=sp.user_id,
+                        status="accepted",
+                    ))
+                children_linked += 1
+        db.commit()
+    except Exception as exc:
+        logger.warning("Children link failed for parent %s: %s", uid, exc)
+        db.rollback()
+
+    # ── 6. user_roles ─────────────────────────────────────────────────────────
+    try:
+        _insert_role(uid, "parent", db)
+        db.commit()
+    except Exception as exc:
+        logger.warning("Parent role insert failed for %s: %s", uid, exc)
+        db.rollback()
+
+    # ── 7. Welcome KP bonus (+20 EP) ─────────────────────────────────────────
+    _award_welcome_kp(uid, db, amount=20)
+
+    # ── 8. Welcome email (non-fatal) ──────────────────────────────────────────
+    try:
+        from app.workers.email_tasks import send_welcome_email
+        send_welcome_email.delay(profile.email or "", profile.full_name or "")
+    except Exception:
+        pass
+
+    logger.info(
+        "Parent onboarding complete: uid=%s parent_code=%s children=%d",
+        uid, pp.parent_code, children_linked,
+    )
+
+    return {
+        "parent_code": pp.parent_code,
+        "children_linked": children_linked,
+        "avatar_url": profile.avatar_url,
+    }
 
 
 # ─────────────────────────── legacy no-op ────────────────────────────────────
