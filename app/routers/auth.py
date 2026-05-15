@@ -35,6 +35,7 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
             password=payload.password,
             role=payload.role,
             full_name=payload.full_name,
+            phone=payload.phone,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -50,6 +51,7 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         role=payload.role,
         first_name=parts[0],
         last_name=parts[1] if len(parts) > 1 else "",
+        phone=payload.phone,
         db=db,
     )
 

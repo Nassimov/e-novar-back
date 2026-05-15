@@ -8,6 +8,7 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=100)
     email: EmailStr
+    phone: Optional[str] = None
     password: str = Field(min_length=8, max_length=128)
     role: str = Field(default="student")
     accepted_terms: bool

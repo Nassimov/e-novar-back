@@ -26,27 +26,26 @@ def get_or_create_profile(
     role: str,
     first_name: str = "",
     last_name: str = "",
+    phone: Optional[str] = None,
     db: Session = None,
 ) -> Profile:
     """
     Fetch the profile row for `supabase_id`.
     If the Supabase trigger didn't fire yet (edge case), insert a minimal profile.
-    The handle_new_user() trigger should have already created the row and a
-    kp_balances + notification_preferences row — we do NOT duplicate those here.
+    Always updates first_name / last_name / phone when provided.
     """
     uid = UUID(supabase_id)
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
 
     if profile is None:
-        # Trigger missed — create the minimal profile manually.
         profile = Profile(
             id=uid,
             email=email,
             first_name=first_name or email.split("@")[0],
             last_name=last_name,
+            phone=phone,
         )
         db.add(profile)
-        # Register default role
         existing_role = db.exec(
             select(UserRole).where(UserRole.user_id == uid, UserRole.role == role)
         ).first()
@@ -54,6 +53,22 @@ def get_or_create_profile(
             db.add(UserRole(user_id=uid, role=role))
         db.commit()
         db.refresh(profile)
+    else:
+        # Update fields that may not have been set by the trigger
+        changed = False
+        if first_name and not profile.first_name:
+            profile.first_name = first_name
+            changed = True
+        if last_name and not profile.last_name:
+            profile.last_name = last_name
+            changed = True
+        if phone and not profile.phone:
+            profile.phone = phone
+            changed = True
+        if changed:
+            db.add(profile)
+            db.commit()
+            db.refresh(profile)
 
     return profile
 
@@ -92,28 +107,25 @@ def verify_otp(email: str, code: str) -> bool:
 
 
 def register_user_in_supabase(
-    email: str, password: str, role: str, full_name: str
+    email: str, password: str, role: str, full_name: str, phone: Optional[str] = None
 ) -> Any:
-    """Create a new user in Supabase Auth with role metadata."""
-    client = get_supabase_service()
-    # Split full_name into first/last for the profile trigger
+    """Register a new user via Supabase Auth sign_up (anon key — no admin key needed)."""
+    from app.database import get_supabase_anon
+    client = get_supabase_anon()
     parts = full_name.strip().split(" ", 1)
-    first_name = parts[0]
-    last_name = parts[1] if len(parts) > 1 else ""
-    return client.auth.admin.create_user(
-        {
-            "email": email,
-            "password": password,
-            "user_metadata": {
-                "role": role,
-                "full_name": full_name,
-                "first_name": first_name,
-                "last_name": last_name,
-            },
-            "app_metadata": {"role": role},
-            "email_confirm": True,
-        }
-    )
+    user_metadata: Dict[str, Any] = {
+        "role": role,
+        "full_name": full_name,
+        "first_name": parts[0],
+        "last_name": parts[1] if len(parts) > 1 else "",
+    }
+    if phone:
+        user_metadata["phone"] = phone
+    return client.auth.sign_up({
+        "email": email,
+        "password": password,
+        "options": {"data": user_metadata},
+    })
 
 
 def login_with_supabase(email: str, password: str) -> Any:
