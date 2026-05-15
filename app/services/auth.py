@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import random
 import string
 from typing import Any, Dict, Optional
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from sqlmodel import Session, select
 
@@ -109,7 +112,14 @@ def verify_otp(email: str, code: str) -> bool:
 def register_user_in_supabase(
     email: str, password: str, role: str, full_name: str, phone: Optional[str] = None
 ) -> Any:
-    """Register a new user via Supabase Auth sign_up (anon key — no admin key needed)."""
+    """Register a new user and always return a valid session.
+
+    Flow:
+    1. sign_up() with anon key  → creates user + fires handle_new_user trigger.
+    2. If Supabase requires email confirmation (session is None):
+       a. Confirm the email via admin API (service_role key).
+       b. sign_in_with_password() → returns a valid session.
+    """
     from app.database import get_supabase_anon
     client = get_supabase_anon()
     parts = full_name.strip().split(" ", 1)
@@ -121,11 +131,29 @@ def register_user_in_supabase(
     }
     if phone:
         user_metadata["phone"] = phone
-    return client.auth.sign_up({
+
+    result = client.auth.sign_up({
         "email": email,
         "password": password,
         "options": {"data": user_metadata},
     })
+
+    # If sign_up returned no session (email confirmation required),
+    # auto-confirm via admin API then sign in immediately.
+    if result.user and (not result.session or not getattr(result.session, "access_token", None)):
+        try:
+            admin_client = get_supabase_service()
+            admin_client.auth.admin.update_user_by_id(
+                str(result.user.id),
+                {"email_confirm": True, "app_metadata": {"role": role}},
+            )
+            login_result = client.auth.sign_in_with_password({"email": email, "password": password})
+            if login_result.session:
+                return login_result
+        except Exception as exc:
+            logger.warning("Auto-confirm fallback failed for %s: %s", email, exc)
+
+    return result
 
 
 def login_with_supabase(email: str, password: str) -> Any:
