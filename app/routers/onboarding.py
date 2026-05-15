@@ -646,6 +646,28 @@ async def complete_teacher_onboarding(
         logger.warning("Teacher role insert failed for %s: %s", uid, exc)
         db.rollback()
 
+    # ── 11. Mark onboarding complete + fix JWT role ───────────────────────────
+    # onboarding_completed = True so the teacher can access their dashboard
+    # while waiting for admin approval (status stays "pending" in teacher_profiles).
+    # Also update Supabase app_metadata.role so the next JWT refresh returns "teacher".
+    try:
+        profile_fresh = db.exec(select(Profile).where(Profile.id == uid)).first()
+        if profile_fresh:
+            profile_fresh.onboarding_completed = True
+            db.add(profile_fresh)
+            db.commit()
+    except Exception as exc:
+        logger.warning("onboarding_completed update failed for teacher %s: %s", uid, exc)
+        db.rollback()
+
+    try:
+        get_supabase_service().auth.admin.update_user_by_id(
+            str(uid),
+            {"app_metadata": {"role": "teacher"}},
+        )
+    except Exception as exc:
+        logger.warning("Supabase app_metadata role update failed for %s: %s", uid, exc)
+
     logger.info(
         "Teacher onboarding submitted: uid=%s modes=%s subjects=%s diplomas=%d",
         uid,
@@ -775,13 +797,21 @@ async def complete_parent_onboarding(
         logger.warning("Children link failed for parent %s: %s", uid, exc)
         db.rollback()
 
-    # ── 6. user_roles ─────────────────────────────────────────────────────────
+    # ── 6. user_roles + fix JWT role ──────────────────────────────────────────
     try:
         _insert_role(uid, "parent", db)
         db.commit()
     except Exception as exc:
         logger.warning("Parent role insert failed for %s: %s", uid, exc)
         db.rollback()
+
+    try:
+        get_supabase_service().auth.admin.update_user_by_id(
+            str(uid),
+            {"app_metadata": {"role": "parent"}},
+        )
+    except Exception as exc:
+        logger.warning("Supabase app_metadata role update failed for %s: %s", uid, exc)
 
     # ── 7. Welcome KP bonus (+20 EP) ─────────────────────────────────────────
     _award_welcome_kp(uid, db, amount=20)
