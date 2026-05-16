@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import math
 import uuid
+from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
+from app.models.booking import Booking, TutoringSession
+from app.models.parent_link import ParentStudentLink
+from app.models.profile import Profile
 from app.models.session import Session as SessionModel, SessionStatus
 from app.models.user import User
 from app.schemas.session import (
@@ -17,6 +22,19 @@ from app.schemas.session import (
     SessionRateRequest,
     SessionResponse,
 )
+
+
+class CancelSessionRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+def _compute_refund_pct(scheduled_at: datetime) -> int:
+    hours = (scheduled_at - datetime.utcnow()).total_seconds() / 3600
+    if hours > 24:
+        return 100
+    if hours > 6:
+        return 50
+    return 0
 
 router = APIRouter(tags=["sessions"])
 
@@ -81,34 +99,83 @@ async def get_session(
     return SessionResponse.model_validate(session)
 
 
-@router.post("/{session_id}/cancel", response_model=SessionResponse)
+@router.post("/{session_id}/cancel")
 async def cancel_session(
     session_id: UUID,
+    payload: Optional[CancelSessionRequest] = Body(None),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Cancel a session."""
-    from datetime import datetime
+    """Cancel a session.
+
+    Business rules:
+    - Students with an accepted parent link cannot cancel (403).
+    - Refund policy based on hours until session:
+        >24h → 100% refund | 6–24h → 50% | <6h → 0%
+    - Parents can cancel on behalf of linked children via
+      POST /api/parent/sessions/{session_id}/cancel.
+    - Admins can cancel any session.
+    """
+    uid = UUID(current_user["id"])
+    role = current_user.get("role", "student")
 
     session = db.get(SessionModel, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user and session.student_id != user.id and session.teacher_id != user.id:
-        if current_user.get("role") != "admin":
-            raise HTTPException(status_code=403, detail="Access denied")
+    # Authorization
+    is_student_owner = session.student_id == uid
+    is_teacher_owner = session.teacher_id == uid
+    if not is_student_owner and not is_teacher_owner and role != "admin":
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    if session.status == SessionStatus.completed:
-        raise HTTPException(status_code=400, detail="Cannot cancel a completed session")
+    # Students linked to a parent cannot self-cancel
+    if is_student_owner and role == "student":
+        parent_link = db.exec(
+            select(ParentStudentLink)
+            .where(ParentStudentLink.student_id == session.student_id)
+            .where(ParentStudentLink.status == "accepted")
+        ).first()
+        if parent_link:
+            raise HTTPException(
+                status_code=403,
+                detail="Cette séance est gérée par votre parent. Contactez-le pour l'annuler.",
+            )
 
-    session.status = SessionStatus.cancelled
-    session.updated_at = datetime.utcnow()
+    if session.status in ("completed", "cancelled"):
+        raise HTTPException(status_code=400, detail="Cannot cancel a completed or already cancelled session")
+
+    now_utc = datetime.utcnow()
+    refund_pct = _compute_refund_pct(session.scheduled_at)
+
+    # Compute amounts from booking
+    amount = 0
+    if session.booking_id:
+        booking = db.get(Booking, session.booking_id)
+        if booking:
+            amount = booking.amount
+
+    refund_amount = int(amount * refund_pct / 100)
+    teacher_payout = amount - refund_amount
+
+    session.status = "cancelled"
+    session.cancelled_by = uid
+    session.cancelled_at = now_utc
+    session.cancellation_reason = (payload.reason if payload else None)
+    session.refund_percentage = refund_pct
+    session.refund_amount = refund_amount
+    session.teacher_payout_amount = teacher_payout
     db.add(session)
     db.commit()
     db.refresh(session)
-    return SessionResponse.model_validate(session)
+
+    return {
+        "id": str(session.id),
+        "status": session.status,
+        "refund_percentage": refund_pct,
+        "refund_amount": refund_amount,
+        "teacher_payout_amount": teacher_payout,
+    }
 
 
 @router.post("/{session_id}/rate", response_model=SessionResponse)

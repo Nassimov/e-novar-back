@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, date
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.booking import TutoringSession
-from app.models.catalog import Subject
+from app.models.booking import Booking, TutoringSession
+from app.models.catalog import Level, Subject
 from app.models.homework import Homework
 from app.models.kp import KpBalance
+from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 
 router = APIRouter(tags=["Student"])
@@ -253,4 +255,146 @@ async def student_dashboard(
         upcoming_sessions=upcoming_sessions,
         homework=homework_list,
         recommended_teachers=recommended,
+    )
+
+
+# ─── Student sessions list ────────────────────────────────────────────────────
+
+class SessionListItem(BaseModel):
+    id: str
+    teacher_id: str
+    teacher_name: str
+    teacher_avatar: Optional[str] = None
+    subject: Optional[str] = None
+    level: Optional[str] = None
+    scheduled_at: str
+    duration_min: Optional[int] = None
+    mode: str
+    status: str
+    amount: int = 0
+    room_url: Optional[str] = None
+    notes_teacher: Optional[str] = None
+    summary: Optional[str] = None
+    cancellation_reason: Optional[str] = None
+    cancelled_at: Optional[str] = None
+    refund_percentage: Optional[int] = None
+    can_cancel: bool = False
+    cancel_refund: str = "none"
+
+
+class StudentSessionListResponse(BaseModel):
+    items: List[SessionListItem]
+    total: int
+    page: int
+    pages: int
+    parent_linked: bool
+
+
+@router.get("/sessions", response_model=StudentSessionListResponse)
+async def student_session_list(
+    type: str = Query("upcoming", pattern="^(upcoming|past)$"),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(current_user["id"])
+    now_utc = datetime.utcnow()
+
+    # Check parent link
+    parent_link = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.student_id == uid)
+        .where(ParentStudentLink.status == "accepted")
+    ).first()
+    parent_linked = parent_link is not None
+
+    if type == "upcoming":
+        query = (
+            select(TutoringSession)
+            .where(TutoringSession.student_id == uid)
+            .where(TutoringSession.scheduled_at >= now_utc)
+            .where(TutoringSession.status.notin_(["cancelled", "completed", "no_show"]))
+            .order_by(TutoringSession.scheduled_at)
+        )
+    else:
+        query = (
+            select(TutoringSession)
+            .where(TutoringSession.student_id == uid)
+            .where(TutoringSession.status.in_(["completed", "cancelled", "no_show"]))
+            .order_by(TutoringSession.scheduled_at.desc())
+        )
+
+    all_sessions = db.exec(query).all()
+    total = len(all_sessions)
+    offset = (page - 1) * size
+    page_sessions = all_sessions[offset: offset + size]
+
+    # Batch load related entities
+    t_ids = list({s.teacher_id for s in page_sessions})
+    teachers_map: dict[UUID, Profile] = {}
+    if t_ids:
+        tps = db.exec(select(Profile).where(Profile.id.in_(t_ids))).all()
+        teachers_map = {p.id: p for p in tps}
+
+    sub_ids = list({s.subject_id for s in page_sessions if s.subject_id})
+    subjects_map: dict[UUID, str] = {}
+    if sub_ids:
+        subs = db.exec(select(Subject).where(Subject.id.in_(sub_ids))).all()
+        subjects_map = {s.id: s.name for s in subs}
+
+    lvl_ids = list({s.level_id for s in page_sessions if s.level_id})
+    levels_map: dict[UUID, str] = {}
+    if lvl_ids:
+        lvls = db.exec(select(Level).where(Level.id.in_(lvl_ids))).all()
+        levels_map = {l.id: l.label for l in lvls}
+
+    book_ids = list({s.booking_id for s in page_sessions if s.booking_id})
+    bookings_map: dict[UUID, Booking] = {}
+    if book_ids:
+        books = db.exec(select(Booking).where(Booking.id.in_(book_ids))).all()
+        bookings_map = {b.id: b for b in books}
+
+    items: list[SessionListItem] = []
+    for s in page_sessions:
+        tp = teachers_map.get(s.teacher_id)
+        booking = bookings_map.get(s.booking_id) if s.booking_id else None
+        amount = booking.amount if booking else 0
+        duration = s.duration_min or (booking.duration_min if booking else None)
+
+        can_cancel = False
+        cancel_refund = "none"
+        if s.status in ("scheduled", "live", "waiting") and not parent_linked:
+            can_cancel = True
+            hrs = (s.scheduled_at - now_utc).total_seconds() / 3600
+            cancel_refund = "full" if hrs > 24 else ("partial" if hrs > 6 else "none")
+
+        items.append(SessionListItem(
+            id=str(s.id),
+            teacher_id=str(s.teacher_id),
+            teacher_name=(tp.full_name or "Enseignant") if tp else "Enseignant",
+            teacher_avatar=tp.avatar_url if tp else None,
+            subject=subjects_map.get(s.subject_id) if s.subject_id else None,
+            level=levels_map.get(s.level_id) if s.level_id else None,
+            scheduled_at=s.scheduled_at.isoformat(),
+            duration_min=duration,
+            mode=s.mode,
+            status=s.status,
+            amount=amount,
+            room_url=s.room_url,
+            notes_teacher=s.notes_teacher,
+            summary=s.summary,
+            cancellation_reason=s.cancellation_reason,
+            cancelled_at=s.cancelled_at.isoformat() if s.cancelled_at else None,
+            refund_percentage=s.refund_percentage,
+            can_cancel=can_cancel,
+            cancel_refund=cancel_refund,
+        ))
+
+    return StudentSessionListResponse(
+        items=items,
+        total=total,
+        page=page,
+        pages=math.ceil(total / size) if total else 0,
+        parent_linked=parent_linked,
     )

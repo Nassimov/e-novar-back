@@ -70,6 +70,14 @@ class TutoringSession(SQLModel, table=True):
     room_url: Optional[str] = Field(default=None)
     summary: Optional[str] = Field(default=None)
     notes_teacher: Optional[str] = Field(default=None)
+    # Cancellation fields (added in migration 012)
+    cancellation_reason: Optional[str] = Field(default=None)
+    cancelled_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    cancelled_at: Optional[datetime] = Field(default=None)
+    refund_percentage: Optional[int] = Field(default=None)
+    refund_amount: int = Field(default=0)
+    teacher_payout_amount: int = Field(default=0)
+    no_show: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
