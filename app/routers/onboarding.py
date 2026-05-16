@@ -436,6 +436,24 @@ async def find_parent_by_code(
     return {"parent_id": str(parent_prof.user_id), "name": name}
 
 
+# ─────────────────────────── find student by code ────────────────────────────
+
+@router.get("/parent/find-student/{code}")
+async def find_student_by_code(
+    code: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    sp = db.exec(
+        select(StudentProfile).where(StudentProfile.student_code == code.strip().upper())
+    ).first()
+    if not sp:
+        raise HTTPException(status_code=404, detail="Aucun étudiant enregistré avec ce code.")
+    profile = db.exec(select(Profile).where(Profile.id == sp.user_id)).first()
+    name = (profile.full_name or "Étudiant").strip() if profile else "Étudiant"
+    return {"student_id": str(sp.user_id), "name": name, "student_code": sp.student_code}
+
+
 # ─────────────────────────── status ──────────────────────────────────────────
 
 @router.get("/status", response_model=OnboardingStatusResponse)
@@ -767,6 +785,7 @@ async def complete_teacher_onboarding(
 class ParentChildPayload(BaseModel):
     student_code: str
     nickname: Optional[str] = None
+    slots: Optional[List[str]] = None  # ["0:morning", "2:evening", …] day:slot pairs
 
 
 class ParentOnboardingRequest(BaseModel):
@@ -853,7 +872,7 @@ async def complete_parent_onboarding(
         logger.error("Parent onboarding commit failed for %s: %s", uid, exc)
         raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
 
-    # ── 5. Link children by student code ──────────────────────────────────────
+    # ── 5. Link children by student code + save availability ──────────────────
     children_linked = 0
     try:
         for child in (payload.children or []):
@@ -875,6 +894,33 @@ async def complete_parent_onboarding(
                         status="accepted",
                     ))
                 children_linked += 1
+
+                # Persist availability slots for this child
+                if child.slots:
+                    db.execute(
+                        text(
+                            "DELETE FROM public.parent_child_availabilities "
+                            "WHERE parent_id = :pid AND student_id = :sid"
+                        ),
+                        {"pid": str(uid), "sid": str(sp.user_id)},
+                    )
+                    for slot_str in child.slots:
+                        parts = slot_str.split(":", 1)
+                        if len(parts) != 2:
+                            continue
+                        try:
+                            day_int = int(parts[0])
+                        except ValueError:
+                            continue
+                        db.execute(
+                            text(
+                                "INSERT INTO public.parent_child_availabilities "
+                                "(parent_id, student_id, day_of_week, slot) "
+                                "VALUES (:pid, :sid, :day, :slot) "
+                                "ON CONFLICT DO NOTHING"
+                            ),
+                            {"pid": str(uid), "sid": str(sp.user_id), "day": day_int, "slot": parts[1]},
+                        )
         db.commit()
     except Exception as exc:
         logger.warning("Children link failed for parent %s: %s", uid, exc)
