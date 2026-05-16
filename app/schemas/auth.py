@@ -77,6 +77,19 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
+class UpdateRoleRequest(BaseModel):
+    role: str
+    refresh_token: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        allowed = {"student", "teacher", "parent"}
+        if v not in allowed:
+            raise ValueError(f"Role must be one of: {allowed}")
+        return v
+
+
 class GoogleCallbackParams(BaseModel):
     code: str
     state: Optional[str] = None

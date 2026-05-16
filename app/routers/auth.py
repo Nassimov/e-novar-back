@@ -18,6 +18,7 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     SignInRequest,
     TokenResponse,
+    UpdateRoleRequest,
     UserBrief,
 )
 from app.services import auth as auth_service
@@ -187,6 +188,72 @@ async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_
             avatar_url=profile.avatar_url,
             is_verified=False,
             onboarding_completed=profile.onboarding_completed,
+        ),
+    )
+
+
+@router.patch("/role", response_model=TokenResponse)
+async def update_role(
+    payload: UpdateRoleRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Change the role of the currently authenticated user.
+
+    Only valid during the initial onboarding window (before onboarding_completed).
+    Updates Supabase app_metadata so the next JWT carries the correct role,
+    replaces the user_roles row, then returns a fresh TokenResponse so the
+    frontend can swap its stored tokens in one round-trip.
+    """
+    from uuid import UUID
+    from sqlmodel import delete, select
+    from app.database import get_supabase_service
+    from app.models.profile import Profile, UserRole
+
+    uid = UUID(current_user["id"])
+
+    # Guard: only allow role change before onboarding is complete
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile and profile.onboarding_completed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Role cannot be changed after onboarding is completed",
+        )
+
+    # Update Supabase metadata so future JWTs carry the new role
+    admin_client = get_supabase_service()
+    admin_client.auth.admin.update_user_by_id(
+        current_user["id"],
+        {"app_metadata": {"role": payload.role}, "user_metadata": {"role": payload.role}},
+    )
+
+    # Replace role in user_roles table
+    db.exec(delete(UserRole).where(UserRole.user_id == uid))
+    db.add(UserRole(user_id=uid, role=payload.role))
+    db.commit()
+
+    # Refresh the session so the returned JWT encodes the updated app_metadata
+    try:
+        result = auth_service.refresh_supabase_token(payload.refresh_token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+
+    supabase_user = result.user
+    if supabase_user is None:
+        raise HTTPException(status_code=401, detail="Token refresh failed")
+
+    session = result.session
+    return TokenResponse(
+        access_token=session.access_token if session else "",
+        refresh_token=session.refresh_token if session else None,
+        user=UserBrief(
+            id=str(uid),
+            email=profile.email if profile else current_user["email"],
+            full_name=profile.full_name if profile else "",
+            role=payload.role,
+            avatar_url=profile.avatar_url if profile else None,
+            is_verified=False,
+            onboarding_completed=profile.onboarding_completed if profile else False,
         ),
     )
 
