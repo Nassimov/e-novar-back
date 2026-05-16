@@ -113,19 +113,25 @@ STORE_REWARDS = [
 @router.get("/subjects")
 def get_subjects(db: Session = Depends(get_db)):
     """Return all subjects ordered by position."""
-    rows = db.execute(
-        text("SELECT name FROM public.subjects ORDER BY position, name")
-    ).fetchall()
-    subjects = [r[0] for r in rows] if rows else _FB_SUBJECTS
+    try:
+        rows = db.execute(
+            text("SELECT name FROM public.subjects ORDER BY position, name")
+        ).fetchall()
+        subjects = [r[0] for r in rows] if rows else _FB_SUBJECTS
+    except Exception:
+        subjects = _FB_SUBJECTS
     return {"subjects": subjects, "total": len(subjects)}
 
 
 @router.get("/levels")
 def get_levels(db: Session = Depends(get_db)):
     """Return school levels grouped by main category."""
-    rows = db.execute(
-        text("SELECT label, main_group FROM public.levels ORDER BY position")
-    ).fetchall()
+    try:
+        rows = db.execute(
+            text("SELECT label, main_group FROM public.levels ORDER BY position")
+        ).fetchall()
+    except Exception:
+        rows = []
 
     if not rows:
         all_levels = [lbl for g in _FB_GROUPS.values() for lbl in g]
@@ -145,20 +151,26 @@ def get_levels(db: Session = Depends(get_db)):
 @router.get("/goals")
 def get_goals(db: Session = Depends(get_db)):
     """Return learning goals ordered by position."""
-    rows = db.execute(
-        text("SELECT id, label FROM public.goal_definitions ORDER BY position")
-    ).fetchall()
-    goals = [{"id": r[0], "label": r[1]} for r in rows] if rows else _FB_GOALS
+    try:
+        rows = db.execute(
+            text("SELECT id, label FROM public.goal_definitions ORDER BY position")
+        ).fetchall()
+        goals = [{"id": r[0], "label": r[1]} for r in rows] if rows else _FB_GOALS
+    except Exception:
+        goals = _FB_GOALS
     return {"goals": goals, "total": len(goals)}
 
 
 @router.get("/wilayas")
 def get_wilayas(db: Session = Depends(get_db)):
     """Return all 58 Algerian wilayas ordered by code."""
-    rows = db.execute(
-        text("SELECT code, name FROM public.wilayas ORDER BY code")
-    ).fetchall()
-    wilayas = [{"code": r[0], "name": r[1]} for r in rows] if rows else _FB_WILAYAS
+    try:
+        rows = db.execute(
+            text("SELECT code, name FROM public.wilayas ORDER BY code")
+        ).fetchall()
+        wilayas = [{"code": str(r[0]), "name": r[1]} for r in rows] if rows else _FB_WILAYAS
+    except Exception:
+        wilayas = _FB_WILAYAS
     return {"wilayas": wilayas, "total": len(wilayas)}
 
 
