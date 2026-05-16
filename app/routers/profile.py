@@ -149,21 +149,26 @@ async def get_student_profile(
     effective_slots: Optional[List[str]] = sp.available_slots if sp else None
 
     if parent_link:
-        # Fetch union of all parents' availability for this student.
+        # Fetch all parents' availability arrays for this student and union them.
+        # Table schema (migration 002): one row per (parent_id, student_id),
+        # columns available_days int[] and available_slots text[].
         rows = db.execute(
             text(
-                "SELECT day_of_week, slot FROM public.parent_child_availabilities "
-                "WHERE student_id = :sid ORDER BY day_of_week, slot"
+                "SELECT available_slots FROM public.parent_child_availabilities "
+                "WHERE student_id = :sid"
             ),
             {"sid": str(uid)},
         ).fetchall()
-        if rows:
-            parent_defined_availability = True
-            effective_slots = [f"{r[0]}:{r[1]}" for r in rows]
-            effective_days = sorted({r[0] for r in rows})
-        else:
-            # Parent linked but hasn't defined slots yet — still lock editing.
-            parent_defined_availability = True
+        all_slots: set[str] = set()
+        for row in rows:
+            if row[0]:  # row[0] is the available_slots text[] or None
+                all_slots.update(row[0])
+        parent_defined_availability = True  # lock editing whenever a parent link exists
+        if all_slots:
+            effective_slots = sorted(all_slots)
+            effective_days = sorted(
+                {int(s.split(":")[0]) for s in all_slots if ":" in s and s.split(":")[0].isdigit()}
+            )
 
     return StudentFullProfileResponse(
         id=str(profile.id),

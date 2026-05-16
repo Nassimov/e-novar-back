@@ -905,36 +905,35 @@ async def complete_parent_onboarding(
         db.rollback()
 
     # ── 5b. Persist availability slots (non-fatal — isolated transaction) ──────
-    # Runs in its own try/except so a missing table or constraint violation
-    # can never roll back the parent_student_links saved above.
+    # The table schema (from migration 002) stores ONE ROW per (parent_id, student_id)
+    # with ARRAY columns: available_days int[], available_slots text[].
+    # Slots arrive as ["0:morning", "2:evening", …] — stored verbatim in available_slots;
+    # the unique day indices are extracted for available_days.
     for parent_id_str, student_id_str, slots in linked_pairs:
         if not slots:
             continue
         try:
+            valid_slots = [s for s in slots if len(s.split(":", 1)) == 2]
+            if not valid_slots:
+                continue
+            days = sorted({int(s.split(":", 1)[0]) for s in valid_slots if s.split(":", 1)[0].isdigit()})
             db.execute(
                 text(
-                    "DELETE FROM public.parent_child_availabilities "
-                    "WHERE parent_id = :pid AND student_id = :sid"
+                    "INSERT INTO public.parent_child_availabilities "
+                    "    (parent_id, student_id, available_days, available_slots) "
+                    "VALUES (:pid, :sid, :days, :slots) "
+                    "ON CONFLICT (parent_id, student_id) DO UPDATE SET "
+                    "    available_days  = EXCLUDED.available_days, "
+                    "    available_slots = EXCLUDED.available_slots, "
+                    "    updated_at      = now()"
                 ),
-                {"pid": parent_id_str, "sid": student_id_str},
+                {
+                    "pid": parent_id_str,
+                    "sid": student_id_str,
+                    "days": days,
+                    "slots": valid_slots,
+                },
             )
-            for slot_str in slots:
-                parts = slot_str.split(":", 1)
-                if len(parts) != 2:
-                    continue
-                try:
-                    day_int = int(parts[0])
-                except ValueError:
-                    continue
-                db.execute(
-                    text(
-                        "INSERT INTO public.parent_child_availabilities "
-                        "(parent_id, student_id, day_of_week, slot) "
-                        "VALUES (:pid, :sid, :day, :slot) "
-                        "ON CONFLICT DO NOTHING"
-                    ),
-                    {"pid": parent_id_str, "sid": student_id_str, "day": day_int, "slot": parts[1]},
-                )
             db.commit()
         except Exception as exc:
             logger.warning(
