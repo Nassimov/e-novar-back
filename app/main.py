@@ -298,6 +298,7 @@ from app.routers.admin.content import router as admin_content_router
 from app.routers.admin.stats import router as admin_stats_router
 from app.routers.student_dashboard import router as student_dashboard_router
 from app.routers.student_homework import router as student_homework_router
+from app.routers.student_teachers import router as student_teachers_router
 
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
@@ -319,6 +320,7 @@ app.include_router(parent_router,        prefix="/api/parent",         tags=["Pa
 app.include_router(files_router,         prefix="/api/files",          tags=["Files"])
 app.include_router(student_dashboard_router, prefix="/api/student",    tags=["Student"])
 app.include_router(student_homework_router,  prefix="/api/student",    tags=["Student"])
+app.include_router(student_teachers_router,  prefix="/api/student",    tags=["Student"])
 
 app.include_router(admin_users_router,      prefix="/api/admin/users",      tags=["Admin — Users"])
 app.include_router(admin_teachers_router,   prefix="/api/admin/teachers",   tags=["Admin — Teachers"])
