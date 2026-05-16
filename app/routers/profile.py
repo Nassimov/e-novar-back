@@ -6,9 +6,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
+from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.services.storage import upload_file
 
@@ -112,6 +114,8 @@ class StudentFullProfileResponse(BaseModel):
     budget_max: Optional[int] = None
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
+    # True when an active parent link exists — student cannot edit availability
+    parent_defined_availability: bool = False
 
 
 @router.get("/student", response_model=StudentFullProfileResponse, tags=["Profile"])
@@ -119,13 +123,48 @@ async def get_student_profile(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Return the full profile + student-specific fields for the authenticated student."""
+    """Return the full profile + student-specific fields for the authenticated student.
+
+    When the student has at least one accepted parent link, the effective
+    availability comes from parent_child_availabilities (parent-defined, read-only).
+    The student's own student_profiles.available_* columns are never touched.
+    """
     uid = UUID(current_user["id"])
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
     birth = str(profile.birth_date) if profile.birth_date else None
+
+    # ── Determine effective availability ─────────────────────────────────────
+    # Check for any accepted parent link for this student.
+    parent_link = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.student_id == uid)
+        .where(ParentStudentLink.status == "accepted")
+    ).first()
+
+    parent_defined_availability = False
+    effective_days: Optional[List[int]] = sp.available_days if sp else None
+    effective_slots: Optional[List[str]] = sp.available_slots if sp else None
+
+    if parent_link:
+        # Fetch union of all parents' availability for this student.
+        rows = db.execute(
+            text(
+                "SELECT day_of_week, slot FROM public.parent_child_availabilities "
+                "WHERE student_id = :sid ORDER BY day_of_week, slot"
+            ),
+            {"sid": str(uid)},
+        ).fetchall()
+        if rows:
+            parent_defined_availability = True
+            effective_slots = [f"{r[0]}:{r[1]}" for r in rows]
+            effective_days = sorted({r[0] for r in rows})
+        else:
+            # Parent linked but hasn't defined slots yet — still lock editing.
+            parent_defined_availability = True
+
     return StudentFullProfileResponse(
         id=str(profile.id),
         email=profile.email or "",
@@ -149,8 +188,9 @@ async def get_student_profile(
         budget_tier=sp.budget_tier if sp else None,
         budget_min=sp.budget_min if sp else None,
         budget_max=sp.budget_max if sp else None,
-        available_days=sp.available_days if sp else None,
-        available_slots=sp.available_slots if sp else None,
+        available_days=effective_days,
+        available_slots=effective_slots,
+        parent_defined_availability=parent_defined_availability,
     )
 
 
