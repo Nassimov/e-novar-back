@@ -128,10 +128,11 @@ async def student_teachers_search(
         lev_code_map = {l.id: l.code for l in levs}
         lev_label_map = {l.id: l.label for l in levs}
 
-    # Build per-teacher dicts (unique ordered lists)
+    # Build per-teacher dicts (unique ordered lists) + minimum price from subject prices
     teacher_subjects: dict[UUID, list[str]] = {}
     teacher_level_codes: dict[UUID, list[str]] = {}
     teacher_level_labels: dict[UUID, list[str]] = {}
+    teacher_min_price: dict[UUID, int] = {}
 
     for r in sp_all:
         tid = r.teacher_id
@@ -144,6 +145,10 @@ async def student_teachers_search(
             teacher_level_codes.setdefault(tid, []).append(lc)
         if ll and ll not in teacher_level_labels.get(tid, []):
             teacher_level_labels.setdefault(tid, []).append(ll)
+        # Track minimum price_single across all subject/level combos
+        if r.price_single > 0:
+            if tid not in teacher_min_price or r.price_single < teacher_min_price[tid]:
+                teacher_min_price[tid] = r.price_single
 
     # 5. Subject filter
     if subject:
@@ -272,7 +277,7 @@ async def student_teachers_search(
             wilaya=tp.teaching_wilaya or p.wilaya,
             bio=tp.bio_long or p.bio,
             headline=tp.headline,
-            price_per_session=tp.price_per_session,
+            price_per_session=teacher_min_price.get(tid) or tp.price_per_session,
             rating_avg=round(tp.rating_avg, 1),
             reviews_count=tp.reviews_count,
             verified=tp.verified,
