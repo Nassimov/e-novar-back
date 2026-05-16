@@ -872,8 +872,11 @@ async def complete_parent_onboarding(
         logger.error("Parent onboarding commit failed for %s: %s", uid, exc)
         raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
 
-    # ── 5. Link children by student code + save availability ──────────────────
+    # ── 5a. Link children by student code (critical — own transaction) ──────────
     children_linked = 0
+    # Collect (parent_id, student_id) pairs that were successfully linked so we
+    # can persist their availability slots in a separate, non-fatal transaction.
+    linked_pairs: list[tuple[str, str, list[str]]] = []
     try:
         for child in (payload.children or []):
             sp = db.exec(
@@ -881,50 +884,64 @@ async def complete_parent_onboarding(
                     StudentProfile.student_code == child.student_code.strip().upper()
                 )
             ).first()
-            if sp:
-                existing = db.exec(
-                    select(ParentStudentLink)
-                    .where(ParentStudentLink.parent_id == uid)
-                    .where(ParentStudentLink.student_id == sp.user_id)
-                ).first()
-                if not existing:
-                    db.add(ParentStudentLink(
-                        parent_id=uid,
-                        student_id=sp.user_id,
-                        status="accepted",
-                    ))
-                children_linked += 1
-
-                # Persist availability slots for this child
-                if child.slots:
-                    db.execute(
-                        text(
-                            "DELETE FROM public.parent_child_availabilities "
-                            "WHERE parent_id = :pid AND student_id = :sid"
-                        ),
-                        {"pid": str(uid), "sid": str(sp.user_id)},
-                    )
-                    for slot_str in child.slots:
-                        parts = slot_str.split(":", 1)
-                        if len(parts) != 2:
-                            continue
-                        try:
-                            day_int = int(parts[0])
-                        except ValueError:
-                            continue
-                        db.execute(
-                            text(
-                                "INSERT INTO public.parent_child_availabilities "
-                                "(parent_id, student_id, day_of_week, slot) "
-                                "VALUES (:pid, :sid, :day, :slot) "
-                                "ON CONFLICT DO NOTHING"
-                            ),
-                            {"pid": str(uid), "sid": str(sp.user_id), "day": day_int, "slot": parts[1]},
-                        )
+            if not sp:
+                continue
+            existing = db.exec(
+                select(ParentStudentLink)
+                .where(ParentStudentLink.parent_id == uid)
+                .where(ParentStudentLink.student_id == sp.user_id)
+            ).first()
+            if not existing:
+                db.add(ParentStudentLink(
+                    parent_id=uid,
+                    student_id=sp.user_id,
+                    status="accepted",
+                ))
+            children_linked += 1
+            linked_pairs.append((str(uid), str(sp.user_id), child.slots or []))
         db.commit()
     except Exception as exc:
         logger.warning("Children link failed for parent %s: %s", uid, exc)
         db.rollback()
+
+    # ── 5b. Persist availability slots (non-fatal — isolated transaction) ──────
+    # Runs in its own try/except so a missing table or constraint violation
+    # can never roll back the parent_student_links saved above.
+    for parent_id_str, student_id_str, slots in linked_pairs:
+        if not slots:
+            continue
+        try:
+            db.execute(
+                text(
+                    "DELETE FROM public.parent_child_availabilities "
+                    "WHERE parent_id = :pid AND student_id = :sid"
+                ),
+                {"pid": parent_id_str, "sid": student_id_str},
+            )
+            for slot_str in slots:
+                parts = slot_str.split(":", 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    day_int = int(parts[0])
+                except ValueError:
+                    continue
+                db.execute(
+                    text(
+                        "INSERT INTO public.parent_child_availabilities "
+                        "(parent_id, student_id, day_of_week, slot) "
+                        "VALUES (:pid, :sid, :day, :slot) "
+                        "ON CONFLICT DO NOTHING"
+                    ),
+                    {"pid": parent_id_str, "sid": student_id_str, "day": day_int, "slot": parts[1]},
+                )
+            db.commit()
+        except Exception as exc:
+            logger.warning(
+                "Availability save failed for parent=%s student=%s: %s",
+                parent_id_str, student_id_str, exc,
+            )
+            db.rollback()
 
     # ── 6. user_roles + fix JWT role ──────────────────────────────────────────
     try:
