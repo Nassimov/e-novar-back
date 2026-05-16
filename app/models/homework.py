@@ -43,8 +43,11 @@ class Homework(SQLModel, table=True):
     )
     due_at: Optional[datetime] = Field(default=None)
     due_label: Optional[str] = Field(default=None)
+    subject_name: Optional[str] = Field(default=None)   # free-text, added migration 013
+    kp_reward: int = Field(default=50)                  # added migration 013
     status: str = Field(default="todo")                  # public.homework_status
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = Field(default=None)  # added migration 013
 
 
 class HomeworkSubmission(SQLModel, table=True):
