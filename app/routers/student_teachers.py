@@ -47,7 +47,8 @@ class TeacherSearchItem(BaseModel):
     levels: List[str]
     modes: List[str]
     session_types: List[str]
-    lesson_formats: List[str]  # lesson formats offered across all subjects
+    lesson_formats: List[str]  # lesson formats offered across all subjects (flat)
+    subject_formats: Dict[str, str]  # subject_name → dominant lesson format
 
 
 class TeacherSearchResponse(BaseModel):
@@ -141,12 +142,25 @@ async def student_teachers_search(
         lev_code_map = {l.id: l.code for l in levs}
         lev_label_map = {l.id: l.label for l in levs}
 
+    def _dominant_format(fmts: set[str]) -> str:
+        """Collapse a set of lesson_format values to a single representative string."""
+        clean = fmts - {"both"}
+        if not clean or "both" in fmts:
+            return "both"
+        if clean == {"individual"}:
+            return "individual"
+        if clean == {"group"}:
+            return "group"
+        return "both"  # mixed individual+group → treat as both
+
     # Build per-teacher dicts (unique ordered lists) + minimum price from subject prices
     teacher_subjects: dict[UUID, list[str]] = {}
     teacher_level_codes: dict[UUID, list[str]] = {}
     teacher_level_labels: dict[UUID, list[str]] = {}
     teacher_min_price: dict[UUID, int] = {}
     teacher_lesson_formats: dict[UUID, set[str]] = {}
+    # subject_name → set of lesson_format values, per teacher
+    teacher_subject_formats: dict[UUID, dict[str, set[str]]] = {}
 
     for r in sp_all:
         tid = r.teacher_id
@@ -163,9 +177,11 @@ async def student_teachers_search(
         if r.price_single > 0:
             if tid not in teacher_min_price or r.price_single < teacher_min_price[tid]:
                 teacher_min_price[tid] = r.price_single
-        # Collect lesson formats offered (may be "both", "individual", "group")
+        # Collect lesson formats — flat set and per-subject set
         fmt = getattr(r, "lesson_format", "both") or "both"
         teacher_lesson_formats.setdefault(tid, set()).add(fmt)
+        if sn:
+            teacher_subject_formats.setdefault(tid, {}).setdefault(sn, set()).add(fmt)
 
     # 5. Subject filter
     if subject:
@@ -315,6 +331,10 @@ async def student_teachers_search(
             modes=teacher_modes.get(tid, []),
             session_types=teacher_stypes.get(tid, []),
             lesson_formats=sorted(teacher_lesson_formats.get(tid, {"both"})),
+            subject_formats={
+                sn: _dominant_format(fmts)
+                for sn, fmts in teacher_subject_formats.get(tid, {}).items()
+            },
         ))
 
     return TeacherSearchResponse(items=items, total=len(items))
