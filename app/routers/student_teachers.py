@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
 from app.models.catalog import Level, Subject, TeacherMode, TeacherSessionType, TeacherSubjectPrice
-from app.models.profile import Profile, TeacherProfile
+from app.models.profile import Profile, StudentProfile, TeacherProfile
 
 router = APIRouter(tags=["Student"])
 
@@ -47,6 +47,7 @@ class TeacherSearchItem(BaseModel):
     levels: List[str]
     modes: List[str]
     session_types: List[str]
+    lesson_formats: List[str]  # lesson formats offered across all subjects
 
 
 class TeacherSearchResponse(BaseModel):
@@ -68,6 +69,18 @@ async def student_teachers_search(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # 0. Load requesting student's lesson format preference (optional — non-fatal)
+    uid = UUID(current_user["id"])
+    student_lesson_format: Optional[str] = None
+    try:
+        sp_student = db.exec(
+            select(StudentProfile).where(StudentProfile.user_id == uid)
+        ).first()
+        if sp_student:
+            student_lesson_format = sp_student.lesson_format
+    except Exception:
+        pass
+
     # 1. All approved teachers
     all_tp = db.exec(
         select(TeacherProfile).where(TeacherProfile.status == "approved")
@@ -133,6 +146,7 @@ async def student_teachers_search(
     teacher_level_codes: dict[UUID, list[str]] = {}
     teacher_level_labels: dict[UUID, list[str]] = {}
     teacher_min_price: dict[UUID, int] = {}
+    teacher_lesson_formats: dict[UUID, set[str]] = {}
 
     for r in sp_all:
         tid = r.teacher_id
@@ -149,6 +163,9 @@ async def student_teachers_search(
         if r.price_single > 0:
             if tid not in teacher_min_price or r.price_single < teacher_min_price[tid]:
                 teacher_min_price[tid] = r.price_single
+        # Collect lesson formats offered (may be "both", "individual", "group")
+        fmt = getattr(r, "lesson_format", "both") or "both"
+        teacher_lesson_formats.setdefault(tid, set()).add(fmt)
 
     # 5. Subject filter
     if subject:
@@ -248,16 +265,25 @@ async def student_teachers_search(
     for st in stypes_all:
         teacher_stypes.setdefault(st.teacher_id, []).append(st.type)
 
-    # 13. Sort: sponsored first, then by ranking score (rating × reviews + verified bonus)
-    def rank_score(tp: TeacherProfile) -> float:
+    # 13. Sort: sponsored first, then by ranking score
+    def _format_compatible(tid: UUID) -> bool:
+        if not student_lesson_format or student_lesson_format == "both":
+            return True
+        fmts = teacher_lesson_formats.get(tid, {"both"})
+        return "both" in fmts or student_lesson_format in fmts
+
+    def rank_score(tid: UUID) -> float:
+        tp = tp_map[tid]
         s = tp.rating_avg * max(tp.reviews_count, 1)
         if tp.verified:
             s += 5.0
+        if _format_compatible(tid):
+            s += 3.0  # soft boost for lesson format match
         return s
 
     teacher_ids_sorted = sorted(
         teacher_ids,
-        key=lambda tid: (1 if tp_map[tid].sponsored else 0, rank_score(tp_map[tid])),
+        key=lambda tid: (1 if tp_map[tid].sponsored else 0, rank_score(tid)),
         reverse=True,
     )
 
@@ -288,6 +314,7 @@ async def student_teachers_search(
             levels=teacher_level_labels.get(tid, []),
             modes=teacher_modes.get(tid, []),
             session_types=teacher_stypes.get(tid, []),
+            lesson_formats=sorted(teacher_lesson_formats.get(tid, {"both"})),
         ))
 
     return TeacherSearchResponse(items=items, total=len(items))

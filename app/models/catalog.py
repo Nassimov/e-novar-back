@@ -69,6 +69,7 @@ class TeacherSubjectPrice(SQLModel, table=True):
     price_single: int = Field(default=0)
     price_pack5: int = Field(default=0)
     price_monthly: int = Field(default=0)
+    lesson_format: str = Field(default="both")  # "individual" | "group" | "both"
     active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

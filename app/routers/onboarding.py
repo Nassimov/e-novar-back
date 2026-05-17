@@ -235,6 +235,7 @@ class StudentOnboardingRequest(BaseModel):
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
     parent_code: Optional[str] = None
+    lesson_format: Optional[str] = None  # "individual" | "group" | "both"
 
 
 class OnboardingStatusResponse(BaseModel):
@@ -347,6 +348,8 @@ async def complete_student_onboarding(
         sp.available_days = payload.available_days
     if payload.available_slots is not None:
         sp.available_slots = payload.available_slots
+    if payload.lesson_format is not None:
+        sp.lesson_format = payload.lesson_format
 
     db.add(sp)
 
@@ -498,6 +501,7 @@ class TeacherSubjectPayload(BaseModel):
     price_single: Optional[int] = None
     price_pack5: Optional[int] = None
     price_monthly: Optional[int] = None
+    lesson_format: str = "both"  # "individual" | "group" | "both"
 
 
 class TeacherDiplomaUpload(BaseModel):
@@ -702,12 +706,13 @@ async def complete_teacher_onboarding(
                 db.execute(
                     text(
                         "INSERT INTO public.teacher_subject_prices "
-                        "(teacher_id, subject_id, level_id, price_single, price_pack5, price_monthly) "
-                        "VALUES (:tid, :sid, :lid, :ps, :pp, :pm) "
+                        "(teacher_id, subject_id, level_id, price_single, price_pack5, price_monthly, lesson_format) "
+                        "VALUES (:tid, :sid, :lid, :ps, :pp, :pm, :lf) "
                         "ON CONFLICT (teacher_id, subject_id, level_id) DO UPDATE SET "
                         "price_single = EXCLUDED.price_single, "
                         "price_pack5  = EXCLUDED.price_pack5, "
                         "price_monthly = EXCLUDED.price_monthly, "
+                        "lesson_format = EXCLUDED.lesson_format, "
                         "updated_at   = now()"
                     ),
                     {
@@ -717,6 +722,7 @@ async def complete_teacher_onboarding(
                         "ps": entry.price_single or 0,
                         "pp": entry.price_pack5 or 0,
                         "pm": entry.price_monthly or 0,
+                        "lf": entry.lesson_format or "both",
                     },
                 )
         db.commit()

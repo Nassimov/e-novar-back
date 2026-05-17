@@ -106,6 +106,7 @@ class StudentProfile(SQLModel, table=True):
         default=None,
         sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="{}"),
     )
+    lesson_format: Optional[str] = Field(default=None)  # "individual" | "group" | "both"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
