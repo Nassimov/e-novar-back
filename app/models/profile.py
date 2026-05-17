@@ -139,6 +139,10 @@ class TeacherProfile(SQLModel, table=True):
         sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="'{}'"),
     )
     teaching_nationwide: bool = Field(default=False)
+    languages: Optional[List[str]] = Field(
+        default=None,
+        sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="'{}'"),
+    )
     cv_url: Optional[str] = Field(default=None)
     cover_letter: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)

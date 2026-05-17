@@ -523,6 +523,7 @@ class TeacherOnboardingRequest(BaseModel):
     teaching_wilaya: Optional[str] = None
     teaching_wilayas: Optional[List[str]] = None
     teaching_nationwide: Optional[bool] = None
+    languages: Optional[List[str]] = None
     subjects: Optional[List[TeacherSubjectPayload]] = None
     cover_letter: Optional[str] = None
     # Pre-uploaded file URLs (uploaded via /teacher/upload-document)
@@ -657,6 +658,8 @@ async def complete_teacher_onboarding(
         tp.teaching_wilayas = data.teaching_wilayas
     if data.teaching_nationwide is not None:
         tp.teaching_nationwide = data.teaching_nationwide
+    if data.languages is not None:
+        tp.languages = data.languages
     if cv_url:
         tp.cv_url = cv_url
     if data.cover_letter is not None:

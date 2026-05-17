@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
+from datetime import date as dt_date
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -49,6 +50,7 @@ class TeacherSearchItem(BaseModel):
     session_types: List[str]
     lesson_formats: List[str]  # lesson formats offered across all subjects (flat)
     subject_formats: Dict[str, str]  # subject_name → dominant lesson format
+    languages: List[str] = []
 
 
 class TeacherSearchResponse(BaseModel):
@@ -67,12 +69,16 @@ async def student_teachers_search(
     price_min: Optional[int] = Query(None),
     price_max: Optional[int] = Query(None),
     min_rating: Optional[float] = Query(None),
+    language: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),   # ISO "YYYY-MM-DD"
+    date_to:   Optional[str] = Query(None),   # ISO "YYYY-MM-DD"
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     # Parse comma-separated multi-value params
     wilaya_list: list[str] = [w.strip() for w in (wilaya or "").split(",") if w.strip()]
     level_list: list[str] = [l.strip() for l in (level or "").split(",") if l.strip()]
+    language_list: list[str] = [l.strip().lower() for l in (language or "").split(",") if l.strip()]
 
     # 0. Load requesting student's lesson format preference (optional — non-fatal)
     uid = UUID(current_user["id"])
@@ -266,6 +272,46 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
+    # 10b. Language filter
+    if language_list:
+        teacher_ids = [
+            tid for tid in teacher_ids
+            if any(
+                lang in (getattr(tp_map[tid], "languages", None) or [])
+                for lang in language_list
+            )
+        ]
+        if not teacher_ids:
+            return TeacherSearchResponse(items=[], total=0)
+
+    # 10c. Date availability filter
+    if date_from or date_to:
+        from app.models.scheduling import TeacherSlot
+        try:
+            slot_query = select(TeacherSlot).where(
+                TeacherSlot.teacher_id.in_(teacher_ids),
+                TeacherSlot.status == "open",
+            )
+            if date_from:
+                try:
+                    slot_query = slot_query.where(TeacherSlot.slot_date >= dt_date.fromisoformat(date_from))
+                except ValueError:
+                    pass
+            if date_to:
+                try:
+                    slot_query = slot_query.where(TeacherSlot.slot_date <= dt_date.fromisoformat(date_to))
+                except ValueError:
+                    pass
+            open_slots = db.exec(slot_query).all()
+            teachers_with_slots = {s.teacher_id for s in open_slots}
+            if teachers_with_slots:
+                # Only filter if some teachers have slots — graceful fallback if table is empty
+                teacher_ids = [tid for tid in teacher_ids if tid in teachers_with_slots]
+                if not teacher_ids:
+                    return TeacherSearchResponse(items=[], total=0)
+        except Exception:
+            pass  # graceful: date filter is best-effort
+
     # 11. Free-text query filter (name, headline, or subject match)
     if q and q.strip():
         norm_q = _norm(q.strip())
@@ -352,6 +398,7 @@ async def student_teachers_search(
                 sn: _dominant_format(fmts)
                 for sn, fmts in teacher_subject_formats.get(tid, {}).items()
             },
+            languages=getattr(tp_map.get(tid), "languages", None) or [],
         ))
 
     return TeacherSearchResponse(items=items, total=len(items))
