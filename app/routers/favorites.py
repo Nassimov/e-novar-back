@@ -12,7 +12,7 @@ from app.models.catalog import Subject, TeacherSubjectPrice
 from app.models.profile import Profile, TeacherProfile
 from app.models.review import Favorite
 
-router = APIRouter(tags=["Student"], redirect_slashes=False)
+router = APIRouter(tags=["Student"])
 
 
 class FavoriteTeacher(BaseModel):
