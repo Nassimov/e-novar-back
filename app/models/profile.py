@@ -134,6 +134,11 @@ class TeacherProfile(SQLModel, table=True):
     bank_last4: Optional[str] = Field(default=None)
     status: str = Field(default="pending")                # public.teacher_status
     teaching_wilaya: Optional[str] = Field(default=None)
+    teaching_wilayas: Optional[List[str]] = Field(
+        default=None,
+        sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="'{}'"),
+    )
+    teaching_nationwide: bool = Field(default=False)
     cv_url: Optional[str] = Field(default=None)
     cover_letter: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)

@@ -143,7 +143,7 @@ def _upsert_level(code: str, db: Session) -> str:
 
 
 # Valid teaching_mode enum values (migration 008 added at_student and at_home)
-_VALID_MODES = {"online", "presentiel", "hybrid", "at_student", "at_home"}
+_VALID_MODES = {"online", "presentiel", "at_student", "at_home"}
 
 
 def _insert_user_role(uid: UUID, db: Session) -> None:
@@ -521,6 +521,8 @@ class TeacherOnboardingRequest(BaseModel):
     avatar_url: Optional[str] = None
     teaching_modes: Optional[List[str]] = None
     teaching_wilaya: Optional[str] = None
+    teaching_wilayas: Optional[List[str]] = None
+    teaching_nationwide: Optional[bool] = None
     subjects: Optional[List[TeacherSubjectPayload]] = None
     cover_letter: Optional[str] = None
     # Pre-uploaded file URLs (uploaded via /teacher/upload-document)
@@ -651,6 +653,10 @@ async def complete_teacher_onboarding(
     tp.bio_long = data.bio or ""
     if data.teaching_wilaya:
         tp.teaching_wilaya = data.teaching_wilaya
+    if data.teaching_wilayas is not None:
+        tp.teaching_wilayas = data.teaching_wilayas
+    if data.teaching_nationwide is not None:
+        tp.teaching_nationwide = data.teaching_nationwide
     if cv_url:
         tp.cv_url = cv_url
     if data.cover_letter is not None:

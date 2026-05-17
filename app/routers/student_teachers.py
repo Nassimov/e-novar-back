@@ -70,6 +70,10 @@ async def student_teachers_search(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Parse comma-separated multi-value params
+    wilaya_list: list[str] = [w.strip() for w in (wilaya or "").split(",") if w.strip()]
+    level_list: list[str] = [l.strip() for l in (level or "").split(",") if l.strip()]
+
     # 0. Load requesting student's lesson format preference (optional — non-fatal)
     uid = UUID(current_user["id"])
     student_lesson_format: Optional[str] = None
@@ -193,16 +197,15 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 6. Level group filter
-    if level:
-        target_codes = LEVEL_GROUP_CODES.get(level, [])
-        norm_codes = {_norm(c) for c in target_codes}
+    # 6. Level group filter (supports multiple comma-separated levels)
+    if level_list:
+        norm_codes: set[str] = set()
+        for lv in level_list:
+            for code in LEVEL_GROUP_CODES.get(lv, []):
+                norm_codes.add(_norm(code))
         teacher_ids = [
             tid for tid in teacher_ids
-            if any(
-                _norm(c) in norm_codes
-                for c in teacher_level_codes.get(tid, [])
-            )
+            if any(_norm(c) in norm_codes for c in teacher_level_codes.get(tid, []))
         ]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
@@ -213,16 +216,30 @@ async def student_teachers_search(
     ).all()
     prof_map: dict[UUID, Profile] = {p.id: p for p in profiles}
 
-    # 8. Wilaya filter (match teaching_wilaya or home wilaya)
-    if wilaya:
-        norm_wil = _norm(wilaya)
-        teacher_ids = [
-            tid for tid in teacher_ids
-            if (
-                _norm(tp_map[tid].teaching_wilaya or "") == norm_wil
-                or _norm((prof_map.get(tid) and prof_map[tid].wilaya) or "") == norm_wil
-            )
-        ]
+    # 8. Wilaya filter — multi-wilaya: teacher matches if any requested wilaya is covered
+    if wilaya_list:
+        norm_wilayas = {_norm(w) for w in wilaya_list}
+
+        def _teacher_serves_any_wilaya(tid: UUID) -> bool:
+            tp = tp_map[tid]
+            # Nationwide coverage (at_student with no wilaya restriction)
+            if getattr(tp, "teaching_nationwide", False):
+                return True
+            # at_student: check multi-wilaya array
+            tw_arr = getattr(tp, "teaching_wilayas", None) or []
+            if tw_arr:
+                if any(_norm(w) in norm_wilayas for w in tw_arr):
+                    return True
+            # at_home / legacy: single teaching_wilaya field
+            if _norm(tp.teaching_wilaya or "") in norm_wilayas:
+                return True
+            # Profile home wilaya
+            p = prof_map.get(tid)
+            if p and _norm(p.wilaya or "") in norm_wilayas:
+                return True
+            return False
+
+        teacher_ids = [tid for tid in teacher_ids if _teacher_serves_any_wilaya(tid)]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
