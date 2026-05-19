@@ -193,15 +193,17 @@ async def student_teachers_search(
         if sn:
             teacher_subject_formats.setdefault(tid, {}).setdefault(sn, set()).add(fmt)
 
-    # 5. Subject filter
+    # 5. Subject filter — comma-separated list, OR logic (teacher matches any requested subject)
     if subject:
-        norm_sub = _norm(subject)
-        teacher_ids = [
-            tid for tid in teacher_ids
-            if any(_norm(s) == norm_sub for s in teacher_subjects.get(tid, []))
-        ]
-        if not teacher_ids:
-            return TeacherSearchResponse(items=[], total=0)
+        subject_list = [s.strip() for s in subject.split(",") if s.strip()]
+        if subject_list:
+            norm_subs = {_norm(s) for s in subject_list}
+            teacher_ids = [
+                tid for tid in teacher_ids
+                if any(_norm(s) in norm_subs for s in teacher_subjects.get(tid, []))
+            ]
+            if not teacher_ids:
+                return TeacherSearchResponse(items=[], total=0)
 
     # 6. Level group filter (supports multiple comma-separated levels)
     if level_list:
