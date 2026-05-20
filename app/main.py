@@ -175,6 +175,15 @@ TAGS_METADATA = [
         "description": "Admin: platform KPIs — total users, revenue, sessions completed, average rating, activity feed.",
     },
     {
+        "name": "Admin — Questions",
+        "description": (
+            "Admin: full question-bank management. "
+            "Create, edit, soft-delete, restore, and bulk-import questions (CSV/JSON). "
+            "Validation workflow: draft → pending_review → approved | rejected. "
+            "Analytics endpoint for usage, error-rate, and subject coverage."
+        ),
+    },
+    {
         "name": "Health",
         "description": "Service health check — used by Railway's health probe.",
     },
@@ -300,6 +309,7 @@ from app.routers.student_dashboard import router as student_dashboard_router
 from app.routers.student_homework import router as student_homework_router
 from app.routers.student_teachers import router as student_teachers_router
 from app.routers.student_practice import router as student_practice_router
+from app.routers.admin.questions import router as admin_questions_router
 
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
@@ -331,6 +341,7 @@ app.include_router(admin_challenges_router, prefix="/api/admin/challenges", tags
 app.include_router(admin_promos_router,     prefix="/api/admin/promos",     tags=["Admin — Promos"])
 app.include_router(admin_content_router,    prefix="/api/admin/content",    tags=["Admin — Content"])
 app.include_router(admin_stats_router,      prefix="/api/admin/stats",      tags=["Admin — Stats"])
+app.include_router(admin_questions_router,  prefix="/api/admin/questions",  tags=["Admin — Questions"])
 
 
 # ── Custom OpenAPI schema (adds Bearer security globally) ─────────────────────

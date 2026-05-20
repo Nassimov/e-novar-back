@@ -45,6 +45,14 @@ class Question(SQLModel, table=True):
     active:     bool     = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # ── Admin workflow (added migration 022) ──────────────────────────────────
+    validation_status:  str               = Field(default="draft")  # draft | pending_review | approved | rejected
+    created_by:         Optional[UUID]    = Field(default=None)
+    reviewed_by:        Optional[UUID]    = Field(default=None)
+    reviewed_at:        Optional[datetime] = Field(default=None)
+    rejection_reason:   Optional[str]     = Field(default=None)
+    deleted_at:         Optional[datetime] = Field(default=None)
+    deleted_by:         Optional[UUID]    = Field(default=None)
 
 
 class QuestionChoice(SQLModel, table=True):
@@ -80,7 +88,7 @@ class QuizAttempt(SQLModel, table=True):
     started_at:   datetime          = Field(default_factory=datetime.utcnow)
     completed_at: Optional[datetime] = Field(default=None)
     completed:    bool              = Field(default=False)
-    # Anti-abuse audit trail
+    # Anti-abuse audit trail (added migration 021)
     ep_multiplier: float            = Field(default=1.0)
     fraud_flag:    bool             = Field(default=False)
     fraud_reason:  Optional[str]    = Field(default=None)
@@ -117,3 +125,22 @@ class StudentSubjectMastery(SQLModel, table=True):
     correct_count:   int      = Field(default=0)
     last_attempted:  Optional[datetime] = Field(default=None)
     updated_at:      datetime = Field(default_factory=datetime.utcnow)
+
+
+class QuestionImportBatch(SQLModel, table=True):
+    __tablename__ = "question_import_batches"
+
+    id:             UUID     = Field(default_factory=uuid4, primary_key=True)
+    created_by:     Optional[UUID] = Field(default=None)
+    filename:       str      = Field()
+    source_format:  str      = Field(default="csv")   # csv | json | xlsx
+    total_rows:     int      = Field(default=0)
+    imported_count: int      = Field(default=0)
+    error_count:    int      = Field(default=0)
+    status:         str      = Field(default="processing")  # processing | done | partial | failed
+    errors:         Any      = Field(
+        default=None,
+        sa_column=sa.Column(sa.JSON, nullable=False, server_default="[]"),
+    )
+    created_at:     datetime = Field(default_factory=datetime.utcnow)
+    completed_at:   Optional[datetime] = Field(default=None)
