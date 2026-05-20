@@ -544,9 +544,9 @@ async def start_quiz(
 ):
     uid = UUID(current_user["id"])
 
-    if payload.difficulty not in DIFFICULTY_BASE_EP:
+    if payload.difficulty not in DIFFICULTY_MULTIPLIER:
         raise HTTPException(status_code=422, detail="Difficulté invalide.")
-    if payload.question_count not in COUNT_MULTIPLIER:
+    if payload.question_count not in (5, 10, 20, 40):
         raise HTTPException(status_code=422, detail="Nombre de questions invalide.")
 
     try:
@@ -567,7 +567,7 @@ async def start_quiz(
         a.completed_at = datetime.utcnow()
         db.add(a)
 
-    # Fetch eligible questions (active + validated)
+    # Fetch eligible questions (active + validated + not soft-deleted)
     all_qs = db.exec(
         select(Question).where(
             Question.subject_id      == subject_id,
@@ -575,6 +575,7 @@ async def start_quiz(
             Question.difficulty      == payload.difficulty,
             Question.active          == True,    # noqa: E712
             Question.validated       == True,    # noqa: E712
+            Question.deleted_at.is_(None),
         )
     ).all()
 
