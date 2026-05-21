@@ -9,6 +9,32 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 
+class LeaderboardRankSnapshot(SQLModel, table=True):
+    """
+    Mirrors public.leaderboard_rank_snapshots.
+    Caches a user's computed rank for a given period/audience/sort combination.
+    Written by GET /api/student/leaderboard as a fire-and-forget side-effect.
+    """
+
+    __tablename__ = "leaderboard_rank_snapshots"
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "period_type", "period_key", "audience", "sort_by", "user_id",
+            name="uq_lb_snap",
+        ),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    period_type: str = Field()       # 'weekly' | 'monthly' | 'global'
+    period_key: str = Field()        # '2026-W21' | '2026-05' | 'all'
+    audience: str = Field()          # 'students' | 'teachers'
+    sort_by: str = Field()           # 'kp' | 'sessions' | 'rating'
+    user_id: UUID = Field(foreign_key="profiles.id", index=True)
+    rank: int = Field()
+    score: float = Field()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class StudentMonthlySnapshot(SQLModel, table=True):
     """
     One row per student per calendar month.

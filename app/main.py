@@ -311,6 +311,7 @@ from app.routers.student_teachers import router as student_teachers_router
 from app.routers.student_practice import router as student_practice_router
 from app.routers.student_progress import router as student_progress_router
 from app.routers.student_badges import router as student_badges_router
+from app.routers.student_leaderboard import router as student_leaderboard_router
 from app.routers.admin.questions import router as admin_questions_router
 
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
@@ -336,7 +337,8 @@ app.include_router(student_homework_router,  prefix="/api/student",    tags=["St
 app.include_router(student_teachers_router,  prefix="/api/student",    tags=["Student"])
 app.include_router(student_practice_router,  prefix="/api/student",    tags=["Student"])
 app.include_router(student_progress_router,  prefix="/api/student",    tags=["Student"])
-app.include_router(student_badges_router,    prefix="/api/student",    tags=["Student"])
+app.include_router(student_badges_router,      prefix="/api/student",    tags=["Student"])
+app.include_router(student_leaderboard_router, prefix="/api/student",    tags=["Student"])
 
 app.include_router(admin_users_router,      prefix="/api/admin/users",      tags=["Admin — Users"])
 app.include_router(admin_teachers_router,   prefix="/api/admin/teachers",   tags=["Admin — Teachers"])
