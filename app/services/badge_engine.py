@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlmodel import Session, func, select
 
+from app.models.booking import TutoringSession
 from app.models.gamification import Badge, UserBadge
 from app.models.homework import Homework, HomeworkGrade
 from app.models.kp import KpBalance
@@ -17,13 +18,13 @@ from app.models.referral import Referral
 # ─── Stats dataclass ──────────────────────────────────────────────────────────
 
 class StudentStats:
-    sessions_completed: int      = 0
+    sessions_completed: int      = 0   # real tutoring sessions with a teacher
     streak_days: int             = 0
     perfect_quizzes: int         = 0
     ep_total: int                = 0
     homework_submitted: int      = 0
-    homework_high_score: int     = 0  # homeworks graded ≥ 18/20
-    night_sessions: int          = 0  # quiz sessions completed after 21:00
+    homework_high_score: int     = 0   # homeworks graded ≥ 18/20
+    night_sessions: int          = 0   # real tutoring sessions scheduled after 21:00
     referrals_validated: int     = 0
     subject_hours: Dict[str, float] = None  # slug → hours
 
@@ -36,32 +37,36 @@ class StudentStats:
 def compute_student_stats(student_id: UUID, db: Session) -> StudentStats:
     stats = StudentStats()
 
-    # ── 1. sessions_completed (quiz attempts) ─────────────────────────────────
+    # ── 1. sessions_completed — REAL completed tutoring sessions only ──────────
+    # Must be status='completed' in the sessions table (set by the Supabase
+    # booking-completed trigger). Practice quizzes do NOT count.
     stats.sessions_completed = int(db.exec(
-        select(func.count(QuizAttempt.id)).where(
-            QuizAttempt.student_id == student_id,
-            QuizAttempt.completed  == True,   # noqa: E712
+        select(func.count(TutoringSession.id)).where(
+            TutoringSession.student_id == student_id,
+            TutoringSession.status     == "completed",
         )
     ).one() or 0)
 
-    # ── 2. perfect_quizzes (100 % score) ─────────────────────────────────────
+    # ── 2. perfect_quizzes (100 % score on practice quizzes) ─────────────────
     stats.perfect_quizzes = int(db.exec(
         select(func.count(QuizAttempt.id)).where(
-            QuizAttempt.student_id    == student_id,
-            QuizAttempt.completed     == True,   # noqa: E712
+            QuizAttempt.student_id       == student_id,
+            QuizAttempt.completed        == True,   # noqa: E712
             QuizAttempt.score_percentage == 100.0,
         )
     ).one() or 0)
 
-    # ── 3. night_sessions (completed after 21:00 local time, using UTC) ───────
-    night_attempts = db.exec(
-        select(QuizAttempt.completed_at).where(
-            QuizAttempt.student_id == student_id,
-            QuizAttempt.completed  == True,   # noqa: E712
-            QuizAttempt.completed_at.isnot(None),
+    # ── 3. night_sessions — real tutoring sessions scheduled after 21:00 UTC ──
+    # Uses scheduled_at (the agreed session start time) from the sessions table.
+    # Practice quizzes completed late do NOT count.
+    night_sessions_rows = db.exec(
+        select(TutoringSession.scheduled_at).where(
+            TutoringSession.student_id == student_id,
+            TutoringSession.status     == "completed",
+            TutoringSession.scheduled_at.isnot(None),
         )
     ).all()
-    stats.night_sessions = sum(1 for ts in night_attempts if ts and ts.hour >= 21)
+    stats.night_sessions = sum(1 for ts in night_sessions_rows if ts and ts.hour >= 21)
 
     # ── 4. ep_total (lifetime earned) ────────────────────────────────────────
     bal = db.exec(
@@ -112,7 +117,6 @@ def compute_student_stats(student_id: UUID, db: Session) -> StudentStats:
 
     # ── 8. subject_hours (from TutoringSession, completed sessions) ───────────
     try:
-        from app.models.booking import TutoringSession
         from app.models.catalog import Subject
         sessions = db.exec(
             select(TutoringSession).where(
@@ -160,9 +164,9 @@ def _compute_streak(activity_dates: Set[date]) -> int:
 
 
 def _session_hours(sess: Any) -> float:
-    """Estimate session duration in hours from scheduled_at + duration_minutes or defaults."""
+    """Estimate session duration in hours. TutoringSession uses duration_min."""
     try:
-        minutes = getattr(sess, "duration_minutes", None) or getattr(sess, "duration", None)
+        minutes = getattr(sess, "duration_min", None)
         if minutes and isinstance(minutes, (int, float)):
             return float(minutes) / 60.0
     except Exception:
