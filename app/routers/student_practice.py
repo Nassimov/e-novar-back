@@ -823,6 +823,13 @@ async def submit_quiz(
     if attempt.subject_id:
         _upsert_mastery(uid, attempt.subject_id, attempt.school_level_id, correct_count, attempt.total_questions, db)
 
+    # Check badge conditions after each quiz submission
+    try:
+        from app.services.badge_engine import check_and_unlock_badges
+        check_and_unlock_badges(uid, db)
+    except Exception:
+        pass  # Never break quiz submission for badge errors
+
     db.commit()
 
     return SubmitQuizResponse(

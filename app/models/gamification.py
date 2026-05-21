@@ -11,8 +11,8 @@ from sqlmodel import Field, SQLModel
 class Badge(SQLModel, table=True):
     """
     Mirrors public.badges.
-    Text PK (slug-like, e.g. 'first_session', 'streak_7').
-    Static catalogue managed by admins.
+    Text PK (slug-like, e.g. 'first-lesson', 'streak-7').
+    Static catalogue seeded by migration 025_badge_catalog.sql.
     """
 
     __tablename__ = "badges"
@@ -22,15 +22,23 @@ class Badge(SQLModel, table=True):
     description: Optional[str] = Field(default=None)
     condition: Optional[str] = Field(default=None)
     icon: Optional[str] = Field(default=None)
-    tier: str = Field()                                  # public.badge_tier
-    category: str = Field()                              # public.badge_category
+    tier: str = Field()                                  # bronze | silver | gold | platinum
+    category: str = Field()                              # Apprentissage | Régularité | Excellence | Communauté
+
+    # migration 025 — condition engine fields
+    condition_type: Optional[str] = Field(default=None)        # sessions_completed | streak_days | …
+    condition_threshold: Optional[int] = Field(default=None)   # numeric goal
+    condition_subject_slug: Optional[str] = Field(default=None)
+    ep_reward: int = Field(default=50)
+    sort_order: int = Field(default=0)
+    active: bool = Field(default=True)
 
 
 class UserBadge(SQLModel, table=True):
     """
     Mirrors public.user_badges.
     UNIQUE on (user_id, badge_id) — a user earns each badge at most once.
-    progress_current / progress_total track incremental badge progress.
+    viewed_at IS NULL means the unlock animation has not been shown yet.
     """
 
     __tablename__ = "user_badges"
@@ -41,6 +49,7 @@ class UserBadge(SQLModel, table=True):
     unlocked_at: datetime = Field(default_factory=datetime.utcnow)
     progress_current: int = Field(default=0)
     progress_total: Optional[int] = Field(default=None)
+    viewed_at: Optional[datetime] = Field(default=None)  # migration 025 — NULL = unseen animation
 
     __table_args__ = (
         sa.UniqueConstraint("user_id", "badge_id", name="uq_user_badge"),
