@@ -12,6 +12,8 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
 from app.models.gamification import Challenge, ChallengeParticipation, ChallengeProofFile
+from app.models.notification import Notification
+from app.models.profile import UserRole
 
 router = APIRouter(tags=["challenges"])
 
@@ -133,18 +135,6 @@ class ChallengesListResponse(BaseModel):
 
 class HistoryOut(BaseModel):
     participations: List[dict]
-
-
-# ── Request-upload input/output schemas ───────────────────────────────────────
-
-class FileMetadataIn(BaseModel):
-    name: str
-    size: int
-    mime_type: str
-
-
-class RequestUploadPayload(BaseModel):
-    files: List[FileMetadataIn]
 
 
 # ── Submit proof input schema (pure JSON — files as base64) ──────────────────
@@ -410,55 +400,6 @@ async def decline_challenge(
     return None
 
 
-@router.post("/{challenge_id}/request-upload")
-def request_upload(
-    challenge_id: str,
-    payload: RequestUploadPayload,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Return presigned Supabase upload URLs so the browser can upload files directly.
-    No file bytes go through Railway — only metadata validation + URL generation."""
-    from app.services.storage import generate_proof_upload_url
-
-    user_id = UUID(current_user["id"])
-    role = current_user.get("role", "student")
-    now = datetime.utcnow()
-
-    part = db.exec(
-        select(ChallengeParticipation).where(
-            ChallengeParticipation.challenge_id == challenge_id,
-            ChallengeParticipation.user_id == user_id,
-        )
-    ).first()
-
-    if part is None:
-        raise HTTPException(status_code=404, detail="Participation introuvable")
-    if part.status != "in_progress":
-        raise HTTPException(status_code=400, detail="Ce défi n'est pas en cours")
-    if part.deadline_at and part.deadline_at < now:
-        raise HTTPException(status_code=400, detail="La durée du défi est expirée")
-
-    if not payload.files:
-        raise HTTPException(status_code=422, detail="Au moins un fichier de preuve est requis")
-    if len(payload.files) > MAX_FILES:
-        raise HTTPException(status_code=422, detail=f"Maximum {MAX_FILES} fichiers autorisés")
-
-    uploads = []
-    for f in payload.files:
-        _validate_upload(f.name, f.mime_type, f.size)
-        result = generate_proof_upload_url(f.name, role, str(user_id), challenge_id)
-        uploads.append({
-            "signed_url": result["signed_url"],
-            "path": result["path"],
-            "original_filename": f.name,
-            "mime_type": f.mime_type,
-            "file_size_bytes": f.size,
-        })
-
-    return {"uploads": uploads}
-
-
 @router.post("/{challenge_id}/submit")
 def submit_proof(
     challenge_id: str,
@@ -586,5 +527,21 @@ def submit_proof(
     db.add(part)
     db.commit()
     db.refresh(part)
+
+    # Notify all admins of the new submission
+    try:
+        admin_roles = db.exec(
+            select(UserRole).where(UserRole.role == "admin")
+        ).all()
+        for ar in admin_roles:
+            db.add(Notification(
+                user_id=ar.user_id,
+                type="system",
+                title="Nouvelle soumission de défi",
+                body=f"Une preuve a été soumise pour le défi « {challenge.title} ».",
+            ))
+        db.commit()
+    except Exception:
+        pass
 
     return _participation_out(part, db)
