@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -131,6 +131,34 @@ class ChallengesListResponse(BaseModel):
 
 class HistoryOut(BaseModel):
     participations: List[dict]
+
+
+# ── Request-upload input/output schemas ───────────────────────────────────────
+
+class FileMetadataIn(BaseModel):
+    name: str
+    size: int
+    mime_type: str
+
+
+class RequestUploadPayload(BaseModel):
+    files: List[FileMetadataIn]
+
+
+# ── Submit proof input schema (JSON, no multipart) ────────────────────────────
+
+class ProofPathIn(BaseModel):
+    path: str
+    original_filename: str
+    mime_type: str
+    file_size_bytes: int
+
+
+class SubmitProofPayload(BaseModel):
+    proof_paths: List[ProofPathIn] = []
+    proof_message: Optional[str] = None
+    proof_text: Optional[str] = None
+    proof_url_link: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -380,20 +408,67 @@ async def decline_challenge(
     return None
 
 
-@router.post("/{challenge_id}/submit")
-async def submit_proof(
+@router.post("/{challenge_id}/request-upload")
+def request_upload(
     challenge_id: str,
-    proof_files: List[UploadFile] = File(default=[]),
-    proof_message: Optional[str] = Form(None),
-    proof_text: Optional[str] = Form(None),
-    proof_url_link: Optional[str] = Form(None),
+    payload: RequestUploadPayload,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    from app.services.storage import delete_challenge_proof, upload_challenge_proof
+    """Return presigned Supabase upload URLs so the browser can upload files directly.
+    No file bytes go through Railway — only metadata validation + URL generation."""
+    from app.services.storage import generate_proof_upload_url
 
     user_id = UUID(current_user["id"])
     role = current_user.get("role", "student")
+    now = datetime.utcnow()
+
+    part = db.exec(
+        select(ChallengeParticipation).where(
+            ChallengeParticipation.challenge_id == challenge_id,
+            ChallengeParticipation.user_id == user_id,
+        )
+    ).first()
+
+    if part is None:
+        raise HTTPException(status_code=404, detail="Participation introuvable")
+    if part.status != "in_progress":
+        raise HTTPException(status_code=400, detail="Ce défi n'est pas en cours")
+    if part.deadline_at and part.deadline_at < now:
+        raise HTTPException(status_code=400, detail="La durée du défi est expirée")
+
+    if not payload.files:
+        raise HTTPException(status_code=422, detail="Au moins un fichier de preuve est requis")
+    if len(payload.files) > MAX_FILES:
+        raise HTTPException(status_code=422, detail=f"Maximum {MAX_FILES} fichiers autorisés")
+
+    uploads = []
+    for f in payload.files:
+        _validate_upload(f.name, f.mime_type, f.size)
+        result = generate_proof_upload_url(f.name, role, str(user_id), challenge_id)
+        uploads.append({
+            "signed_url": result["signed_url"],
+            "path": result["path"],
+            "original_filename": f.name,
+            "mime_type": f.mime_type,
+            "file_size_bytes": f.size,
+        })
+
+    return {"uploads": uploads}
+
+
+@router.post("/{challenge_id}/submit")
+def submit_proof(
+    challenge_id: str,
+    payload: SubmitProofPayload,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Record a submitted proof (files already uploaded to Supabase by the browser).
+    Accepts pure JSON — no multipart/FormData, no file bytes through Railway."""
+    from app.services.storage import delete_challenge_proof
+
+    user_id = UUID(current_user["id"])
     now = datetime.utcnow()
 
     part = db.exec(
@@ -420,41 +495,27 @@ async def submit_proof(
     pt = challenge.proof_type or "image-or-pdf"
 
     if pt == "text":
-        if not proof_text or not proof_text.strip():
+        if not payload.proof_text or not payload.proof_text.strip():
             raise HTTPException(status_code=422, detail="Le texte de preuve est requis")
-        part.proof_url = f"text::{proof_text.strip()}"
+        part.proof_url = f"text::{payload.proof_text.strip()}"
         part.proof_name = "text-proof"
 
     elif pt == "url":
-        if not proof_url_link or not proof_url_link.strip():
+        if not payload.proof_url_link or not payload.proof_url_link.strip():
             raise HTTPException(status_code=422, detail="L'URL de preuve est requise")
-        url = proof_url_link.strip()
+        url = payload.proof_url_link.strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(status_code=422, detail="L'URL doit commencer par http:// ou https://")
         part.proof_url = url
         part.proof_name = "url-proof"
 
     else:
-        # File-based proof (image / pdf / image-or-pdf / any)
-        actual_files = [f for f in proof_files if f.filename and f.filename.strip()]
-
-        if not actual_files:
+        if not payload.proof_paths:
             raise HTTPException(status_code=422, detail="Au moins un fichier de preuve est requis")
+        if len(payload.proof_paths) > MAX_FILES:
+            raise HTTPException(status_code=422, detail=f"Maximum {MAX_FILES} fichiers autorisés")
 
-        if len(actual_files) > MAX_FILES:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Maximum {MAX_FILES} fichiers autorisés",
-            )
-
-        # Read all file contents first (detect size before upload)
-        file_data: list[tuple[UploadFile, bytes, str]] = []
-        for f in actual_files:
-            content = await f.read()
-            mime = _validate_upload(f.filename or "", f.content_type, len(content))
-            file_data.append((f, content, mime))
-
-        # Delete previous proof files if re-submitting (idempotent replacement)
+        # Delete old proof files (idempotent re-submission)
         old_files = db.exec(
             select(ChallengeProofFile).where(
                 ChallengeProofFile.participation_id == part.id
@@ -465,72 +526,25 @@ async def submit_proof(
             db.delete(old)
         db.flush()
 
-        first_path: Optional[str] = None
-        first_name: Optional[str] = None
-
-        try:
-            for i, (upload, content, mime) in enumerate(file_data):
-                storage_path = upload_challenge_proof(
-                    content,
-                    upload.filename or f"proof-{i}",
-                    mime,
-                    role,
-                    str(user_id),
-                    challenge_id,
-                )
-                pf = ChallengeProofFile(
-                    participation_id=part.id,
-                    storage_path=storage_path,
-                    original_filename=upload.filename or f"proof-{i}",
-                    mime_type=mime,
-                    file_size_bytes=len(content),
-                    sort_order=i,
-                )
-                db.add(pf)
-                if first_path is None:
-                    first_path = storage_path
-                    first_name = upload.filename
-        except Exception as exc:
-            db.rollback()
-            raise HTTPException(
-                status_code=500,
-                detail=f"Échec de l'upload des fichiers : {exc}",
+        for i, fp in enumerate(payload.proof_paths):
+            pf = ChallengeProofFile(
+                participation_id=part.id,
+                storage_path=fp.path,
+                original_filename=fp.original_filename,
+                mime_type=fp.mime_type,
+                file_size_bytes=fp.file_size_bytes,
+                sort_order=i,
             )
+            db.add(pf)
 
-        part.proof_url = first_path
-        part.proof_name = first_name
+        part.proof_url = payload.proof_paths[0].path
+        part.proof_name = payload.proof_paths[0].original_filename
 
-    # Capture values before commit so the retry path can use them without lazy-loads
-    _part_id = str(part.id)
-    _proof_url = part.proof_url
-    _proof_name = part.proof_name
-
-    # Commit participation update — proof_message is optional; if the column doesn't
-    # exist yet (migration pending), commit without it so the submission still records.
-    msg_value = (proof_message or "").strip() or None
-    try:
-        part.proof_message = msg_value
-    except Exception:
-        pass
+    part.proof_message = (payload.proof_message or "").strip() or None
     part.status = "submitted"
     part.submitted_at = now
     db.add(part)
-    try:
-        db.commit()
-        db.refresh(part)
-    except Exception:
-        # proof_message column may not exist yet (migration pending) — retry via raw SQL
-        db.rollback()
-        from sqlalchemy import text as _text
-        db.execute(
-            _text(
-                "UPDATE challenge_participations "
-                "SET status='submitted', submitted_at=:now, proof_url=:url, proof_name=:name "
-                "WHERE id=:id"
-            ),
-            {"now": now, "url": _proof_url, "name": _proof_name, "id": _part_id},
-        )
-        db.commit()
-        db.refresh(part)
+    db.commit()
+    db.refresh(part)
 
     return _participation_out(part, db)

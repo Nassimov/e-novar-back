@@ -66,6 +66,30 @@ def get_signed_url(path: str, expires_in: int = 3600) -> str:
 _PUBLIC_FALLBACK_PREFIX = "public::"
 
 
+def generate_proof_upload_url(
+    original_filename: str,
+    role: str,
+    user_id: str,
+    challenge_id: str,
+) -> dict:
+    """Generate a presigned upload URL for a challenge proof file.
+    The browser uploads directly to Supabase using this URL (PUT request).
+    Returns { signed_url, path } where path is the storage path to record in DB."""
+    ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "bin"
+    relative_path = f"challenge-proofs/{role}/{user_id}/{challenge_id}/{uuid.uuid4()}.{ext}"
+
+    # Try private bucket first, fall back to main bucket
+    try:
+        result = _proof_bucket().create_signed_upload_url(relative_path)
+        storage_path = relative_path
+    except Exception:
+        result = _bucket().create_signed_upload_url(relative_path)
+        storage_path = f"{_PUBLIC_FALLBACK_PREFIX}{relative_path}"
+
+    signed_url = result.get("signed_url", result.get("signedUrl", result.get("signedURL", "")))
+    return {"signed_url": signed_url, "path": storage_path}
+
+
 def upload_challenge_proof(
     file_bytes: bytes,
     original_filename: str,
@@ -74,9 +98,8 @@ def upload_challenge_proof(
     user_id: str,
     challenge_id: str,
 ) -> str:
-    """Upload a proof file to the private challenge-proofs bucket.
-    Falls back to the main public bucket (prefixed 'public::') if the private bucket
-    hasn't been created yet. Returns storage_path."""
+    """Upload a proof file to the private challenge-proofs bucket (server-side path).
+    Falls back to the main public bucket if the private bucket hasn't been created yet."""
     ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "bin"
     path = f"{role}/{user_id}/{challenge_id}/{uuid.uuid4()}.{ext}"
     try:
