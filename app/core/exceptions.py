@@ -81,3 +81,17 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=422,
             content={"error": exc.code, "message": exc.message},
         )
+
+    @app.exception_handler(Exception)
+    async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        import logging
+        from fastapi import HTTPException as _HTTPException
+        from fastapi.exceptions import RequestValidationError as _RVE
+        # Let FastAPI's own handlers deal with HTTPException / RequestValidationError
+        if isinstance(exc, (_HTTPException, _RVE)):
+            raise exc
+        logging.getLogger("app.exceptions").exception("Unhandled server error: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Une erreur interne est survenue. Veuillez réessayer."},
+        )

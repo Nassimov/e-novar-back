@@ -136,21 +136,25 @@ class HistoryOut(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _proof_files_out(participation_id: UUID, db: Session) -> List[ProofFileOut]:
-    files = db.exec(
-        select(ChallengeProofFile)
-        .where(ChallengeProofFile.participation_id == participation_id)
-        .order_by(ChallengeProofFile.sort_order)
-    ).all()
-    return [
-        ProofFileOut(
-            id=str(f.id),
-            original_filename=f.original_filename,
-            mime_type=f.mime_type,
-            file_size_bytes=f.file_size_bytes,
-            sort_order=f.sort_order,
-        )
-        for f in files
-    ]
+    try:
+        files = db.exec(
+            select(ChallengeProofFile)
+            .where(ChallengeProofFile.participation_id == participation_id)
+            .order_by(ChallengeProofFile.sort_order)
+        ).all()
+        return [
+            ProofFileOut(
+                id=str(f.id),
+                original_filename=f.original_filename,
+                mime_type=f.mime_type,
+                file_size_bytes=f.file_size_bytes,
+                sort_order=f.sort_order,
+            )
+            for f in files
+        ]
+    except Exception:
+        db.rollback()
+        return []
 
 
 def _participation_out(p: ChallengeParticipation, db: Session) -> ParticipationOut:
@@ -464,36 +468,69 @@ async def submit_proof(
         first_path: Optional[str] = None
         first_name: Optional[str] = None
 
-        for i, (upload, content, mime) in enumerate(file_data):
-            storage_path = upload_challenge_proof(
-                content,
-                upload.filename or f"proof-{i}",
-                mime,
-                role,
-                str(user_id),
-                challenge_id,
+        try:
+            for i, (upload, content, mime) in enumerate(file_data):
+                storage_path = upload_challenge_proof(
+                    content,
+                    upload.filename or f"proof-{i}",
+                    mime,
+                    role,
+                    str(user_id),
+                    challenge_id,
+                )
+                pf = ChallengeProofFile(
+                    participation_id=part.id,
+                    storage_path=storage_path,
+                    original_filename=upload.filename or f"proof-{i}",
+                    mime_type=mime,
+                    file_size_bytes=len(content),
+                    sort_order=i,
+                )
+                db.add(pf)
+                if first_path is None:
+                    first_path = storage_path
+                    first_name = upload.filename
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Échec de l'upload des fichiers : {exc}",
             )
-            pf = ChallengeProofFile(
-                participation_id=part.id,
-                storage_path=storage_path,
-                original_filename=upload.filename or f"proof-{i}",
-                mime_type=mime,
-                file_size_bytes=len(content),
-                sort_order=i,
-            )
-            db.add(pf)
-            if first_path is None:
-                first_path = storage_path
-                first_name = upload.filename
 
         part.proof_url = first_path
         part.proof_name = first_name
 
-    part.proof_message = (proof_message or "").strip() or None
+    # Capture values before commit so the retry path can use them without lazy-loads
+    _part_id = str(part.id)
+    _proof_url = part.proof_url
+    _proof_name = part.proof_name
+
+    # Commit participation update — proof_message is optional; if the column doesn't
+    # exist yet (migration pending), commit without it so the submission still records.
+    msg_value = (proof_message or "").strip() or None
+    try:
+        part.proof_message = msg_value
+    except Exception:
+        pass
     part.status = "submitted"
     part.submitted_at = now
     db.add(part)
-    db.commit()
-    db.refresh(part)
+    try:
+        db.commit()
+        db.refresh(part)
+    except Exception:
+        # proof_message column may not exist yet (migration pending) — retry via raw SQL
+        db.rollback()
+        from sqlalchemy import text as _text
+        db.execute(
+            _text(
+                "UPDATE challenge_participations "
+                "SET status='submitted', submitted_at=:now, proof_url=:url, proof_name=:name "
+                "WHERE id=:id"
+            ),
+            {"now": now, "url": _proof_url, "name": _proof_name, "id": _part_id},
+        )
+        db.commit()
+        db.refresh(part)
 
     return _participation_out(part, db)

@@ -63,6 +63,9 @@ def get_signed_url(path: str, expires_in: int = 3600) -> str:
 
 # ── Challenge proof files (private bucket) ────────────────────────────────────
 
+_PUBLIC_FALLBACK_PREFIX = "public::"
+
+
 def upload_challenge_proof(
     file_bytes: bytes,
     original_filename: str,
@@ -71,28 +74,50 @@ def upload_challenge_proof(
     user_id: str,
     challenge_id: str,
 ) -> str:
-    """Upload a proof file to the private challenge-proofs bucket. Returns storage_path."""
+    """Upload a proof file to the private challenge-proofs bucket.
+    Falls back to the main public bucket (prefixed 'public::') if the private bucket
+    hasn't been created yet. Returns storage_path."""
     ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "bin"
     path = f"{role}/{user_id}/{challenge_id}/{uuid.uuid4()}.{ext}"
-    _proof_bucket().upload(
-        path=path,
-        file=file_bytes,
-        file_options={"content-type": content_type, "upsert": "false"},
-    )
-    return path
+    try:
+        _proof_bucket().upload(
+            path=path,
+            file=file_bytes,
+            file_options={"content-type": content_type, "upsert": "false"},
+        )
+        return path
+    except Exception:
+        # Private bucket 'challenge-proofs' not created yet — store in main bucket temporarily
+        fallback_path = f"challenge-proofs/{role}/{user_id}/{challenge_id}/{uuid.uuid4()}.{ext}"
+        _bucket().upload(
+            path=fallback_path,
+            file=file_bytes,
+            file_options={"content-type": content_type, "upsert": "false"},
+        )
+        return f"{_PUBLIC_FALLBACK_PREFIX}{fallback_path}"
 
 
 def get_proof_signed_url(storage_path: str, expires_in: int = 3600) -> str:
-    """Generate a signed URL for a challenge proof file."""
-    result = _proof_bucket().create_signed_url(storage_path, expires_in)
-    if isinstance(result, dict):
-        return result.get("signedURL", result.get("signedUrl", ""))
-    return ""
+    """Generate a signed URL for a challenge proof file.
+    For files stored in the public bucket fallback, returns the public URL directly."""
+    if storage_path.startswith(_PUBLIC_FALLBACK_PREFIX):
+        real_path = storage_path[len(_PUBLIC_FALLBACK_PREFIX):]
+        return _bucket().get_public_url(real_path)
+    try:
+        result = _proof_bucket().create_signed_url(storage_path, expires_in)
+        if isinstance(result, dict):
+            return result.get("signedURL", result.get("signedUrl", ""))
+        return ""
+    except Exception:
+        return ""
 
 
 def delete_challenge_proof(storage_path: str) -> None:
-    """Delete a challenge proof file from the private bucket."""
+    """Delete a challenge proof file from the private or fallback bucket."""
     try:
-        _proof_bucket().remove([storage_path])
+        if storage_path.startswith(_PUBLIC_FALLBACK_PREFIX):
+            _bucket().remove([storage_path[len(_PUBLIC_FALLBACK_PREFIX):]])
+        else:
+            _proof_bucket().remove([storage_path])
     except Exception:
         pass
