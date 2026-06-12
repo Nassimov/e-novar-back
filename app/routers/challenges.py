@@ -4,7 +4,9 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+import base64
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -145,17 +147,17 @@ class RequestUploadPayload(BaseModel):
     files: List[FileMetadataIn]
 
 
-# ── Submit proof input schema (JSON, no multipart) ────────────────────────────
+# ── Submit proof input schema (pure JSON — files as base64) ──────────────────
 
-class ProofPathIn(BaseModel):
-    path: str
+class ProofFileIn(BaseModel):
+    content_base64: str         # base64-encoded file content (no data URL prefix)
     original_filename: str
     mime_type: str
     file_size_bytes: int
 
 
 class SubmitProofPayload(BaseModel):
-    proof_paths: List[ProofPathIn] = []
+    proof_files: List[ProofFileIn] = []
     proof_message: Optional[str] = None
     proof_text: Optional[str] = None
     proof_url_link: Optional[str] = None
@@ -460,17 +462,16 @@ def request_upload(
 @router.post("/{challenge_id}/submit")
 def submit_proof(
     challenge_id: str,
-    files: List[UploadFile] = File(default=[]),
-    proof_message: Optional[str] = Form(default=None),
-    proof_text: Optional[str] = Form(default=None),
-    proof_url_link: Optional[str] = Form(default=None),
+    payload: SubmitProofPayload,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Submit a challenge proof via multipart/form-data.
+    """Submit a challenge proof.
 
-    Files are uploaded to Railway and forwarded to Supabase Storage server-side
-    (eliminates all browser CORS issues with Supabase Storage).
+    Files are base64-encoded by the browser and sent as plain JSON — the same
+    format as every other endpoint (start, decline, etc.).  Railway decodes the
+    base64 and uploads the raw bytes to Supabase Storage server-side, which
+    eliminates all browser-to-Supabase CORS issues entirely.
     """
     from app.services.storage import upload_challenge_proof, delete_challenge_proof
 
@@ -502,34 +503,37 @@ def submit_proof(
     pt = challenge.proof_type or "image-or-pdf"
 
     if pt == "text":
-        if not proof_text or not proof_text.strip():
+        if not payload.proof_text or not payload.proof_text.strip():
             raise HTTPException(status_code=422, detail="Le texte de preuve est requis")
-        part.proof_url = f"text::{proof_text.strip()}"
+        part.proof_url = f"text::{payload.proof_text.strip()}"
         part.proof_name = "text-proof"
 
     elif pt == "url":
-        if not proof_url_link or not proof_url_link.strip():
+        if not payload.proof_url_link or not payload.proof_url_link.strip():
             raise HTTPException(status_code=422, detail="L'URL de preuve est requise")
-        url = proof_url_link.strip()
+        url = payload.proof_url_link.strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(status_code=422, detail="L'URL doit commencer par http:// ou https://")
         part.proof_url = url
         part.proof_name = "url-proof"
 
     else:
-        if not files:
+        if not payload.proof_files:
             raise HTTPException(status_code=422, detail="Au moins un fichier de preuve est requis")
-        if len(files) > MAX_FILES:
+        if len(payload.proof_files) > MAX_FILES:
             raise HTTPException(status_code=422, detail=f"Maximum {MAX_FILES} fichiers autorisés")
 
-        # Read + validate all files before touching storage
+        # Decode base64 and validate each file
         file_data: List[tuple] = []
-        for f in files:
-            raw = f.file.read()
-            canonical_mime = _validate_upload(f.filename or "file", f.content_type, len(raw))
-            file_data.append((f.filename or "file", canonical_mime, raw))
+        for fi in payload.proof_files:
+            try:
+                raw = base64.b64decode(fi.content_base64)
+            except Exception:
+                raise HTTPException(status_code=422, detail=f"Fichier '{fi.original_filename}' : encodage base64 invalide")
+            canonical_mime = _validate_upload(fi.original_filename, fi.mime_type, len(raw))
+            file_data.append((fi.original_filename, canonical_mime, raw))
 
-        # Clean up any old proof files from a previous attempt
+        # Clean up any previous proof files (idempotent re-submission)
         try:
             old_files = db.exec(
                 select(ChallengeProofFile).where(
@@ -546,7 +550,7 @@ def submit_proof(
         except Exception:
             db.rollback()
 
-        # Upload to Supabase Storage (server-side, no CORS issues)
+        # Upload decoded bytes to Supabase Storage server-side
         storage_paths: List[str] = []
         try:
             for i, (filename, mime, raw) in enumerate(file_data):
@@ -576,7 +580,7 @@ def submit_proof(
         part.proof_url = storage_paths[0]
         part.proof_name = file_data[0][0]
 
-    part.proof_message = (proof_message or "").strip() or None
+    part.proof_message = (payload.proof_message or "").strip() or None
     part.status = "submitted"
     part.submitted_at = now
     db.add(part)
