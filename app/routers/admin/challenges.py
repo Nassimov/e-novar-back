@@ -11,7 +11,7 @@ from sqlmodel import Session, func, select
 
 from app.dependencies import get_admin_user, get_db
 from app.models.enums import KpSource
-from app.models.gamification import Challenge, ChallengeParticipation
+from app.models.gamification import Challenge, ChallengeParticipation, ChallengeProofFile
 from app.models.notification import Notification
 from app.models.profile import Profile
 from app.services.kp import award_kp
@@ -205,6 +205,24 @@ async def list_submissions(
         for pr in db.exec(select(Profile).where(Profile.id.in_(user_ids))).all():
             profiles_map[pr.id] = pr
 
+    # Bulk-load proof files for all paginated participations
+    part_ids = [p.id for p in paginated]
+    proof_files_map: Dict[UUID, list] = {}
+    if part_ids:
+        for pf in db.exec(
+            select(ChallengeProofFile)
+            .where(ChallengeProofFile.participation_id.in_(part_ids))
+            .order_by(ChallengeProofFile.participation_id, ChallengeProofFile.sort_order)
+        ).all():
+            proof_files_map.setdefault(pf.participation_id, []).append({
+                "id": str(pf.id),
+                "original_filename": pf.original_filename,
+                "mime_type": pf.mime_type,
+                "file_size_bytes": pf.file_size_bytes,
+                "sort_order": pf.sort_order,
+                "storage_path": pf.storage_path,
+            })
+
     items = []
     for p in paginated:
         c = challenges_map.get(p.challenge_id)
@@ -218,12 +236,15 @@ async def list_submissions(
             "status": p.status,
             "proof_url": p.proof_url,
             "proof_name": p.proof_name,
+            "proof_message": p.proof_message if hasattr(p, "proof_message") else None,
             "reason": p.reason,
             "started_at": p.started_at.isoformat(),
             "submitted_at": p.submitted_at.isoformat() if p.submitted_at else None,
             "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
             "deadline_at": p.deadline_at.isoformat() if p.deadline_at else None,
             "reward": c.reward if c else 0,
+            "proof_files": proof_files_map.get(p.id, []),
+            "proof_file_count": len(proof_files_map.get(p.id, [])),
         })
 
     return {
@@ -233,6 +254,40 @@ async def list_submissions(
         "size": size,
         "pages": max(1, -(-total // size)),
     }
+
+
+@router.get("/submissions/{submission_id}/proof-urls")
+async def get_proof_signed_urls(
+    submission_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Return signed URLs (1-hour TTL) for all proof files of a submission."""
+    from app.services.storage import get_proof_signed_url
+
+    part = db.get(ChallengeParticipation, submission_id)
+    if part is None:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    proof_files = db.exec(
+        select(ChallengeProofFile)
+        .where(ChallengeProofFile.participation_id == part.id)
+        .order_by(ChallengeProofFile.sort_order)
+    ).all()
+
+    urls = []
+    for pf in proof_files:
+        signed_url = get_proof_signed_url(pf.storage_path, expires_in=3600)
+        urls.append({
+            "id": str(pf.id),
+            "original_filename": pf.original_filename,
+            "mime_type": pf.mime_type,
+            "file_size_bytes": pf.file_size_bytes,
+            "sort_order": pf.sort_order,
+            "signed_url": signed_url,
+        })
+
+    return {"proof_urls": urls, "expires_in": 3600}
 
 
 @router.put("/submissions/{submission_id}/approve")

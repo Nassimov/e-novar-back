@@ -98,8 +98,9 @@ class ChallengeParticipation(SQLModel, table=True):
     progress: int = Field(default=0)
     total: int = Field(default=1)
     status: str = Field(default="in_progress")           # public.challenge_status
-    proof_url: Optional[str] = Field(default=None)
-    proof_name: Optional[str] = Field(default=None)
+    proof_url: Optional[str] = Field(default=None)       # first file path (backward compat)
+    proof_name: Optional[str] = Field(default=None)      # first file original name
+    proof_message: Optional[str] = Field(default=None)   # user's optional proof description
     submitted_at: Optional[datetime] = Field(default=None)
     reviewed_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
     reviewed_at: Optional[datetime] = Field(default=None)
@@ -109,3 +110,22 @@ class ChallengeParticipation(SQLModel, table=True):
     __table_args__ = (
         sa.UniqueConstraint("challenge_id", "user_id", name="uq_challenge_participation"),
     )
+
+
+class ChallengeProofFile(SQLModel, table=True):
+    """
+    One record per uploaded proof file. A participation may have 1–5 files.
+    Files are stored in the private 'challenge-proofs' Supabase bucket.
+    storage_path is the path within the bucket; signed URLs are generated on demand.
+    """
+
+    __tablename__ = "challenge_proof_files"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    participation_id: UUID = Field(foreign_key="challenge_participations.id", index=True)
+    storage_path: str = Field()
+    original_filename: str = Field()
+    mime_type: str = Field()
+    file_size_bytes: int = Field(default=0)
+    sort_order: int = Field(default=0)
+    uploaded_at: datetime = Field(default_factory=datetime.utcnow)

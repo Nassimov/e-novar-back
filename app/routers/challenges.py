@@ -9,9 +9,89 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.gamification import Challenge, ChallengeParticipation
+from app.models.gamification import Challenge, ChallengeParticipation, ChallengeProofFile
 
 router = APIRouter(tags=["challenges"])
+
+# ── File validation constants ─────────────────────────────────────────────────
+
+MAX_FILES = 5
+
+_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".mp4", ".mov", ".webm"}
+
+_EXT_TO_MIME: Dict[str, str] = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".pdf": "application/pdf",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
+
+_ALLOWED_MIME_TYPES = set(_EXT_TO_MIME.values())
+
+# Per-category size limits (bytes)
+_SIZE_LIMITS: Dict[str, int] = {
+    "image": 10 * 1024 * 1024,        # 10 MB
+    "application": 25 * 1024 * 1024,  # 25 MB (PDF)
+    "video": 100 * 1024 * 1024,       # 100 MB
+}
+
+
+def _validate_upload(filename: str, content_type: Optional[str], file_size: int) -> str:
+    """
+    Validates a single uploaded file.
+    Returns the canonical MIME type.
+    Raises HTTPException(422) on any violation.
+    """
+    if not filename:
+        raise HTTPException(status_code=422, detail="Nom de fichier manquant")
+
+    dot_pos = filename.rfind(".")
+    ext = ("." + filename[dot_pos + 1:].lower()) if dot_pos != -1 else ""
+    if ext not in _ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Fichier '{filename}' : format non supporté. "
+                "Formats acceptés : JPG, PNG, WEBP, PDF, MP4, MOV, WEBM"
+            ),
+        )
+
+    canonical_mime = _EXT_TO_MIME[ext]
+
+    # Reject if browser-declared content_type is explicitly a disallowed type
+    if content_type and content_type not in _ALLOWED_MIME_TYPES and content_type != "application/octet-stream":
+        raise HTTPException(
+            status_code=422,
+            detail=f"Fichier '{filename}' : type MIME '{content_type}' non autorisé",
+        )
+
+    if file_size == 0:
+        raise HTTPException(status_code=422, detail=f"Fichier '{filename}' : le fichier est vide")
+
+    category = canonical_mime.split("/")[0]
+    limit = _SIZE_LIMITS.get(category, _SIZE_LIMITS["image"])
+    if file_size > limit:
+        limit_mb = limit // (1024 * 1024)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Fichier '{filename}' : taille maximale {limit_mb} Mo dépassée",
+        )
+
+    return canonical_mime
+
+
+# ── Output schemas ────────────────────────────────────────────────────────────
+
+class ProofFileOut(BaseModel):
+    id: str
+    original_filename: str
+    mime_type: str
+    file_size_bytes: int
+    sort_order: int
 
 
 class ParticipationOut(BaseModel):
@@ -22,7 +102,9 @@ class ParticipationOut(BaseModel):
     submitted_at: Optional[str]
     proof_url: Optional[str]
     proof_name: Optional[str]
+    proof_message: Optional[str]
     reason: Optional[str]
+    proof_files: List[ProofFileOut]
 
 
 class ChallengeOut(BaseModel):
@@ -51,7 +133,27 @@ class HistoryOut(BaseModel):
     participations: List[dict]
 
 
-def _participation_out(p: ChallengeParticipation) -> ParticipationOut:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _proof_files_out(participation_id: UUID, db: Session) -> List[ProofFileOut]:
+    files = db.exec(
+        select(ChallengeProofFile)
+        .where(ChallengeProofFile.participation_id == participation_id)
+        .order_by(ChallengeProofFile.sort_order)
+    ).all()
+    return [
+        ProofFileOut(
+            id=str(f.id),
+            original_filename=f.original_filename,
+            mime_type=f.mime_type,
+            file_size_bytes=f.file_size_bytes,
+            sort_order=f.sort_order,
+        )
+        for f in files
+    ]
+
+
+def _participation_out(p: ChallengeParticipation, db: Session) -> ParticipationOut:
     return ParticipationOut(
         id=str(p.id),
         status=p.status,
@@ -60,11 +162,13 @@ def _participation_out(p: ChallengeParticipation) -> ParticipationOut:
         submitted_at=p.submitted_at.isoformat() if p.submitted_at else None,
         proof_url=p.proof_url,
         proof_name=p.proof_name,
+        proof_message=p.proof_message,
         reason=p.reason,
+        proof_files=_proof_files_out(p.id, db),
     )
 
 
-def _challenge_out(c: Challenge, p: Optional[ChallengeParticipation]) -> ChallengeOut:
+def _challenge_out(c: Challenge, p: Optional[ChallengeParticipation], db: Session) -> ChallengeOut:
     return ChallengeOut(
         id=c.id,
         title=c.title,
@@ -78,7 +182,7 @@ def _challenge_out(c: Challenge, p: Optional[ChallengeParticipation]) -> Challen
         rules=c.rules,
         proof_instructions=c.proof_instructions,
         approval_conditions=c.approval_conditions,
-        participation=_participation_out(p) if p else None,
+        participation=_participation_out(p, db) if p else None,
     )
 
 
@@ -98,6 +202,8 @@ def _auto_expire(user_id: UUID, db: Session) -> None:
             db.add(ep)
         db.commit()
 
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/", response_model=ChallengesListResponse)
 async def list_challenges(
@@ -130,7 +236,7 @@ async def list_challenges(
         ).all()
     }
 
-    result = [_challenge_out(c, participations.get(c.id)) for c in challenges]
+    result = [_challenge_out(c, participations.get(c.id), db) for c in challenges]
 
     active_count = sum(
         1 for r in result
@@ -171,6 +277,7 @@ async def get_history(
     items = []
     for p in parts:
         c = challenges_map.get(p.challenge_id)
+        proof_files = _proof_files_out(p.id, db)
         items.append({
             "participation_id": str(p.id),
             "challenge_id": p.challenge_id,
@@ -182,8 +289,10 @@ async def get_history(
             "submitted_at": p.submitted_at.isoformat() if p.submitted_at else None,
             "proof_url": p.proof_url,
             "proof_name": p.proof_name,
+            "proof_message": p.proof_message,
             "reason": p.reason,
             "deadline_at": p.deadline_at.isoformat() if p.deadline_at else None,
+            "proof_files": [pf.model_dump() for pf in proof_files],
         })
 
     return HistoryOut(participations=items)
@@ -228,7 +337,7 @@ async def start_challenge(
     db.commit()
     db.refresh(part)
 
-    return _challenge_out(challenge, part)
+    return _challenge_out(challenge, part, db)
 
 
 @router.post("/{challenge_id}/decline", status_code=status.HTTP_204_NO_CONTENT)
@@ -270,13 +379,17 @@ async def decline_challenge(
 @router.post("/{challenge_id}/submit")
 async def submit_proof(
     challenge_id: str,
-    proof_file: Optional[UploadFile] = File(None),
+    proof_files: List[UploadFile] = File(default=[]),
+    proof_message: Optional[str] = Form(None),
     proof_text: Optional[str] = Form(None),
     proof_url_link: Optional[str] = Form(None),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    from app.services.storage import delete_challenge_proof, upload_challenge_proof
+
     user_id = UUID(current_user["id"])
+    role = current_user.get("role", "student")
     now = datetime.utcnow()
 
     part = db.exec(
@@ -287,39 +400,100 @@ async def submit_proof(
     ).first()
 
     if part is None:
-        raise HTTPException(status_code=404, detail="Participation not found")
+        raise HTTPException(status_code=404, detail="Participation introuvable")
     if part.status != "in_progress":
-        raise HTTPException(status_code=400, detail="Challenge is not in progress")
+        raise HTTPException(status_code=400, detail="Ce défi n'est pas en cours")
     if part.deadline_at and part.deadline_at < now:
         part.status = "expired"
         db.add(part)
         db.commit()
-        raise HTTPException(status_code=400, detail="Challenge deadline has passed")
+        raise HTTPException(status_code=400, detail="La durée du défi est expirée")
 
-    if proof_file:
-        from app.services.storage import upload_file
-        content = await proof_file.read()
-        url = upload_file(
-            content,
-            proof_file.filename or "proof",
-            proof_file.content_type,
-            "challenge-proofs",
-        )
-        part.proof_url = url
-        part.proof_name = proof_file.filename
-    elif proof_text:
-        part.proof_url = f"text::{proof_text}"
+    challenge = db.get(Challenge, challenge_id)
+    if challenge is None:
+        raise HTTPException(status_code=404, detail="Défi introuvable")
+
+    pt = challenge.proof_type or "image-or-pdf"
+
+    if pt == "text":
+        if not proof_text or not proof_text.strip():
+            raise HTTPException(status_code=422, detail="Le texte de preuve est requis")
+        part.proof_url = f"text::{proof_text.strip()}"
         part.proof_name = "text-proof"
-    elif proof_url_link:
-        part.proof_url = proof_url_link
-        part.proof_name = "url-proof"
-    else:
-        raise HTTPException(status_code=422, detail="No proof provided")
 
+    elif pt == "url":
+        if not proof_url_link or not proof_url_link.strip():
+            raise HTTPException(status_code=422, detail="L'URL de preuve est requise")
+        url = proof_url_link.strip()
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(status_code=422, detail="L'URL doit commencer par http:// ou https://")
+        part.proof_url = url
+        part.proof_name = "url-proof"
+
+    else:
+        # File-based proof (image / pdf / image-or-pdf / any)
+        actual_files = [f for f in proof_files if f.filename and f.filename.strip()]
+
+        if not actual_files:
+            raise HTTPException(status_code=422, detail="Au moins un fichier de preuve est requis")
+
+        if len(actual_files) > MAX_FILES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Maximum {MAX_FILES} fichiers autorisés",
+            )
+
+        # Read all file contents first (detect size before upload)
+        file_data: list[tuple[UploadFile, bytes, str]] = []
+        for f in actual_files:
+            content = await f.read()
+            mime = _validate_upload(f.filename or "", f.content_type, len(content))
+            file_data.append((f, content, mime))
+
+        # Delete previous proof files if re-submitting (idempotent replacement)
+        old_files = db.exec(
+            select(ChallengeProofFile).where(
+                ChallengeProofFile.participation_id == part.id
+            )
+        ).all()
+        for old in old_files:
+            delete_challenge_proof(old.storage_path)
+            db.delete(old)
+        db.flush()
+
+        first_path: Optional[str] = None
+        first_name: Optional[str] = None
+
+        for i, (upload, content, mime) in enumerate(file_data):
+            storage_path = upload_challenge_proof(
+                content,
+                upload.filename or f"proof-{i}",
+                mime,
+                role,
+                str(user_id),
+                challenge_id,
+            )
+            pf = ChallengeProofFile(
+                participation_id=part.id,
+                storage_path=storage_path,
+                original_filename=upload.filename or f"proof-{i}",
+                mime_type=mime,
+                file_size_bytes=len(content),
+                sort_order=i,
+            )
+            db.add(pf)
+            if first_path is None:
+                first_path = storage_path
+                first_name = upload.filename
+
+        part.proof_url = first_path
+        part.proof_name = first_name
+
+    part.proof_message = (proof_message or "").strip() or None
     part.status = "submitted"
     part.submitted_at = now
     db.add(part)
     db.commit()
     db.refresh(part)
 
-    return _participation_out(part)
+    return _participation_out(part, db)
