@@ -61,7 +61,7 @@ class Challenge(SQLModel, table=True):
     Mirrors public.challenges.
     Text PK (slug-like, e.g. 'give_10_sessions').
     audience: student | teacher | both.
-    proof_type: image | pdf | image-or-pdf.
+    proof_type: image | pdf | image-or-pdf | text | url | any.
     """
 
     __tablename__ = "challenges"
@@ -76,13 +76,17 @@ class Challenge(SQLModel, table=True):
     active: bool = Field(default=True)
     starts_at: Optional[datetime] = Field(default=None)
     ends_at: Optional[datetime] = Field(default=None)
+    timer_duration_sec: Optional[int] = Field(default=None)
+    rules: Optional[str] = Field(default=None)
+    proof_instructions: Optional[str] = Field(default=None)
+    approval_conditions: Optional[str] = Field(default=None)
 
 
 class ChallengeParticipation(SQLModel, table=True):
     """
     Mirrors public.challenge_participations.
     UNIQUE on (challenge_id, user_id) — a user participates in a challenge once.
-    status lifecycle: in_progress → submitted → approved | declined | cancelled
+    status lifecycle: in_progress → submitted → approved | declined | cancelled | expired | lost
     """
 
     __tablename__ = "challenge_participations"
@@ -100,6 +104,7 @@ class ChallengeParticipation(SQLModel, table=True):
     reviewed_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
     reviewed_at: Optional[datetime] = Field(default=None)
     reason: Optional[str] = Field(default=None)
+    deadline_at: Optional[datetime] = Field(default=None)
 
     __table_args__ = (
         sa.UniqueConstraint("challenge_id", "user_id", name="uq_challenge_participation"),

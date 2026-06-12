@@ -1,186 +1,325 @@
 from __future__ import annotations
 
-import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.challenge import ChallengeDef, ChallengeSubmission, ChallengeSubmissionStatus
-from app.models.user import User
-from app.schemas.challenge import ChallengeSubmitRequest, ChallengeSubmissionResponse
-from app.schemas.kp import ChallengeResponse
+from app.models.gamification import Challenge, ChallengeParticipation
 
 router = APIRouter(tags=["challenges"])
 
 
-@router.get("/", response_model=List[ChallengeResponse])
+class ParticipationOut(BaseModel):
+    id: str
+    status: str
+    started_at: str
+    deadline_at: Optional[str]
+    submitted_at: Optional[str]
+    proof_url: Optional[str]
+    proof_name: Optional[str]
+    reason: Optional[str]
+
+
+class ChallengeOut(BaseModel):
+    id: str
+    title: str
+    description: str
+    reward: int
+    audience: str
+    proof_type: str
+    active: bool
+    ends_at: Optional[str]
+    timer_duration_sec: Optional[int]
+    rules: Optional[str]
+    proof_instructions: Optional[str]
+    approval_conditions: Optional[str]
+    participation: Optional[ParticipationOut]
+
+
+class ChallengesListResponse(BaseModel):
+    challenges: List[ChallengeOut]
+    active_count: int
+    potential_ep: int
+
+
+class HistoryOut(BaseModel):
+    participations: List[dict]
+
+
+def _participation_out(p: ChallengeParticipation) -> ParticipationOut:
+    return ParticipationOut(
+        id=str(p.id),
+        status=p.status,
+        started_at=p.started_at.isoformat(),
+        deadline_at=p.deadline_at.isoformat() if p.deadline_at else None,
+        submitted_at=p.submitted_at.isoformat() if p.submitted_at else None,
+        proof_url=p.proof_url,
+        proof_name=p.proof_name,
+        reason=p.reason,
+    )
+
+
+def _challenge_out(c: Challenge, p: Optional[ChallengeParticipation]) -> ChallengeOut:
+    return ChallengeOut(
+        id=c.id,
+        title=c.title,
+        description=c.description or "",
+        reward=c.reward,
+        audience=c.audience,
+        proof_type=c.proof_type or "image-or-pdf",
+        active=c.active,
+        ends_at=c.ends_at.isoformat() if c.ends_at else None,
+        timer_duration_sec=c.timer_duration_sec,
+        rules=c.rules,
+        proof_instructions=c.proof_instructions,
+        approval_conditions=c.approval_conditions,
+        participation=_participation_out(p) if p else None,
+    )
+
+
+def _auto_expire(user_id: UUID, db: Session) -> None:
+    now = datetime.utcnow()
+    expired_parts = db.exec(
+        select(ChallengeParticipation).where(
+            ChallengeParticipation.user_id == user_id,
+            ChallengeParticipation.status == "in_progress",
+            ChallengeParticipation.deadline_at.isnot(None),
+            ChallengeParticipation.deadline_at < now,
+        )
+    ).all()
+    if expired_parts:
+        for ep in expired_parts:
+            ep.status = "expired"
+            db.add(ep)
+        db.commit()
+
+
+@router.get("/", response_model=ChallengesListResponse)
 async def list_challenges(
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List active challenges."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    user_id = UUID(current_user["id"])
+    role = current_user["role"]
+    now = datetime.utcnow()
 
-    challenges = db.exec(
-        select(ChallengeDef).where(ChallengeDef.is_active == True)
-    ).all()
+    _auto_expire(user_id, db)
 
-    # Get user's submissions
-    user_submissions = {
-        str(sub.challenge_id): sub
-        for sub in db.exec(
-            select(ChallengeSubmission).where(ChallengeSubmission.user_id == user.id)
+    stmt = select(Challenge).where(Challenge.active == True)
+    stmt = stmt.where(
+        (Challenge.ends_at.is_(None)) | (Challenge.ends_at >= now)
+    )
+    if role == "student":
+        stmt = stmt.where(Challenge.audience.in_(["student", "both"]))
+    elif role == "teacher":
+        stmt = stmt.where(Challenge.audience.in_(["teacher", "both"]))
+
+    challenges = db.exec(stmt).all()
+
+    participations = {
+        p.challenge_id: p
+        for p in db.exec(
+            select(ChallengeParticipation).where(
+                ChallengeParticipation.user_id == user_id
+            )
         ).all()
     }
 
-    total = len(challenges)
-    offset = (page - 1) * size
-    paginated = challenges[offset: offset + size]
+    result = [_challenge_out(c, participations.get(c.id)) for c in challenges]
 
-    result = []
-    for c in paginated:
-        sub = user_submissions.get(str(c.id))
-        result.append(ChallengeResponse(
-            id=c.id,
-            title=c.title,
-            description=c.description,
-            reward_kp=c.reward_kp,
-            proof_type=c.proof_type.value,
-            audience=c.audience.value,
-            is_active=c.is_active,
-            ends_at=c.ends_at,
-            user_submitted=sub is not None,
-            user_status=sub.status.value if sub else None,
-        ))
-    return result
+    active_count = sum(
+        1 for r in result
+        if r.participation and r.participation.status == "in_progress"
+    )
+    potential_ep = sum(
+        c.reward
+        for c, r in zip(challenges, result)
+        if r.participation and r.participation.status in ("in_progress", "submitted")
+    )
 
-
-@router.get("/{challenge_id}", response_model=ChallengeResponse)
-async def get_challenge(
-    challenge_id: UUID,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Get a specific challenge."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-
-    challenge = db.get(ChallengeDef, challenge_id)
-    if challenge is None:
-        raise HTTPException(status_code=404, detail="Challenge not found")
-
-    sub = None
-    if user:
-        sub = db.exec(
-            select(ChallengeSubmission).where(
-                ChallengeSubmission.challenge_id == challenge_id,
-                ChallengeSubmission.user_id == user.id,
-            )
-        ).first()
-
-    return ChallengeResponse(
-        id=challenge.id,
-        title=challenge.title,
-        description=challenge.description,
-        reward_kp=challenge.reward_kp,
-        proof_type=challenge.proof_type.value,
-        audience=challenge.audience.value,
-        is_active=challenge.is_active,
-        ends_at=challenge.ends_at,
-        user_submitted=sub is not None,
-        user_status=sub.status.value if sub else None,
+    return ChallengesListResponse(
+        challenges=result,
+        active_count=active_count,
+        potential_ep=potential_ep,
     )
 
 
-@router.post("/{challenge_id}/submit", response_model=ChallengeSubmissionResponse, status_code=status.HTTP_201_CREATED)
-async def submit_challenge(
-    challenge_id: UUID,
-    payload: ChallengeSubmitRequest,
+@router.get("/history/", response_model=HistoryOut)
+async def get_history(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Submit a challenge completion."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    user_id = UUID(current_user["id"])
 
-    challenge = db.get(ChallengeDef, challenge_id)
-    if challenge is None:
-        raise HTTPException(status_code=404, detail="Challenge not found")
-    if not challenge.is_active:
-        raise HTTPException(status_code=400, detail="Challenge is no longer active")
-    if challenge.ends_at and challenge.ends_at < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Challenge has ended")
+    parts = db.exec(
+        select(ChallengeParticipation)
+        .where(ChallengeParticipation.user_id == user_id)
+        .order_by(ChallengeParticipation.started_at.desc())
+    ).all()
 
-    # Check for existing submission
+    challenge_ids = list({p.challenge_id for p in parts})
+    challenges_map: Dict[str, Challenge] = {}
+    if challenge_ids:
+        for c in db.exec(select(Challenge).where(Challenge.id.in_(challenge_ids))).all():
+            challenges_map[c.id] = c
+
+    items = []
+    for p in parts:
+        c = challenges_map.get(p.challenge_id)
+        items.append({
+            "participation_id": str(p.id),
+            "challenge_id": p.challenge_id,
+            "challenge_title": c.title if c else "—",
+            "challenge_description": c.description if c else "",
+            "reward": c.reward if c else 0,
+            "status": p.status,
+            "started_at": p.started_at.isoformat(),
+            "submitted_at": p.submitted_at.isoformat() if p.submitted_at else None,
+            "proof_url": p.proof_url,
+            "proof_name": p.proof_name,
+            "reason": p.reason,
+            "deadline_at": p.deadline_at.isoformat() if p.deadline_at else None,
+        })
+
+    return HistoryOut(participations=items)
+
+
+@router.post("/{challenge_id}/start", response_model=ChallengeOut)
+async def start_challenge(
+    challenge_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = UUID(current_user["id"])
+
+    challenge = db.get(Challenge, challenge_id)
+    if challenge is None or not challenge.active:
+        raise HTTPException(status_code=404, detail="Challenge not found or inactive")
+
     existing = db.exec(
-        select(ChallengeSubmission).where(
-            ChallengeSubmission.challenge_id == challenge_id,
-            ChallengeSubmission.user_id == user.id,
+        select(ChallengeParticipation).where(
+            ChallengeParticipation.challenge_id == challenge_id,
+            ChallengeParticipation.user_id == user_id,
         )
     ).first()
     if existing:
-        raise HTTPException(status_code=409, detail="Already submitted this challenge")
+        raise HTTPException(status_code=409, detail="Already participated in this challenge")
 
-    submission = ChallengeSubmission(
-        challenge_id=challenge_id,
-        user_id=user.id,
-        proof_url=payload.proof_url,
-        proof_text=payload.proof_text,
+    now = datetime.utcnow()
+    deadline = (
+        now + timedelta(seconds=challenge.timer_duration_sec)
+        if challenge.timer_duration_sec
+        else None
     )
-    db.add(submission)
+
+    part = ChallengeParticipation(
+        challenge_id=challenge_id,
+        user_id=user_id,
+        status="in_progress",
+        started_at=now,
+        deadline_at=deadline,
+    )
+    db.add(part)
     db.commit()
-    db.refresh(submission)
-    return ChallengeSubmissionResponse.model_validate(submission)
+    db.refresh(part)
+
+    return _challenge_out(challenge, part)
 
 
-@router.get("/submissions", response_model=List[ChallengeSubmissionResponse])
-async def list_my_submissions(
+@router.post("/{challenge_id}/decline", status_code=status.HTTP_204_NO_CONTENT)
+async def decline_challenge(
+    challenge_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List the current user's challenge submissions."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    user_id = UUID(current_user["id"])
 
-    submissions = db.exec(
-        select(ChallengeSubmission).where(ChallengeSubmission.user_id == user.id)
-    ).all()
-    return [ChallengeSubmissionResponse.model_validate(s) for s in submissions]
+    challenge = db.get(Challenge, challenge_id)
+    if challenge is None:
+        raise HTTPException(status_code=404, detail="Challenge not found")
 
+    existing = db.exec(
+        select(ChallengeParticipation).where(
+            ChallengeParticipation.challenge_id == challenge_id,
+            ChallengeParticipation.user_id == user_id,
+        )
+    ).first()
 
-@router.delete("/submissions/{submission_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_submission(
-    submission_id: UUID,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Delete a pending challenge submission."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    if existing:
+        if existing.status != "in_progress":
+            raise HTTPException(status_code=400, detail="Cannot decline a challenge not in progress")
+        existing.status = "declined"
+        db.add(existing)
+    else:
+        part = ChallengeParticipation(
+            challenge_id=challenge_id,
+            user_id=user_id,
+            status="declined",
+        )
+        db.add(part)
 
-    submission = db.get(ChallengeSubmission, submission_id)
-    if submission is None:
-        raise HTTPException(status_code=404, detail="Submission not found")
-
-    if user and submission.user_id != user.id and current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if submission.status != ChallengeSubmissionStatus.pending:
-        raise HTTPException(status_code=400, detail="Can only delete pending submissions")
-
-    db.delete(submission)
     db.commit()
     return None
+
+
+@router.post("/{challenge_id}/submit")
+async def submit_proof(
+    challenge_id: str,
+    proof_file: Optional[UploadFile] = File(None),
+    proof_text: Optional[str] = Form(None),
+    proof_url_link: Optional[str] = Form(None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = UUID(current_user["id"])
+    now = datetime.utcnow()
+
+    part = db.exec(
+        select(ChallengeParticipation).where(
+            ChallengeParticipation.challenge_id == challenge_id,
+            ChallengeParticipation.user_id == user_id,
+        )
+    ).first()
+
+    if part is None:
+        raise HTTPException(status_code=404, detail="Participation not found")
+    if part.status != "in_progress":
+        raise HTTPException(status_code=400, detail="Challenge is not in progress")
+    if part.deadline_at and part.deadline_at < now:
+        part.status = "expired"
+        db.add(part)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Challenge deadline has passed")
+
+    if proof_file:
+        from app.services.storage import upload_file
+        content = await proof_file.read()
+        url = upload_file(
+            content,
+            proof_file.filename or "proof",
+            proof_file.content_type,
+            "challenge-proofs",
+        )
+        part.proof_url = url
+        part.proof_name = proof_file.filename
+    elif proof_text:
+        part.proof_url = f"text::{proof_text}"
+        part.proof_name = "text-proof"
+    elif proof_url_link:
+        part.proof_url = proof_url_link
+        part.proof_name = "url-proof"
+    else:
+        raise HTTPException(status_code=422, detail="No proof provided")
+
+    part.status = "submitted"
+    part.submitted_at = now
+    db.add(part)
+    db.commit()
+    db.refresh(part)
+
+    return _participation_out(part)
