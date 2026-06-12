@@ -262,8 +262,8 @@ async def get_proof_signed_urls(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Return signed URLs (1-hour TTL) for all proof files of a submission."""
-    from app.services.storage import get_proof_signed_url
+    """Return public URLs for all proof files of a submission (enovar-files is a public bucket)."""
+    from app.services.storage import get_proof_public_url
 
     part = db.get(ChallengeParticipation, submission_id)
     if part is None:
@@ -277,17 +277,17 @@ async def get_proof_signed_urls(
 
     urls = []
     for pf in proof_files:
-        signed_url = get_proof_signed_url(pf.storage_path, expires_in=3600)
+        public_url = get_proof_public_url(pf.storage_path)
         urls.append({
             "id": str(pf.id),
             "original_filename": pf.original_filename,
             "mime_type": pf.mime_type,
             "file_size_bytes": pf.file_size_bytes,
             "sort_order": pf.sort_order,
-            "signed_url": signed_url,
+            "url": public_url,
         })
 
-    return {"proof_urls": urls, "expires_in": 3600}
+    return {"proof_urls": urls}
 
 
 @router.put("/submissions/{submission_id}/approve")
