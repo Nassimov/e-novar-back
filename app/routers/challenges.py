@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -460,22 +460,19 @@ def request_upload(
 @router.post("/{challenge_id}/submit")
 def submit_proof(
     challenge_id: str,
-    proof_files: List[UploadFile] = File(default=[]),
-    proof_message: Optional[str] = Form(default=None),
-    proof_text: Optional[str] = Form(default=None),
-    proof_url_link: Optional[str] = Form(default=None),
+    payload: SubmitProofPayload,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Submit a challenge proof.
+    """Record a submitted proof.
 
-    Accepts multipart/form-data so files upload through Railway on a sync worker
-    thread — no browser-to-Supabase CORS issues, no event-loop blocking.
+    Files are uploaded directly from the browser to Supabase Storage using the
+    user's own JWT (full CORS support, no Railway proxy needed).
+    This endpoint receives only JSON metadata — no file bytes through Railway.
     """
-    from app.services.storage import delete_challenge_proof, upload_challenge_proof
+    from app.services.storage import delete_challenge_proof
 
     user_id = UUID(current_user["id"])
-    role = current_user.get("role", "student")
     now = datetime.utcnow()
 
     part = db.exec(
@@ -489,16 +486,11 @@ def submit_proof(
         raise HTTPException(status_code=404, detail="Participation introuvable")
     if part.status != "in_progress":
         raise HTTPException(status_code=400, detail="Ce défi n'est pas en cours")
-
-    # Check deadline using the column if it exists, otherwise skip
-    try:
-        if part.deadline_at and part.deadline_at < now:
-            part.status = "expired"
-            db.add(part)
-            db.commit()
-            raise HTTPException(status_code=400, detail="La durée du défi est expirée")
-    except AttributeError:
-        pass  # deadline_at column not yet in DB
+    if part.deadline_at and part.deadline_at < now:
+        part.status = "expired"
+        db.add(part)
+        db.commit()
+        raise HTTPException(status_code=400, detail="La durée du défi est expirée")
 
     challenge = db.get(Challenge, challenge_id)
     if challenge is None:
@@ -506,39 +498,28 @@ def submit_proof(
 
     pt = challenge.proof_type or "image-or-pdf"
 
-    # ── Text proof ────────────────────────────────────────────────────────────
     if pt == "text":
-        text = (proof_text or "").strip()
-        if not text:
+        if not payload.proof_text or not payload.proof_text.strip():
             raise HTTPException(status_code=422, detail="Le texte de preuve est requis")
-        part.proof_url = f"text::{text}"
+        part.proof_url = f"text::{payload.proof_text.strip()}"
         part.proof_name = "text-proof"
 
-    # ── URL proof ─────────────────────────────────────────────────────────────
     elif pt == "url":
-        url = (proof_url_link or "").strip()
-        if not url:
+        if not payload.proof_url_link or not payload.proof_url_link.strip():
             raise HTTPException(status_code=422, detail="L'URL de preuve est requise")
+        url = payload.proof_url_link.strip()
         if not url.startswith(("http://", "https://")):
             raise HTTPException(status_code=422, detail="L'URL doit commencer par http:// ou https://")
         part.proof_url = url
         part.proof_name = "url-proof"
 
-    # ── File proof ────────────────────────────────────────────────────────────
     else:
-        if not proof_files:
+        if not payload.proof_paths:
             raise HTTPException(status_code=422, detail="Au moins un fichier de preuve est requis")
-        if len(proof_files) > MAX_FILES:
+        if len(payload.proof_paths) > MAX_FILES:
             raise HTTPException(status_code=422, detail=f"Maximum {MAX_FILES} fichiers autorisés")
 
-        # Validate all files before uploading any
-        file_contents: List[tuple] = []
-        for uf in proof_files:
-            content = uf.file.read()
-            mime = _validate_upload(uf.filename or "file", uf.content_type, len(content))
-            file_contents.append((content, uf.filename or "proof", mime))
-
-        # Delete previous proof files for this participation (idempotent)
+        # Clean up old proof files (idempotent re-submission)
         try:
             old_files = db.exec(
                 select(ChallengeProofFile).where(
@@ -555,41 +536,26 @@ def submit_proof(
         except Exception:
             db.rollback()
 
-        # Upload files to Supabase (blocking I/O — safe in sync thread pool)
-        uploaded: List[tuple] = []
-        for content, fname, mime in file_contents:
-            path = upload_challenge_proof(
-                content, fname, mime, role, str(user_id), challenge_id
-            )
-            uploaded.append((path, fname, mime, len(content)))
-
-        # Set first file on participation for backward compat
-        part.proof_url = uploaded[0][0]
-        part.proof_name = uploaded[0][1]
-
-        # Try to persist ChallengeProofFile rows (table may not exist yet)
+        # Persist proof file records
         try:
-            for i, (path, fname, mime, size) in enumerate(uploaded):
+            for i, fp in enumerate(payload.proof_paths):
                 pf = ChallengeProofFile(
                     participation_id=part.id,
-                    storage_path=path,
-                    original_filename=fname,
-                    mime_type=mime,
-                    file_size_bytes=size,
+                    storage_path=fp.path,
+                    original_filename=fp.original_filename,
+                    mime_type=fp.mime_type,
+                    file_size_bytes=fp.file_size_bytes,
                     sort_order=i,
                 )
                 db.add(pf)
             db.flush()
         except Exception:
             db.rollback()
-            # Table not yet created; proof_url/proof_name already set above
 
-    # Set proof_message if the column exists
-    try:
-        part.proof_message = (proof_message or "").strip() or None
-    except AttributeError:
-        pass  # column not yet in DB
+        part.proof_url = payload.proof_paths[0].path
+        part.proof_name = payload.proof_paths[0].original_filename
 
+    part.proof_message = (payload.proof_message or "").strip() or None
     part.status = "submitted"
     part.submitted_at = now
     db.add(part)
