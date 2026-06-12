@@ -263,9 +263,12 @@ Business logic (KP triggers, rating recompute, homework KP) runs as PostgreSQL f
 # Instead we use a regex that matches every *.e-novar.com subdomain and localhost
 # so prod / preprod / recette / local all work without manually listing each origin.
 _CORS_ORIGIN_REGEX = (
-    r"^https?://localhost(:\d+)?$"          # local dev (any port)
-    r"|^https://e-novar\.com$"              # production apex
-    r"|^https://[a-z0-9-]+\.e-novar\.com$"  # preprod, recette, any branch
+    r"^https?://localhost(:\d+)?$"                      # local dev (any port)
+    r"|^https://e-novar\.com$"                          # production apex
+    r"|^https://[a-z0-9-]+\.e-novar\.com$"              # preprod, recette, any branch
+    r"|^https://[a-z0-9-]+\.nacimmessi1010\.workers\.dev$"  # Cloudflare Workers dev
+    r"|^https://[a-z0-9-]+\.workers\.dev$"              # any Cloudflare Workers
+    r"|^https://[a-z0-9-]+\.pages\.dev$"                # any Cloudflare Pages
 )
 
 app.add_middleware(
