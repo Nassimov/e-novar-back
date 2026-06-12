@@ -9,7 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.enums import KpSource
 from app.models.gamification import Challenge, ChallengeParticipation
 from app.models.notification import Notification
@@ -18,7 +18,7 @@ from app.services.kp import award_kp
 
 router = APIRouter(tags=["admin-challenges"])
 
-admin_required = require_role("admin")
+
 
 
 class AdminCreateChallenge(BaseModel):
@@ -65,7 +65,7 @@ def _slugify(text: str) -> str:
 
 @router.get("/")
 async def list_challenges(
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     challenges = db.exec(select(Challenge)).all()
@@ -111,7 +111,7 @@ async def list_challenges(
 @router.post("/", status_code=201)
 async def create_challenge(
     payload: AdminCreateChallenge,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     challenge_id = payload.id or _slugify(payload.title)
@@ -143,7 +143,7 @@ async def create_challenge(
 async def update_challenge(
     challenge_id: str,
     payload: AdminUpdateChallenge,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     challenge = db.get(Challenge, challenge_id)
@@ -163,7 +163,7 @@ async def update_challenge(
 @router.delete("/{challenge_id}", status_code=204)
 async def deactivate_challenge(
     challenge_id: str,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     challenge = db.get(Challenge, challenge_id)
@@ -180,7 +180,7 @@ async def list_submissions(
     status_filter: Optional[str] = Query(None, alias="status"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     stmt = select(ChallengeParticipation).order_by(ChallengeParticipation.submitted_at.desc())
@@ -238,7 +238,7 @@ async def list_submissions(
 @router.put("/submissions/{submission_id}/approve")
 async def approve_submission(
     submission_id: UUID,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     part = db.get(ChallengeParticipation, submission_id)
@@ -252,7 +252,7 @@ async def approve_submission(
         raise HTTPException(status_code=404, detail="Challenge not found")
 
     part.status = "approved"
-    part.reviewed_by = UUID(current_user["id"])
+    part.reviewed_by = UUID(current_user["id"]) if current_user.get("id") else None
     part.reviewed_at = datetime.utcnow()
     db.add(part)
     db.commit()
@@ -281,7 +281,7 @@ async def approve_submission(
 async def reject_submission(
     submission_id: UUID,
     reason: str = Body("", embed=True),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     part = db.get(ChallengeParticipation, submission_id)
@@ -294,7 +294,7 @@ async def reject_submission(
 
     part.status = "lost"
     part.reason = reason
-    part.reviewed_by = UUID(current_user["id"])
+    part.reviewed_by = UUID(current_user["id"]) if current_user.get("id") else None
     part.reviewed_at = datetime.utcnow()
     db.add(part)
 

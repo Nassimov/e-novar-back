@@ -8,14 +8,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.teacher import TeacherPayout, TeacherWithdrawal
 from app.models.user import User
 from app.schemas.admin import WithdrawalProcessRequest
 
 router = APIRouter(tags=["admin-content"])
 
-admin_required = require_role("admin")
+
 
 # In-memory content store (replace with DB tables in production)
 _subjects: List[Dict] = []
@@ -45,7 +45,7 @@ class StoreRewardCreate(BaseModel):
 
 # Subjects CRUD
 @router.get("/subjects")
-async def list_subjects(current_user: Dict[str, Any] = Depends(admin_required)):
+async def list_subjects(current_user: Dict[str, Any] = Depends(get_admin_user)):
     """List all subjects."""
     from app.routers.catalogs import SUBJECTS
     return {"items": [{"id": str(i), "name": s} for i, s in enumerate(SUBJECTS)], "total": len(SUBJECTS)}
@@ -54,7 +54,7 @@ async def list_subjects(current_user: Dict[str, Any] = Depends(admin_required)):
 @router.post("/subjects", status_code=status.HTTP_201_CREATED)
 async def create_subject(
     payload: SubjectCreate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
 ):
     """Create a new subject."""
     import uuid
@@ -67,7 +67,7 @@ async def create_subject(
 async def update_subject(
     subject_id: str,
     payload: SubjectCreate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
 ):
     """Update a subject."""
     for s in _subjects:
@@ -80,7 +80,7 @@ async def update_subject(
 @router.delete("/subjects/{subject_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_subject(
     subject_id: str,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
 ):
     """Delete a subject."""
     global _subjects
@@ -90,7 +90,7 @@ async def delete_subject(
 
 # Levels CRUD
 @router.get("/levels")
-async def list_levels_admin(current_user: Dict[str, Any] = Depends(admin_required)):
+async def list_levels_admin(current_user: Dict[str, Any] = Depends(get_admin_user)):
     """List all levels."""
     from app.routers.catalogs import LEVELS
     return {"items": [{"id": str(i), "name": l} for i, l in enumerate(LEVELS)], "total": len(LEVELS)}
@@ -99,7 +99,7 @@ async def list_levels_admin(current_user: Dict[str, Any] = Depends(admin_require
 @router.post("/levels", status_code=status.HTTP_201_CREATED)
 async def create_level(
     payload: LevelCreate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
 ):
     """Create a new level."""
     import uuid
@@ -110,7 +110,7 @@ async def create_level(
 
 # Store rewards CRUD
 @router.get("/store-rewards")
-async def list_store_rewards_admin(current_user: Dict[str, Any] = Depends(admin_required)):
+async def list_store_rewards_admin(current_user: Dict[str, Any] = Depends(get_admin_user)):
     """List all store rewards."""
     from app.routers.catalogs import STORE_REWARDS
     return {"items": STORE_REWARDS, "total": len(STORE_REWARDS)}
@@ -119,7 +119,7 @@ async def list_store_rewards_admin(current_user: Dict[str, Any] = Depends(admin_
 @router.post("/store-rewards", status_code=status.HTTP_201_CREATED)
 async def create_store_reward(
     payload: StoreRewardCreate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
 ):
     """Create a new store reward."""
     import uuid
@@ -141,7 +141,7 @@ async def list_withdrawals(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     status_filter: Optional[str] = Query(None, alias="status"),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """List all EP→DZD payout requests."""
@@ -181,7 +181,7 @@ async def list_withdrawals(
 async def process_withdrawal(
     withdrawal_id: UUID,
     payload: WithdrawalProcessRequest,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Approve or reject an EP→DZD payout request.

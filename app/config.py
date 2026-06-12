@@ -69,6 +69,18 @@ class Settings(BaseSettings):
     app_env: str = "production"     # set to "production" in Railway Variables
     app_url: str = ""               # your Railway domain, e.g. https://xxx.up.railway.app
     frontend_url: str = ""          # your Vercel/frontend domain
+
+    # ── Admin (privileged account — credentials stored in Railway env vars only) ─
+    # ADMIN_EMAIL=admin@e-novar.com
+    # ADMIN_PASSWORD_HASH=$(python -c "from passlib.context import CryptContext; print(CryptContext(schemes=['bcrypt']).hash('YOUR_PASSWORD'))")
+    # ADMIN_2FA_SECRET=$(python -c "import pyotp; print(pyotp.random_base32())")
+    # ADMIN_JWT_EXPIRE_MINUTES=60
+    # ADMIN_JWT_SECRET=<random-256-bit-hex>
+    admin_email: str = ""
+    admin_password_hash: str = ""   # bcrypt hash of the admin password
+    admin_2fa_secret: str = ""      # base32-encoded TOTP secret (standard TOTP, RFC 6238)
+    admin_jwt_expire_minutes: int = 60
+    admin_jwt_secret: str = ""      # dedicated signing secret for admin JWTs
     # Comma-separated explicit origins (e.g. "https://e-novar.com,http://localhost:5173").
     # The wildcard "*" is no longer used here — *.e-novar.com is handled by regex in main.py.
     allowed_origins: str = ""

@@ -6,7 +6,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, func, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.booking import Booking, BookingStatus
 from app.models.payment import Payment, PaymentStatus
 from app.models.session import Session as SessionModel, SessionStatus
@@ -16,12 +16,12 @@ from app.schemas.admin import StatsResponse
 
 router = APIRouter(tags=["admin-stats"])
 
-admin_required = require_role("admin")
+
 
 
 @router.get("/", response_model=StatsResponse)
 async def get_platform_stats(
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Get platform-wide KPIs and statistics."""
@@ -85,7 +85,7 @@ async def get_platform_stats(
 @router.get("/revenue")
 async def get_revenue_stats(
     period: str = "month",
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Get detailed revenue statistics."""
@@ -122,7 +122,7 @@ async def get_revenue_stats(
 
 @router.get("/users-growth")
 async def get_user_growth(
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Get user growth over the last 30 days."""

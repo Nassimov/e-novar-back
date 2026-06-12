@@ -7,13 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.promo import PromoCode
 from app.schemas.admin import PromoCodeCreate, PromoCodeUpdate
 
 router = APIRouter(tags=["admin-promos"])
 
-admin_required = require_role("admin")
+
 
 
 @router.get("/")
@@ -21,7 +21,7 @@ async def list_promo_codes(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     is_active: bool = Query(None),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """List all promo codes."""
@@ -59,7 +59,7 @@ async def list_promo_codes(
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_promo_code(
     payload: PromoCodeCreate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Create a new promo code."""
@@ -95,7 +95,7 @@ async def create_promo_code(
 async def update_promo_code(
     promo_id: UUID,
     payload: PromoCodeUpdate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Update a promo code."""
@@ -123,7 +123,7 @@ async def update_promo_code(
 @router.delete("/{promo_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_promo_code(
     promo_id: UUID,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Delete a promo code."""

@@ -7,13 +7,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.user import User, UserRole
 from app.schemas.admin import UserListParams, UserStatusUpdate
 
 router = APIRouter(tags=["admin-users"])
 
-admin_required = require_role("admin")
+
 
 
 @router.get("/")
@@ -23,7 +23,7 @@ async def list_users(
     role: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
     search: Optional[str] = Query(None),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """List all users with filters."""
@@ -73,7 +73,7 @@ async def list_users(
 @router.get("/{user_id}")
 async def get_user(
     user_id: UUID,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Get a specific user."""
@@ -102,7 +102,7 @@ async def get_user(
 async def update_user_status(
     user_id: UUID,
     payload: UserStatusUpdate,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Activate or deactivate a user."""
@@ -124,7 +124,7 @@ async def update_user_status(
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
     user_id: UUID,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Delete a user account."""
@@ -140,7 +140,7 @@ async def delete_user(
 @router.post("/{user_id}/invite")
 async def invite_user(
     user_id: UUID,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Send an invitation email to a user."""

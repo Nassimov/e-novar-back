@@ -10,7 +10,7 @@ from redis import Redis
 from sqlmodel import Session, select
 
 from app.core.redis import get_redis_client
-from app.core.security import decode_supabase_jwt, extract_role
+from app.core.security import decode_admin_jwt, decode_supabase_jwt, extract_role
 from app.database import get_session
 from app.models.profile import Profile
 
@@ -99,6 +99,37 @@ def get_current_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="Profile not found")
     return profile
+
+
+async def get_admin_user(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> Dict[str, Any]:
+    """
+    Validate a custom admin JWT (issued by POST /api/admin/auth/step2).
+    Checks both the JWT signature/expiry AND the JTI presence in Redis
+    so that logout immediately revokes the session.
+    """
+    from app.config import get_settings as _get_settings
+
+    token = credentials.credentials
+    claims = decode_admin_jwt(token)
+    if not claims:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    jti = claims.get("jti", "")
+    if not jti or not get_redis_client().get(f"admin:session:{jti}"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin session expired or revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    cfg = _get_settings()
+    return {"id": None, "email": cfg.admin_email, "role": "admin", "claims": claims}
 
 
 def require_role(*roles: str):

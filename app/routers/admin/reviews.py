@@ -7,14 +7,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.review import Review
 from app.models.user import User
 from app.schemas.admin import ReviewModerationAction
 
 router = APIRouter(tags=["admin-reviews"])
 
-admin_required = require_role("admin")
+
 
 
 @router.get("/")
@@ -22,7 +22,7 @@ async def list_reviews(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     flagged_only: bool = Query(False),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """List all reviews, optionally filtered to flagged ones."""
@@ -63,7 +63,7 @@ async def list_reviews(
 @router.delete("/{review_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_review(
     review_id: UUID,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Delete a review."""

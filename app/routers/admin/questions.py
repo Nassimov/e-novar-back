@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, field_validator
 from sqlmodel import Session, func, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.catalog import Subject, Level
 from app.models.practice import (
     Question, QuestionChoice, QuizAnswer, QuizAttempt,
@@ -20,7 +20,7 @@ from app.models.practice import (
 )
 
 router = APIRouter(tags=["Admin — Questions"])
-admin_required = require_role("admin")
+
 
 VALID_DIFFICULTIES = {"easy", "medium", "hard", "expert"}
 VALID_STATUSES     = {"draft", "pending_review", "approved", "rejected"}
@@ -208,7 +208,7 @@ async def list_questions(
     difficulty: Optional[str]  = Query(None),
     status:     Optional[str]  = Query(None),
     deleted:    bool           = Query(False),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Paginated list of questions with full filter support."""
@@ -279,7 +279,7 @@ async def list_questions(
 
 @router.get("/analytics", response_model=AnalyticsResponse)
 async def get_analytics(
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Platform-wide question bank analytics."""
@@ -344,7 +344,7 @@ async def get_analytics(
 async def list_import_batches(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=50),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """List all past CSV/JSON import jobs."""
@@ -377,7 +377,7 @@ async def list_import_batches(
 @router.get("/{question_id}", response_model=QuestionOut)
 async def get_question(
     question_id: str,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -402,10 +402,10 @@ async def get_question(
 @router.post("/", response_model=QuestionOut, status_code=201)
 async def create_question(
     payload: QuestionCreateIn,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    uid = UUID(current_user["id"])
+    uid = UUID(current_user["id"]) if current_user.get("id") else None
     now = datetime.utcnow()
 
     q = Question(
@@ -444,7 +444,7 @@ async def create_question(
 async def update_question(
     question_id: str,
     payload: QuestionUpdateIn,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -491,7 +491,7 @@ async def update_question(
 @router.delete("/{question_id}", status_code=204)
 async def soft_delete_question(
     question_id: str,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -504,7 +504,7 @@ async def soft_delete_question(
         raise HTTPException(status_code=404, detail="Question introuvable.")
 
     q.deleted_at = datetime.utcnow()
-    q.deleted_by = UUID(current_user["id"])
+    q.deleted_by = UUID(current_user["id"]) if current_user.get("id") else None
     q.active     = False
     q.validated  = False
     db.add(q)
@@ -514,7 +514,7 @@ async def soft_delete_question(
 @router.post("/{question_id}/restore", response_model=QuestionOut)
 async def restore_question(
     question_id: str,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -545,7 +545,7 @@ async def restore_question(
 @router.post("/{question_id}/validate", response_model=QuestionOut)
 async def validate_question(
     question_id: str,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -563,7 +563,7 @@ async def validate_question(
     q.validation_status = "approved"
     q.validated         = True
     q.active            = True
-    q.reviewed_by       = UUID(current_user["id"])
+    q.reviewed_by       = UUID(current_user["id"]) if current_user.get("id") else None
     q.reviewed_at       = now
     q.rejection_reason  = None
     q.updated_at        = now
@@ -580,7 +580,7 @@ async def validate_question(
 async def reject_question(
     question_id: str,
     payload: RejectIn,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     try:
@@ -596,7 +596,7 @@ async def reject_question(
     q.validation_status = "rejected"
     q.validated         = False
     q.active            = False
-    q.reviewed_by       = UUID(current_user["id"])
+    q.reviewed_by       = UUID(current_user["id"]) if current_user.get("id") else None
     q.reviewed_at       = now
     q.rejection_reason  = payload.reason
     q.updated_at        = now
@@ -618,7 +618,7 @@ _REQUIRED_CSV_COLS = {"statement", "subject_id", "school_level_id", "difficulty"
 @router.post("/bulk-import")
 async def bulk_import(
     file: UploadFile = File(...),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """
@@ -637,7 +637,7 @@ async def bulk_import(
     fmt = "csv" if fname.endswith(".csv") else "json" if fname.endswith(".json") else "xlsx"
 
     raw = await file.read()
-    uid = UUID(current_user["id"])
+    uid = UUID(current_user["id"]) if current_user.get("id") else None
     now = datetime.utcnow()
 
     errors: list[dict] = []

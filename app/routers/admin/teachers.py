@@ -7,21 +7,21 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
-from app.dependencies import get_db, require_role
+from app.dependencies import get_admin_user, get_db
 from app.models.teacher import TeacherProfile
 from app.models.user import User
 from app.schemas.admin import TeacherApprovalAction
 
 router = APIRouter(tags=["admin-teachers"])
 
-admin_required = require_role("admin")
+
 
 
 @router.get("/pending")
 async def list_pending_teachers(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """List teachers pending approval."""
@@ -64,7 +64,7 @@ async def list_pending_teachers(
 async def approve_teacher(
     teacher_profile_id: UUID,
     payload: TeacherApprovalAction,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Approve a teacher's profile."""
@@ -100,7 +100,7 @@ async def approve_teacher(
 async def reject_teacher(
     teacher_profile_id: UUID,
     payload: TeacherApprovalAction,
-    current_user: Dict[str, Any] = Depends(admin_required),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Reject a teacher's profile."""
