@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -211,7 +211,7 @@ def _challenge_out(c: Challenge, p: Optional[ChallengeParticipation], db: Sessio
 
 
 def _auto_expire(user_id: UUID, db: Session) -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expired_parts = db.exec(
         select(ChallengeParticipation).where(
             ChallengeParticipation.user_id == user_id,
@@ -236,7 +236,7 @@ async def list_challenges(
 ):
     user_id = UUID(current_user["id"])
     role = current_user["role"]
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     _auto_expire(user_id, db)
 
@@ -343,7 +343,7 @@ async def start_challenge(
     if existing:
         raise HTTPException(status_code=409, detail="Already participated in this challenge")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     deadline = (
         now + timedelta(seconds=challenge.timer_duration_sec)
         if challenge.timer_duration_sec
@@ -418,7 +418,7 @@ def submit_proof(
 
     user_id = UUID(current_user["id"])
     role = current_user.get("role", "student")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     part = db.exec(
         select(ChallengeParticipation).where(

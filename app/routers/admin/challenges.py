@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -308,7 +308,7 @@ async def approve_submission(
 
     part.status = "approved"
     part.reviewed_by = UUID(current_user["id"]) if current_user.get("id") else None
-    part.reviewed_at = datetime.utcnow()
+    part.reviewed_at = datetime.now(timezone.utc)
     db.add(part)
     db.commit()
 
@@ -350,7 +350,7 @@ async def reject_submission(
     part.status = "lost"
     part.reason = reason
     part.reviewed_by = UUID(current_user["id"]) if current_user.get("id") else None
-    part.reviewed_at = datetime.utcnow()
+    part.reviewed_at = datetime.now(timezone.utc)
     db.add(part)
 
     title_str = challenge.title if challenge else "défi"
