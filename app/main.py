@@ -410,6 +410,26 @@ async def health_check():
     return {"status": "ok", "version": "1.0.0", "env": os.getenv("APP_ENV", "production")}
 
 
+@app.get("/health/deps", include_in_schema=False)
+async def health_deps():
+    """Verify key dependencies — used to confirm deploys."""
+    import supabase as _sb
+    from app.config import get_settings as _gs
+    cfg = _gs()
+    result: dict = {
+        "supabase_version": _sb.__version__,
+        "service_key_set": bool(cfg.supabase_service_role_key),
+        "jwt_secret_set": bool(cfg.supabase_jwt_secret),
+        "supabase_url_set": bool(cfg.supabase_url),
+    }
+    try:
+        client = _sb.create_client(cfg.supabase_url, cfg.supabase_service_role_key)
+        result["service_client"] = "ok"
+    except Exception as e:
+        result["service_client"] = f"ERROR: {type(e).__name__}: {e}"
+    return result
+
+
 # ── WebSocket connection manager ──────────────────────────────────────────────
 class ConnectionManager:
     def __init__(self):
