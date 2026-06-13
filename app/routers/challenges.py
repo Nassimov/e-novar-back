@@ -521,12 +521,16 @@ def submit_proof(
         part.proof_url = storage_paths[0]
         part.proof_name = file_data[0][0]
 
-    part.proof_message = (payload.proof_message or "").strip() or None
-    part.status = "submitted"
-    part.submitted_at = now
-    db.add(part)
-    db.commit()
-    db.refresh(part)
+    try:
+        part.proof_message = (payload.proof_message or "").strip() or None
+        part.status = "submitted"
+        part.submitted_at = now
+        db.add(part)
+        db.commit()
+        db.refresh(part)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erreur sauvegarde participation : {exc}")
 
     # Notify all admins of the new submission
     try:
@@ -544,4 +548,7 @@ def submit_proof(
     except Exception:
         pass
 
-    return _participation_out(part, db)
+    try:
+        return _participation_out(part, db)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur réponse : {type(exc).__name__}: {exc}")

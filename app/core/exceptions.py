@@ -84,14 +84,41 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-        import logging
+        import logging, os, re
         from fastapi import HTTPException as _HTTPException
         from fastapi.exceptions import RequestValidationError as _RVE
         # Let FastAPI's own handlers deal with HTTPException / RequestValidationError
         if isinstance(exc, (_HTTPException, _RVE)):
             raise exc
         logging.getLogger("app.exceptions").exception("Unhandled server error: %s", exc)
+
+        # This handler runs inside ServerErrorMiddleware, which is ABOVE CORSMiddleware.
+        # Without manually adding CORS headers here, cross-origin browsers see
+        # "Failed to fetch" (TypeError) instead of a meaningful error message.
+        _CORS_RE = (
+            r"^https?://localhost(:\d+)?$"
+            r"|^https://e-novar\.com$"
+            r"|^https://[a-z0-9-]+\.e-novar\.com$"
+            r"|^https://[a-z0-9-]+\.nacimmessi1010\.workers\.dev$"
+            r"|^https://[a-z0-9-]+\.workers\.dev$"
+            r"|^https://[a-z0-9-]+\.pages\.dev$"
+        )
+        headers: dict = {}
+        origin = request.headers.get("origin", "")
+        if origin and re.match(_CORS_RE, origin):
+            headers["access-control-allow-origin"] = origin
+            headers["access-control-allow-credentials"] = "true"
+            headers["vary"] = "Origin"
+
+        # In development, surface the real error so we can diagnose it.
+        detail: str
+        if os.getenv("APP_ENV", "production") == "development":
+            detail = f"{type(exc).__name__}: {exc}"
+        else:
+            detail = "Une erreur interne est survenue. Veuillez réessayer."
+
         return JSONResponse(
             status_code=500,
-            content={"detail": "Une erreur interne est survenue. Veuillez réessayer."},
+            content={"detail": detail},
+            headers=headers,
         )
