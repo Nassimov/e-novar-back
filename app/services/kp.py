@@ -26,7 +26,7 @@ def get_or_create_kp_account(user_id, db: Session) -> KpAccount:
             next_level_at=LEVEL_THRESHOLDS[1],
         )
         db.add(account)
-        db.commit()
+        db.flush()  # flush within the current transaction rather than committing early
         db.refresh(account)
     return account
 
@@ -47,7 +47,6 @@ def award_kp(
     account.total_earned += amount
     account.week_earned += amount
     account.xp += amount
-    account.last_activity_at = datetime.utcnow()
 
     leveled_up, new_level = check_level_up(account)
     if leveled_up:
@@ -66,7 +65,6 @@ def award_kp(
         label=label,
         source=source,
         amount=amount,
-        balance_after=account.balance,
     )
     db.add(transaction)
     db.commit()
@@ -98,7 +96,6 @@ def spend_kp(
         label=label,
         source=KpSource.spend,
         amount=-amount,
-        balance_after=account.balance,
     )
     db.add(transaction)
     db.commit()

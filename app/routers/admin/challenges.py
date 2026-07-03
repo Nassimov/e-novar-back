@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlmodel import Session, func, select
 
 from app.dependencies import get_admin_user, get_db
@@ -183,9 +184,22 @@ async def list_submissions(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    stmt = select(ChallengeParticipation).order_by(ChallengeParticipation.submitted_at.desc())
-    if status_filter:
-        stmt = stmt.where(ChallengeParticipation.status == status_filter)
+    # "pending" is a virtual filter: submitted (awaiting review) + in_progress
+    if status_filter == "pending":
+        stmt = (
+            select(ChallengeParticipation)
+            .where(ChallengeParticipation.status.in_(["submitted", "in_progress"]))
+            .order_by(
+                # submitted items first (need immediate admin attention), then in_progress
+                text("CASE WHEN status = 'submitted' THEN 0 WHEN status = 'in_progress' THEN 1 ELSE 2 END"),
+                ChallengeParticipation.submitted_at.desc(),
+                ChallengeParticipation.started_at.desc(),
+            )
+        )
+    else:
+        stmt = select(ChallengeParticipation).order_by(ChallengeParticipation.submitted_at.desc())
+        if status_filter:
+            stmt = stmt.where(ChallengeParticipation.status == status_filter)
 
     parts = db.exec(stmt).all()
     total = len(parts)
@@ -296,7 +310,13 @@ async def approve_submission(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    part = db.get(ChallengeParticipation, submission_id)
+    # Lock the row to prevent concurrent double-approvals
+    stmt = (
+        select(ChallengeParticipation)
+        .where(ChallengeParticipation.id == submission_id)
+        .with_for_update()
+    )
+    part = db.exec(stmt).first()
     if part is None:
         raise HTTPException(status_code=404, detail="Submission not found")
     if part.status != "submitted":
@@ -310,7 +330,8 @@ async def approve_submission(
     part.reviewed_by = UUID(current_user["id"]) if current_user.get("id") else None
     part.reviewed_at = datetime.now(timezone.utc)
     db.add(part)
-    db.commit()
+    # Do NOT commit yet — award_kp will commit everything atomically so that
+    # status change and EP credit cannot be split across separate transactions.
 
     award_kp(
         part.user_id,
@@ -339,7 +360,13 @@ async def reject_submission(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    part = db.get(ChallengeParticipation, submission_id)
+    # Lock the row to prevent concurrent race conditions
+    stmt = (
+        select(ChallengeParticipation)
+        .where(ChallengeParticipation.id == submission_id)
+        .with_for_update()
+    )
+    part = db.exec(stmt).first()
     if part is None:
         raise HTTPException(status_code=404, detail="Submission not found")
     if part.status != "submitted":
