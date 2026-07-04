@@ -438,21 +438,33 @@ def _fallback_select(
 def _award_ep(student_id: UUID, ep: int, label: str, attempt_id: UUID, db: Session) -> None:
     if ep <= 0:
         return
+
+    # Apply active ep_boost multiplier (e.g. ×2, ×4) — non-blocking on failure
+    actual_ep = ep
+    try:
+        from app.services.effects import get_active_ep_boost
+        boost = get_active_ep_boost(student_id, db)
+        if boost:
+            multiplier = float((boost.effect_config or {}).get("multiplier", 2.0))
+            actual_ep = max(1, int(ep * multiplier))
+    except Exception:
+        pass
+
     bal = db.exec(select(KpBalance).where(KpBalance.user_id == student_id)).first()
     if bal is None:
         bal = KpBalance(user_id=student_id, balance=0, total_earned=0, week_earned=0, xp=0, next_level_at=500)
         db.add(bal)
-    bal.balance      += ep
-    bal.total_earned += ep
-    bal.week_earned  += ep
-    bal.xp           += ep
+    bal.balance      += actual_ep
+    bal.total_earned += actual_ep
+    bal.week_earned  += actual_ep
+    bal.xp           += actual_ep
     bal.updated_at    = datetime.utcnow()
     db.add(bal)
     db.add(KpTransaction(
         user_id=student_id,
-        amount=ep,
+        amount=actual_ep,
         source="quiz",
-        label=label,
+        label=label if actual_ep == ep else f"{label} (×{actual_ep // ep if ep else 1} boost)",
         ref_type="quiz_attempt",
         ref_id=attempt_id,
     ))

@@ -183,6 +183,69 @@ def send_session_reminder_email(
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_store_redeem_email(
+    self,
+    to: str,
+    name: str,
+    item_name: str,
+    item_category: str,
+    effect_type: str,
+    is_auto: bool,
+    cost: int,
+) -> bool:
+    """Confirmation email after an EP marketplace exchange."""
+    if is_auto:
+        status_block = f"""
+        <div style="background:#ECFDF5;border-left:4px solid #10B981;padding:16px;border-radius:6px;margin:24px 0;">
+          <p style="margin:0;font-weight:bold;color:#065F46;">✅ Avantage activé immédiatement</p>
+          <p style="margin:8px 0 0;color:#065F46;">Votre accès est disponible dès maintenant dans votre espace.</p>
+        </div>"""
+        cta_url = f"{settings.frontend_url}/student/store"
+        cta_label = "Voir mes avantages actifs"
+    else:
+        delay = "72h" if item_category == "travel" else "48h"
+        status_block = f"""
+        <div style="background:#FFF7ED;border-left:4px solid #F59E0B;padding:16px;border-radius:6px;margin:24px 0;">
+          <p style="margin:0;font-weight:bold;color:#92400E;">⏳ Demande enregistrée</p>
+          <p style="margin:8px 0 0;color:#92400E;">L'équipe E-NOVAR vous contactera sous {delay} pour finaliser votre commande.</p>
+        </div>"""
+        cta_url = f"{settings.frontend_url}/student/store"
+        cta_label = "Voir mes échanges"
+
+    html = f"""
+    <html>
+    <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
+      <h1 style="color:#4F46E5;">Échange EP confirmé 🎁</h1>
+      <p>Bonjour {name},</p>
+      <p>Votre échange EP a bien été enregistré :</p>
+      <table style="width:100%;border-collapse:collapse;margin:20px 0;">
+        <tr style="background:#F3F4F6;">
+          <td style="padding:12px;border:1px solid #E5E7EB;"><strong>Article</strong></td>
+          <td style="padding:12px;border:1px solid #E5E7EB;">{item_name}</td>
+        </tr>
+        <tr>
+          <td style="padding:12px;border:1px solid #E5E7EB;"><strong>Coût</strong></td>
+          <td style="padding:12px;border:1px solid #E5E7EB;">{cost:,} EP</td>
+        </tr>
+      </table>
+      {status_block}
+      <p>
+        <a href="{cta_url}"
+           style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
+          {cta_label}
+        </a>
+      </p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe E-NOVAR</p>
+    </body>
+    </html>
+    """
+    try:
+        return _send(to, f"Échange EP confirmé : {item_name}", html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_withdrawal_processed_email(self, to: str, name: str, amount: int, status: str) -> bool:
     status_label = "approuvée" if status == "approved" else "refusée"
     color = "#10B981" if status == "approved" else "#EF4444"

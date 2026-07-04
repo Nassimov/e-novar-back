@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     # ADMIN_2FA_SECRET=$(python -c "import pyotp; print(pyotp.random_base32())")
     # ADMIN_JWT_EXPIRE_MINUTES=60
     # ADMIN_JWT_SECRET=<random-256-bit-hex>
+    # ── AI Quota ──────────────────────────────────────────────────────────────
+    # Free interactive AI questions per user per calendar day.
+    # Set AI_FREE_DAILY_QUOTA=0 to disable quota (unlimited for all).
+    ai_free_daily_quota: int = 10
+
     admin_email: str = ""
     admin_password_hash: str = ""   # bcrypt hash of the admin password
     admin_2fa_secret: str = ""      # base32-encoded TOTP secret (standard TOTP, RFC 6238)

@@ -83,6 +83,19 @@ def get_proof_public_url(storage_path: str) -> str:
     return _bucket().get_public_url(storage_path)
 
 
+def list_folder(folder: str) -> list[dict]:
+    """List files in a storage folder. Returns [{name, path}] — directories excluded."""
+    try:
+        entries = _bucket().list(folder)
+        return [
+            {"name": e["name"], "path": f"{folder}/{e['name']}"}
+            for e in (entries or [])
+            if e.get("id") and not e.get("metadata", {}).get("size") == 0
+        ]
+    except Exception:
+        return []
+
+
 def delete_challenge_proof(storage_path: str) -> None:
     """Delete a challenge proof file from enovar-files."""
     try:

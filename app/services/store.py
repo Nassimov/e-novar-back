@@ -1,5 +1,22 @@
+"""
+Store redemption service.
+
+Generic effect type system:
+  ep_boost      — config: {multiplier: N, duration_hours: H}     auto-approved
+  ai_boost      — config: {questions: N}                          auto-approved
+  streak_shield — config: {duration_hours: H}                     auto-approved
+  premium       — config: {duration_days: N}                      auto-approved
+  pdf_pack      — config: {pack_id: str}                          auto-approved
+  stickers_pack — config: {count: N, pack_id: str}               auto-approved
+  coaching_credit     — config: {duration_minutes: N}             pending → admin
+  psychometric_credit — config: {type: str}                       pending → admin
+  voucher_carrefour   — config: {amount_dzd: N, brand: str}       pending → admin
+  travel_booking      — config: {destination: str, type: str}     pending → admin
+  (none/null)   — physical items: pending → admin
+"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from uuid import UUID
@@ -11,28 +28,48 @@ from app.models.kp import KpBalance, KpTransaction
 from app.models.store import RewardClaim, StoreItem, UserEntitlement
 from app.services.kp import get_or_create_kp_account
 
+logger = logging.getLogger(__name__)
+
+# ── Effect registry ───────────────────────────────────────────────────────────
 
 EFFECT_DESCRIPTIONS: dict[str, str] = {
-    "ep_boost_2x_24h":     "Boost ×2 EP actif pendant 24h",
-    "ai_boost_5q":         "5 questions IA créditées",
-    "streak_shield_1d":    "Streak protégé pour 1 jour",
-    "premium_30d":         "Accès E-NOVAR Premium pendant 30 jours",
-    "pdf_pack_bac":        "Pack annales BAC PDF déverrouillé",
-    "stickers_pack":       "Pack stickers E-NOVAR activé",
-    "coaching_credit":     "Crédit coaching enregistré — l'équipe vous contactera sous 48h",
-    "psychometric_credit": "Bilan psychométrique enregistré — l'équipe vous contactera sous 48h",
-    "voucher_carrefour":   "Bon Carrefour enregistré — l'équipe vous transmettra votre code sous 48h",
-    "travel_booking":      "Demande de voyage enregistrée — l'équipe vous contactera sous 72h",
+    "ep_boost":             "Boost EP ×{multiplier} actif pendant {duration_hours}h",
+    "ai_boost":             "{questions} questions IA créditées",
+    "streak_shield":        "Streak protégé pour {duration_hours}h",
+    "premium":              "Accès E-NOVAR Premium pendant {duration_days} jours",
+    "pdf_pack":             "Pack PDF déverrouillé — téléchargez vos documents dans la boutique",
+    "stickers_pack":        "Pack de {count} stickers E-NOVAR activé",
+    "coaching_credit":      "Crédit coaching enregistré — l'équipe vous contactera sous 48h",
+    "psychometric_credit":  "Bilan psychométrique enregistré — l'équipe vous contactera sous 48h",
+    "voucher_carrefour":    "Bon Carrefour enregistré — votre code vous sera transmis sous 48h",
+    "travel_booking":       "Demande de voyage enregistrée — l'équipe vous contactera sous 72h",
 }
 
 EFFECT_AUTO_APPROVE = {
-    "ep_boost_2x_24h",
-    "ai_boost_5q",
-    "streak_shield_1d",
-    "premium_30d",
-    "pdf_pack_bac",
+    "ep_boost",
+    "ai_boost",
+    "streak_shield",
+    "premium",
+    "pdf_pack",
     "stickers_pack",
 }
+
+# Manual effects whose claims stay pending and trigger a notification email
+EFFECT_MANUAL_NOTIFY = {
+    "coaching_credit",
+    "psychometric_credit",
+    "voucher_carrefour",
+    "travel_booking",
+}
+
+
+def format_effect_description(effect_type: str, config: dict) -> str:
+    """Return a human-readable description with config values interpolated."""
+    template = EFFECT_DESCRIPTIONS.get(effect_type, "Échange enregistré !")
+    try:
+        return template.format(**{k: v for k, v in config.items()})
+    except KeyError:
+        return template
 
 
 def _calc_expiry(effect_type: str, config: dict) -> Optional[datetime]:
@@ -43,19 +80,25 @@ def _calc_expiry(effect_type: str, config: dict) -> Optional[datetime]:
         return now + timedelta(hours=int(hours))
     if days:
         return now + timedelta(days=int(days))
-    # Defaults per effect type
-    if effect_type == "ep_boost_2x_24h":
-        return now + timedelta(hours=24)
-    if effect_type == "streak_shield_1d":
-        return now + timedelta(days=1)
-    if effect_type == "premium_30d":
-        return now + timedelta(days=30)
-    if effect_type in ("ai_boost_5q", "pdf_pack_bac", "stickers_pack",
-                       "coaching_credit", "psychometric_credit",
-                       "voucher_carrefour", "travel_booking"):
-        return None  # no expiry / admin-set
-    return None
+    # Type-based defaults when config doesn't specify duration
+    defaults: dict[str, timedelta] = {
+        "ep_boost":      timedelta(hours=24),
+        "streak_shield": timedelta(hours=24),
+        "premium":       timedelta(days=30),
+    }
+    return now + defaults[effect_type] if effect_type in defaults else None
 
+
+def _build_entitlement_config(effect_type: str, item_config: dict) -> dict:
+    """Add derived fields to the entitlement config at creation time."""
+    config = dict(item_config)
+    # ai_boost: initialise remaining question pool
+    if effect_type == "ai_boost":
+        config.setdefault("remaining", int(config.get("questions", 5)))
+    return config
+
+
+# ── Redeem ────────────────────────────────────────────────────────────────────
 
 def redeem_item(
     user_id: UUID,
@@ -68,94 +111,81 @@ def redeem_item(
       2. Deduct KP (balance update + KpTransaction)
       3. Decrement stock if limited
       4. Create RewardClaim
-      5. Create UserEntitlement for auto-processed effects
-    Returns (claim, entitlement_or_None, updated_account, human_message).
+      5. Create UserEntitlement for effects that have an effect_type
+    Single db.commit() — fully atomic.
     Raises ValueError for business-rule violations (mapped to HTTP 400 by caller).
     """
     now = datetime.now(timezone.utc)
 
     # Lock item row to prevent concurrent stock races
-    stmt = (
+    item = db.exec(
         select(StoreItem)
-        .where(StoreItem.id == item_id, StoreItem.active == True)
+        .where(StoreItem.id == item_id, StoreItem.active == True)  # noqa: E712
         .with_for_update()
-    )
-    item = db.exec(stmt).first()
+    ).first()
     if not item:
         raise ValueError("Article introuvable ou inactif.")
 
-    # Stock check
     if item.stock is not None and item.stock <= 0:
         raise ValueError("Stock épuisé.")
 
-    # KP account (lock for update — prevents concurrent balance races)
+    # Lock KP account to prevent concurrent balance races
     account = db.exec(
         select(KpBalance).where(KpBalance.user_id == user_id).with_for_update()
     ).first()
     if account is None:
-        # Create on the fly (new user with no KP yet)
         account = get_or_create_kp_account(user_id, db)
 
-    # Level check
     if account.level < item.level_required:
         raise ValueError(
             f"Niveau insuffisant : niveau {item.level_required} requis "
-            f"(votre niveau : {account.level})."
+            f"(votre niveau actuel : {account.level})."
         )
 
-    # Balance check
     if account.balance < item.cost:
         raise ValueError(
             f"Solde EP insuffisant : {account.balance} EP disponibles, "
             f"{item.cost} EP requis."
         )
 
-    # Deduct balance
+    # Deduct balance (bypass boost — this is a spend, not an earn)
     account.balance -= item.cost
     account.updated_at = now
     db.add(account)
 
-    # KP deduction transaction
-    kp_tx = KpTransaction(
+    db.add(KpTransaction(
         user_id=user_id,
         amount=-item.cost,
         source=KpSource.reward,
         label=f"Échange marketplace : {item.name}",
-    )
-    db.add(kp_tx)
+    ))
 
-    # Decrement stock
     if item.stock is not None:
         item.stock -= 1
         db.add(item)
 
-    # Determine claim status
     auto_approve = bool(item.effect_type) and item.effect_type in EFFECT_AUTO_APPROVE
-    claim_status = "approved" if auto_approve else "pending"
-
-    # Create claim
     claim = RewardClaim(
         user_id=user_id,
         item_id=item_id,
         cost=item.cost,
-        status=claim_status,
+        status="approved" if auto_approve else "pending",
         processed_at=now if auto_approve else None,
     )
     db.add(claim)
     db.flush()  # get claim.id before creating entitlement
 
-    # Create entitlement for auto-processed effects
     entitlement: Optional[UserEntitlement] = None
     if item.effect_type:
-        config = item.effect_config or {}
-        expires_at = _calc_expiry(item.effect_type, config)
+        raw_config = item.effect_config or {}
+        ent_config = _build_entitlement_config(item.effect_type, raw_config)
         entitlement = UserEntitlement(
             user_id=user_id,
             claim_id=claim.id,
             effect_type=item.effect_type,
-            effect_config=config,
+            effect_config=ent_config,
             status="active",
-            expires_at=expires_at,
+            expires_at=_calc_expiry(item.effect_type, ent_config),
         )
         db.add(entitlement)
 
@@ -165,5 +195,30 @@ def redeem_item(
     if entitlement:
         db.refresh(entitlement)
 
-    msg = EFFECT_DESCRIPTIONS.get(item.effect_type or "", "Échange enregistré !")
+    msg = format_effect_description(item.effect_type or "", item.effect_config or {}) if item.effect_type else "Échange enregistré !"
+
+    # Send notification email (fire-and-forget, non-blocking)
+    _notify_redeem(user_id, item, claim, db)
+
     return claim, entitlement, account, msg
+
+
+def _notify_redeem(user_id: UUID, item: StoreItem, claim: RewardClaim, db: Session) -> None:
+    """Send a confirmation email for the redemption. Silently swallows failures."""
+    try:
+        from app.models.profile import Profile
+        profile = db.exec(select(Profile).where(Profile.id == user_id)).first()
+        if not profile or not profile.email:
+            return
+        from app.workers.email_tasks import send_store_redeem_email
+        send_store_redeem_email.delay(
+            to=profile.email,
+            name=profile.first_name or profile.full_name or "Utilisateur",
+            item_name=item.name,
+            item_category=item.category,
+            effect_type=item.effect_type or "",
+            is_auto=claim.status == "approved",
+            cost=item.cost,
+        )
+    except Exception as exc:
+        logger.warning("store redeem email skipped: %s", exc)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -10,7 +11,8 @@ from sqlmodel import Session, select
 from app.dependencies import get_current_user, get_db
 from app.models.profile import Profile
 from app.models.store import RewardClaim, StoreItem, UserEntitlement
-from app.services.store import redeem_item, EFFECT_DESCRIPTIONS
+from app.services.store import redeem_item, format_effect_description
+from app.services.effects import expire_stale_entitlements
 
 router = APIRouter(tags=["Store"])
 
@@ -83,7 +85,7 @@ async def redeem_store_item(
             "effect_type": entitlement.effect_type,
             "status": entitlement.status,
             "expires_at": entitlement.expires_at.isoformat() if entitlement.expires_at else None,
-            "description": EFFECT_DESCRIPTIONS.get(entitlement.effect_type, ""),
+            "description": format_effect_description(entitlement.effect_type, entitlement.effect_config or {}),
         }
 
     return result
@@ -143,17 +145,16 @@ async def list_my_entitlements(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List the current user's active entitlements."""
+    """List the current user's active (non-expired) entitlements."""
     uid = UUID(current_user["id"])
-    from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
+
+    # Sweep expired rows first
+    expire_stale_entitlements(uid, db)
 
     entitlements = db.exec(
         select(UserEntitlement)
-        .where(
-            UserEntitlement.user_id == uid,
-            UserEntitlement.status == "active",
-        )
+        .where(UserEntitlement.user_id == uid, UserEntitlement.status == "active")
         .order_by(UserEntitlement.activated_at.desc())
     ).all()
 
@@ -166,12 +167,67 @@ async def list_my_entitlements(
                 "status": e.status,
                 "expires_at": e.expires_at.isoformat() if e.expires_at else None,
                 "activated_at": e.activated_at.isoformat(),
-                "description": EFFECT_DESCRIPTIONS.get(e.effect_type, ""),
+                "description": format_effect_description(e.effect_type, e.effect_config or {}),
                 "is_expired": bool(e.expires_at and e.expires_at < now),
             }
             for e in entitlements
+            if not e.expires_at or e.expires_at > now
         ]
     }
+
+
+@router.get("/entitlements/pdf-pack/files")
+async def get_pdf_pack_files(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return signed download URLs for PDF packs the user has active entitlements for.
+    Files must be uploaded by admin to: enovar-files/pdf-packs/{pack_id}/
+    Signed URLs are valid for 1 hour.
+    """
+    uid = UUID(current_user["id"])
+    now = datetime.now(timezone.utc)
+
+    active = db.exec(
+        select(UserEntitlement).where(
+            UserEntitlement.user_id == uid,
+            UserEntitlement.effect_type == "pdf_pack",
+            UserEntitlement.status == "active",
+        )
+    ).all()
+    active = [e for e in active if not e.expires_at or e.expires_at > now]
+
+    if not active:
+        raise HTTPException(status_code=403, detail="Aucun accès Pack PDF actif.")
+
+    from app.services.storage import list_folder, get_signed_url
+
+    packs = []
+    seen_pack_ids: set[str] = set()
+    for ent in active:
+        pack_id = (ent.effect_config or {}).get("pack_id", "bac_10ans")
+        if pack_id in seen_pack_ids:
+            continue
+        seen_pack_ids.add(pack_id)
+
+        folder = f"pdf-packs/{pack_id}"
+        files = list_folder(folder)
+        signed = []
+        for f in files:
+            url = get_signed_url(f["path"], expires_in=3600)
+            if url:
+                signed.append({"filename": f["name"], "url": url})
+
+        packs.append({
+            "pack_id": pack_id,
+            "entitlement_id": str(ent.id),
+            "expires_at": ent.expires_at.isoformat() if ent.expires_at else None,
+            "files": signed,
+            "file_count": len(signed),
+        })
+
+    return {"packs": packs}
 
 
 def _item_to_dict(it: StoreItem) -> Dict[str, Any]:

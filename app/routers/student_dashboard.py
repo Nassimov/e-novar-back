@@ -85,6 +85,43 @@ def _compute_streak(sessions: list) -> int:
     return streak
 
 
+def _compute_streak_with_shield(sessions: list, user_id, db) -> int:
+    """Compute streak and consume an active streak_shield if it would save the streak."""
+    from uuid import UUID as _UUID
+    today = datetime.utcnow().date()
+    yesterday = today - timedelta(days=1)
+    two_days_ago = today - timedelta(days=2)
+
+    active: set[date] = set()
+    for s in sessions:
+        if s.scheduled_at:
+            try:
+                active.add(s.scheduled_at.date())
+            except Exception:
+                pass
+
+    # Shield fires when: yesterday is missing AND two_days_ago has activity
+    # (meaning: there is an existing streak to protect, and yesterday broke it)
+    if yesterday not in active and two_days_ago in active:
+        try:
+            uid = _UUID(str(user_id)) if not isinstance(user_id, _UUID) else user_id
+            from app.services.effects import get_active_streak_shield, consume_streak_shield
+            shield = get_active_streak_shield(uid, db)
+            if shield:
+                consume_streak_shield(shield, db)
+                db.commit()
+                active = active | {yesterday}
+        except Exception:
+            pass
+
+    streak = 0
+    check = today
+    while check in active:
+        streak += 1
+        check -= timedelta(days=1)
+    return streak
+
+
 @router.get("/dashboard", response_model=StudentDashboardResponse)
 async def student_dashboard(
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -128,7 +165,7 @@ async def student_dashboard(
         .where(TutoringSession.scheduled_at >= now_utc - timedelta(days=90))
         .where(TutoringSession.status.in_(["completed", "scheduled", "live"]))
     ).all()
-    streak_days = _compute_streak(recent_sessions)
+    streak_days = _compute_streak_with_shield(recent_sessions, uid, db)
 
     # ── Teacher names for upcoming sessions ───────────────────────────────────────
     teacher_ids = list({s.teacher_id for s in upcoming_raw[:8]})

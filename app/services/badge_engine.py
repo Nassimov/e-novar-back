@@ -113,7 +113,7 @@ def compute_student_stats(student_id: UUID, db: Session) -> StudentStats:
     ).all()
 
     activity_dates: Set[date] = {ts.date() for ts in attempt_dates if ts}
-    stats.streak_days = _compute_streak(activity_dates)
+    stats.streak_days = _compute_streak_with_shield(activity_dates, student_id, db)
 
     # ── 8. subject_hours (from TutoringSession, completed sessions) ───────────
     try:
@@ -153,11 +153,45 @@ def _compute_streak(activity_dates: Set[date]) -> int:
     while check in activity_dates:
         streak += 1
         check -= timedelta(days=1)
-    # Also count if activity started yesterday (gap of 1 day still ok)
     if streak == 0:
         yesterday = today - timedelta(days=1)
         check = yesterday
         while check in activity_dates:
+            streak += 1
+            check -= timedelta(days=1)
+    return streak
+
+
+def _compute_streak_with_shield(activity_dates: Set[date], student_id, db) -> int:
+    """Like _compute_streak but consumes an active streak_shield when it would save the streak."""
+    from uuid import UUID as _UUID
+    today = datetime.utcnow().date()
+    yesterday = today - timedelta(days=1)
+    two_days_ago = today - timedelta(days=2)
+
+    dates = set(activity_dates)
+
+    # Shield fires when yesterday is missing AND two_days_ago has activity
+    if yesterday not in dates and two_days_ago in dates:
+        try:
+            uid = _UUID(str(student_id)) if not isinstance(student_id, _UUID) else student_id
+            from app.services.effects import get_active_streak_shield, consume_streak_shield
+            shield = get_active_streak_shield(uid, db)
+            if shield:
+                consume_streak_shield(shield, db)
+                db.commit()
+                dates = dates | {yesterday}
+        except Exception:
+            pass
+
+    streak = 0
+    check = today
+    while check in dates:
+        streak += 1
+        check -= timedelta(days=1)
+    if streak == 0:
+        check = yesterday
+        while check in dates:
             streak += 1
             check -= timedelta(days=1)
     return streak

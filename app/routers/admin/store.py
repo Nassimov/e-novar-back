@@ -17,11 +17,20 @@ from app.models.store import RewardClaim, StoreItem
 router = APIRouter(tags=["Admin — Store"])
 
 VALID_CATEGORIES = {"powerups", "digital", "physical", "services", "travel"}
+
+# Generic effect types — config drives the behaviour, not the type name.
+# Auto-approved (entitlement created immediately):
+#   ep_boost      → {multiplier: N, duration_hours: H}
+#   ai_boost      → {questions: N}
+#   streak_shield → {duration_hours: H}
+#   premium       → {duration_days: N}
+#   pdf_pack      → {pack_id: str}
+#   stickers_pack → {count: N, pack_id: str}
+# Manual / pending (admin processes the claim):
+#   coaching_credit, psychometric_credit, voucher_carrefour, travel_booking
 VALID_EFFECT_TYPES = {
-    "ep_boost_2x_24h", "ai_boost_5q", "streak_shield_1d",
-    "premium_30d", "pdf_pack_bac", "stickers_pack",
-    "coaching_credit", "psychometric_credit",
-    "voucher_carrefour", "travel_booking",
+    "ep_boost", "ai_boost", "streak_shield", "premium", "pdf_pack", "stickers_pack",
+    "coaching_credit", "psychometric_credit", "voucher_carrefour", "travel_booking",
 }
 
 
