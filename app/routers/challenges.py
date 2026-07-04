@@ -21,7 +21,12 @@ router = APIRouter(tags=["challenges"])
 
 MAX_FILES = 5
 
-_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".mp4", ".mov", ".webm"}
+_ALLOWED_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp",
+    ".pdf",
+    ".mp4", ".mov", ".webm",
+    ".xlsx", ".xls", ".docx", ".doc", ".pptx", ".ppt",
+}
 
 _EXT_TO_MIME: Dict[str, str] = {
     ".jpg": "image/jpeg",
@@ -32,6 +37,12 @@ _EXT_TO_MIME: Dict[str, str] = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
 }
 
 _ALLOWED_MIME_TYPES = set(_EXT_TO_MIME.values())
@@ -60,7 +71,7 @@ def _validate_upload(filename: str, content_type: Optional[str], file_size: int)
             status_code=422,
             detail=(
                 f"Fichier '{filename}' : format non supporté. "
-                "Formats acceptés : JPG, PNG, WEBP, PDF, MP4, MOV, WEBM"
+                "Formats acceptés : JPG, PNG, WEBP, PDF, MP4, MOV, WEBM, XLSX, DOCX, PPTX"
             ),
         )
 
