@@ -94,7 +94,7 @@ def spend_kp(
     transaction = KpTransaction(
         user_id=account.user_id,
         label=label,
-        source=KpSource.spend,
+        source=KpSource.reward,
         amount=-amount,
     )
     db.add(transaction)

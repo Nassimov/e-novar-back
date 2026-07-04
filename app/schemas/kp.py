@@ -15,7 +15,7 @@ class KpBalanceResponse(BaseModel):
     level: int
     xp: int
     next_level_at: int
-    streak_days: int
+    streak_days: int = 0
 
     model_config = {"from_attributes": True}
 
@@ -26,7 +26,7 @@ class KpTransactionResponse(BaseModel):
     label: str
     source: str
     amount: int
-    balance_after: int
+    balance_after: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

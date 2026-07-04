@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.booking import Booking, TutoringSession
 from app.models.catalog import Subject
-from app.models.kp import KpBalance
+from app.models.kp import KpBalance, KpTransaction
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile, ParentProfile, StudentProfile
 from app.routers.sessions import _compute_refund_pct
@@ -423,6 +423,84 @@ async def get_child_progress(
         "total_sessions_completed": len(completed_sessions),
         "homework_total": len(homeworks),
         "homework_done": sum(1 for h in homeworks if h.status in ("graded", "submitted")),
+    }
+
+
+# ── Child KP balance ─────────────────────────────────────────────────────────
+
+@router.get("/children/{child_id}/kp/balance")
+async def get_child_kp_balance(
+    child_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(current_user["id"])
+    _verify_child_link(uid, child_id, db)
+
+    kp = db.exec(select(KpBalance).where(KpBalance.user_id == child_id)).first()
+    if kp is None:
+        return {
+            "user_id": str(child_id),
+            "balance": 0,
+            "total_earned": 0,
+            "week_earned": 0,
+            "level": 1,
+            "xp": 0,
+            "next_level_at": 500,
+            "streak_days": 0,
+        }
+    return {
+        "user_id": str(kp.user_id),
+        "balance": kp.balance,
+        "total_earned": kp.total_earned,
+        "week_earned": kp.week_earned,
+        "level": kp.level,
+        "xp": kp.xp,
+        "next_level_at": kp.next_level_at,
+        "streak_days": 0,
+    }
+
+
+# ── Child KP transactions ─────────────────────────────────────────────────────
+
+@router.get("/children/{child_id}/kp/transactions")
+async def get_child_kp_transactions(
+    child_id: UUID,
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=50),
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(current_user["id"])
+    _verify_child_link(uid, child_id, db)
+
+    all_txs = db.exec(
+        select(KpTransaction)
+        .where(KpTransaction.user_id == child_id)
+        .order_by(KpTransaction.created_at.desc())
+    ).all()
+
+    total = len(all_txs)
+    offset = (page - 1) * size
+    page_txs = all_txs[offset: offset + size]
+
+    return {
+        "items": [
+            {
+                "id": str(t.id),
+                "user_id": str(t.user_id),
+                "label": t.label or "",
+                "source": t.source,
+                "amount": t.amount,
+                "balance_after": None,
+                "created_at": t.created_at.isoformat(),
+            }
+            for t in page_txs
+        ],
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": math.ceil(total / size) if total else 0,
     }
 
 
