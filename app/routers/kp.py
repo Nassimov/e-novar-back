@@ -44,7 +44,7 @@ async def get_kp_balance(
     db: Session = Depends(get_db),
 ):
     """Get the current user's KP balance and level info."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == UUID(current_user["id"]))
     user = db.exec(stmt).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -61,7 +61,7 @@ async def get_kp_transactions(
     db: Session = Depends(get_db),
 ):
     """List KP transactions for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == UUID(current_user["id"]))
     user = db.exec(stmt).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -92,7 +92,7 @@ async def spend_kp_endpoint(
     db: Session = Depends(get_db),
 ):
     """Spend KP points on a reward."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == UUID(current_user["id"]))
     user = db.exec(stmt).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -141,7 +141,7 @@ async def list_badges(
     db: Session = Depends(get_db),
 ):
     """List all available badges and unlock status."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == UUID(current_user["id"]))
     user = db.exec(stmt).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -162,7 +162,7 @@ async def unlock_badge(
     db: Session = Depends(get_db),
 ):
     """Unlock a badge using KP."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == UUID(current_user["id"]))
     user = db.exec(stmt).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
