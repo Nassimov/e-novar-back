@@ -62,6 +62,27 @@ EFFECT_MANUAL_NOTIFY = {
     "travel_booking",
 }
 
+# Effects where only ONE active entitlement is allowed at a time.
+# Serialised via the KpBalance SELECT FOR UPDATE lock — the check happens
+# after acquiring that lock, so concurrent requests are correctly serialised.
+EFFECT_EXCLUSIVE = {"ep_boost", "premium", "streak_shield"}
+
+# Labels used in user-facing error messages for EFFECT_EXCLUSIVE types
+_EXCLUSIVE_LABELS: dict[str, str] = {
+    "ep_boost":      "Boost EP",
+    "premium":       "accès Premium",
+    "streak_shield": "protection Streak",
+}
+
+# Manual-review effects that block a new purchase while any claim on the
+# SAME item is still pending (prevents admin queue flooding).
+EFFECT_PENDING_EXCLUSIVE = {
+    "coaching_credit",
+    "psychometric_credit",
+    "voucher_carrefour",
+    "travel_booking",
+}
+
 
 def format_effect_description(effect_type: str, config: dict) -> str:
     """Return a human-readable description with config values interpolated."""
@@ -147,6 +168,58 @@ def redeem_item(
             f"Solde EP insuffisant : {account.balance} EP disponibles, "
             f"{item.cost} EP requis."
         )
+
+    # ── Exclusivity guards (run inside the KpBalance lock — concurrent requests
+    #    on the same user are serialised here, so no TOCTOU race is possible) ──
+
+    if item.effect_type in EFFECT_EXCLUSIVE:
+        # Block if ANY active entitlement of the same type already exists
+        existing = db.exec(
+            select(UserEntitlement).where(
+                UserEntitlement.user_id == user_id,
+                UserEntitlement.effect_type == item.effect_type,
+                UserEntitlement.status == "active",
+            )
+        ).first()
+        if existing and (existing.expires_at is None or existing.expires_at > now):
+            label = _EXCLUSIVE_LABELS.get(item.effect_type, item.effect_type)
+            raise ValueError(
+                f"Vous avez déjà un {label} actif. "
+                "Attendez qu'il expire avant d'en acheter un autre."
+            )
+
+    if item.effect_type in ("pdf_pack", "stickers_pack"):
+        # Block same pack_id — buying it twice is a pure EP waste with no benefit
+        new_pack_id = (item.effect_config or {}).get("pack_id")
+        if new_pack_id:
+            existing_packs = db.exec(
+                select(UserEntitlement).where(
+                    UserEntitlement.user_id == user_id,
+                    UserEntitlement.effect_type == item.effect_type,
+                    UserEntitlement.status == "active",
+                )
+            ).all()
+            for ep in existing_packs:
+                if (ep.effect_config or {}).get("pack_id") == new_pack_id:
+                    raise ValueError(
+                        "Vous avez déjà accès à ce pack. "
+                        "Inutile de l'acheter à nouveau."
+                    )
+
+    if item.effect_type in EFFECT_PENDING_EXCLUSIVE:
+        # Block while a pending claim for this EXACT item already exists
+        pending_claim = db.exec(
+            select(RewardClaim).where(
+                RewardClaim.user_id == user_id,
+                RewardClaim.item_id == item_id,
+                RewardClaim.status == "pending",
+            )
+        ).first()
+        if pending_claim:
+            raise ValueError(
+                "Votre demande précédente pour cet article est encore en cours de traitement. "
+                "L'équipe E-NOVAR reviendra vers vous prochainement."
+            )
 
     # Balance is maintained by the apply_kp_transaction() trigger — insert only.
     db.add(KpTransaction(
