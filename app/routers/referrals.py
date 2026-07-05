@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, field_validator
 from sqlmodel import Session, select
 
@@ -157,32 +157,40 @@ async def apply_code(
 @router.get("/preview/{code}")
 async def preview_code(
     code: str,
+    referee_role: str = Query(default="student", description="student | teacher | parent"),
     db: Session = Depends(get_db),
 ):
     """
     Public (unauthenticated) endpoint.
-    Returns minimal referrer info so the registration page can show
-    'Your friend X invited you — you'll receive N EP'.
+    Returns minimal referrer info + role-accurate reward amounts.
 
-    Intentionally returns only name + reward amount.  No IDs, emails, etc.
-    Returns 404 if code is invalid so the frontend can validate silently.
+    referee_role: the prospective role of the person looking at the preview.
+      - student  → referee gets 100 EP, referrer gets 200 EP
+      - teacher  → referee gets 300 EP, referrer gets 500 EP
+    Pass the role as a query param once the user has selected it (user-type step).
+    Defaults to 'student' for landing pages where the role isn't known yet.
+
+    Returns 404 for invalid/unknown codes.
     """
-    code = code.strip().upper()
-    if not code or len(code) > 30:
+    code_clean = code.strip().upper()
+    if not code_clean or len(code_clean) > 30:
         raise HTTPException(status_code=404, detail="Code invalide.")
 
+    # Normalise referee_role to a known value
+    if referee_role not in ("student", "teacher", "parent"):
+        referee_role = "student"
+
     referrer = db.exec(
-        select(Profile).where(Profile.referral_code == code)
+        select(Profile).where(Profile.referral_code == code_clean)
     ).first()
     if referrer is None:
         raise HTTPException(status_code=404, detail="Code de parrainage introuvable.")
 
-    role = _role(referrer.id, db)
     return {
         "valid": True,
         "referrer_name": referrer.full_name or "Un ami",
-        "referee_kp": REFEREE_KP.get(role, 100),
-        "referrer_kp": REFERRAL_KP.get(role, 200),
+        "referee_kp": REFEREE_KP.get(referee_role, 100),
+        "referrer_kp": REFERRAL_KP.get(referee_role, 200),
     }
 
 
