@@ -1,232 +1,564 @@
+"""
+Chat router — conversations, messages, file uploads.
+
+Permission model:
+  student ↔ teacher  requires a Booking or TutoringSession between them
+  parent  ↔ teacher  requires parent_student_link + booking/session on the child
+  teacher ↔ student/parent  symmetric of the above
+"""
 from __future__ import annotations
 
+import html
 import json
-import math
+import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.core.redis import get_redis_client
 from app.dependencies import get_current_user, get_db
-from app.models.message import Conversation, Message
-from app.models.user import User
-from app.schemas.message import ConversationResponse, MessageResponse, MessageSend
+from app.models.conversation import ChatMessage, Conversation, ConversationParticipant
+from app.models.profile import Profile
 
-router = APIRouter(tags=["messages"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["Messages"])
+
+_MAX_BODY = 4000
+_MAX_ATTACH = 5
+_MAX_FILE = 10 * 1024 * 1024
+_RATE_WINDOW = 60
+_RATE_MAX = 30
 
 
-@router.get("/", response_model=List[ConversationResponse])
+# ── Pydantic I/O ──────────────────────────────────────────────────────────────
+
+class AttachmentIn(BaseModel):
+    name: str
+    url: str
+    type: str
+    size: int
+
+
+class AttachmentOut(BaseModel):
+    name: str
+    url: str
+    type: str
+    size: int
+
+
+class MessageOut(BaseModel):
+    id: str
+    conv_id: str
+    sender_id: str
+    body: Optional[str]
+    attachments: List[AttachmentOut]
+    created_at: str
+    read_at: Optional[str]
+    is_mine: bool
+
+
+class ConversationOut(BaseModel):
+    id: str
+    other_user_id: str
+    other_name: str
+    other_role: str
+    other_avatar: Optional[str]
+    last_message: Optional[str]
+    last_message_at: Optional[str]
+    unread_count: int
+    is_online: bool
+    last_seen_at: Optional[str]
+
+
+class SendMessageIn(BaseModel):
+    body: Optional[str] = None
+    attachments: Optional[List[AttachmentIn]] = None
+
+
+class CreateConvIn(BaseModel):
+    recipient_id: str
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _me(current_user: Dict[str, Any]) -> UUID:
+    return UUID(current_user["id"])
+
+
+def _is_online(user_id: str) -> bool:
+    try:
+        from app.core.redis import get_redis_client
+        return bool(get_redis_client().sismember("chat:online_users", user_id))
+    except Exception:
+        return False
+
+
+def _rate_limit(user_id: str) -> None:
+    try:
+        from app.core.redis import get_redis_client
+        r = get_redis_client()
+        key = f"chat:rate:{user_id}"
+        n = r.incr(key)
+        if n == 1:
+            r.expire(key, _RATE_WINDOW)
+        if n > _RATE_MAX:
+            raise HTTPException(status_code=429, detail="Trop de messages. Réessayez dans 1 minute.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # fail open if Redis unavailable
+
+
+def _publish(channel: str, event: dict) -> None:
+    try:
+        from app.core.redis import get_redis_client
+        get_redis_client().publish(channel, json.dumps(event))
+    except Exception as exc:
+        logger.debug("Redis publish skipped: %s", exc)
+
+
+def _participant_ids(conv_id: UUID, db: Session) -> List[str]:
+    return [
+        str(p.user_id)
+        for p in db.exec(
+            select(ConversationParticipant).where(ConversationParticipant.conv_id == conv_id)
+        ).all()
+    ]
+
+
+def _assert_participant(me: UUID, conv_id: UUID, db: Session) -> None:
+    ok = db.exec(
+        select(ConversationParticipant).where(
+            ConversationParticipant.conv_id == conv_id,
+            ConversationParticipant.user_id == me,
+        )
+    ).first()
+    if not ok:
+        raise HTTPException(status_code=403, detail="Accès refusé.")
+
+
+def _get_profile(uid: UUID, db: Session) -> Optional[Profile]:
+    return db.exec(select(Profile).where(Profile.id == uid)).first()
+
+
+def _get_role(uid: UUID, db: Session) -> str:
+    from app.models.profile import UserRole
+    row = db.exec(select(UserRole).where(UserRole.user_id == uid)).first()
+    return row.role if row else "student"
+
+
+def _can_chat(me: UUID, me_role: str, them: UUID, them_role: str, db: Session) -> bool:
+    """Return True if the two users are allowed to exchange messages."""
+    from app.models.booking import Booking, TutoringSession
+
+    def _has_booking(student: UUID, teacher: UUID) -> bool:
+        return bool(
+            db.exec(
+                select(Booking).where(
+                    Booking.student_id == student, Booking.teacher_id == teacher
+                )
+            ).first()
+            or db.exec(
+                select(TutoringSession).where(
+                    TutoringSession.student_id == student,
+                    TutoringSession.teacher_id == teacher,
+                )
+            ).first()
+        )
+
+    if me_role == "student" and them_role == "teacher":
+        return _has_booking(me, them)
+
+    if me_role == "teacher" and them_role == "student":
+        return _has_booking(them, me)
+
+    if me_role in ("student", "teacher") and them_role in ("student", "teacher"):
+        # Different roles already handled; same-role chat not allowed
+        return False
+
+    def _parent_teacher(parent: UUID, teacher: UUID) -> bool:
+        from app.models.parent_link import ParentStudentLink
+        links = db.exec(
+            select(ParentStudentLink).where(ParentStudentLink.parent_id == parent)
+        ).all()
+        return any(_has_booking(l.student_id, teacher) for l in links)
+
+    if me_role == "parent" and them_role == "teacher":
+        return _parent_teacher(me, them)
+
+    if me_role == "teacher" and them_role == "parent":
+        return _parent_teacher(them, me)
+
+    return False
+
+
+def _fmt(msg: ChatMessage, me: UUID) -> MessageOut:
+    atts: List[AttachmentOut] = []
+    if msg.attachments and isinstance(msg.attachments, list):
+        atts = [
+            AttachmentOut(
+                name=a.get("name", ""),
+                url=a.get("url", ""),
+                type=a.get("type", ""),
+                size=a.get("size", 0),
+            )
+            for a in msg.attachments
+        ]
+    return MessageOut(
+        id=str(msg.id),
+        conv_id=str(msg.conv_id),
+        sender_id=str(msg.sender_id),
+        body=msg.body,
+        attachments=atts,
+        created_at=msg.created_at.isoformat(),
+        read_at=msg.read_at.isoformat() if msg.read_at else None,
+        is_mine=msg.sender_id == me,
+    )
+
+
+# ── REST endpoints ────────────────────────────────────────────────────────────
+
+@router.get("/", response_model=List[ConversationOut])
 async def list_conversations(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """List all conversations for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    me = _me(current_user)
+    my_parts = db.exec(
+        select(ConversationParticipant).where(ConversationParticipant.user_id == me)
+    ).all()
+    if not my_parts:
+        return []
 
-    user_id_str = str(user.id)
-    conversations = db.exec(select(Conversation)).all()
-    user_conversations = [
-        c for c in conversations
-        if user_id_str in json.loads(c.participant_ids or "[]")
-    ]
+    result: List[ConversationOut] = []
+    for part in my_parts:
+        cid = part.conv_id
+        other_part = db.exec(
+            select(ConversationParticipant).where(
+                ConversationParticipant.conv_id == cid,
+                ConversationParticipant.user_id != me,
+            )
+        ).first()
+        if not other_part:
+            continue
 
-    result = []
-    for conv in user_conversations:
-        participant_ids = json.loads(conv.participant_ids or "[]")
-        other_ids = [pid for pid in participant_ids if pid != user_id_str]
+        other = _get_profile(other_part.user_id, db)
+        if not other:
+            continue
 
-        other_name = None
-        other_avatar = None
-        if other_ids:
-            try:
-                other_uid = UUID(other_ids[0])
-                other_user = db.get(User, other_uid)
-                if other_user:
-                    other_name = other_user.full_name
-                    other_avatar = other_user.avatar_url
-            except Exception:
-                pass
-
-        # Get last message
         last_msg = db.exec(
-            select(Message)
-            .where(Message.conversation_id == conv.id)
-            .order_by(Message.created_at.desc())
+            select(ChatMessage)
+            .where(ChatMessage.conv_id == cid)
+            .order_by(ChatMessage.created_at.desc())
         ).first()
 
-        unread = db.exec(
-            select(Message).where(
-                Message.conversation_id == conv.id,
-                Message.sender_id != user.id,
-                Message.is_read == False,
-            )
-        ).all()
+        # Unread: messages from others after my last_read_at
+        stmt = select(ChatMessage).where(
+            ChatMessage.conv_id == cid,
+            ChatMessage.sender_id != me,
+        )
+        if part.last_read_at:
+            stmt = stmt.where(ChatMessage.created_at > part.last_read_at)
+        unread_count = len(db.exec(stmt).all())
 
-        result.append(ConversationResponse(
-            id=conv.id,
-            participant_ids=participant_ids,
-            last_message_at=conv.last_message_at,
-            last_message=last_msg.content if last_msg else None,
-            unread_count=len(unread),
-            other_participant_name=other_name,
-            other_participant_avatar=other_avatar,
-            created_at=conv.created_at,
+        result.append(ConversationOut(
+            id=str(cid),
+            other_user_id=str(other_part.user_id),
+            other_name=other.full_name or "Utilisateur",
+            other_role=_get_role(other_part.user_id, db),
+            other_avatar=other.avatar_url,
+            last_message=last_msg.body if last_msg else None,
+            last_message_at=last_msg.created_at.isoformat() if last_msg else None,
+            unread_count=unread_count,
+            is_online=_is_online(str(other_part.user_id)),
+            last_seen_at=other.last_seen_at.isoformat() if other.last_seen_at else None,
         ))
 
+    result.sort(key=lambda c: c.last_message_at or "", reverse=True)
     return result
 
 
-@router.get("/{conversation_id}", response_model=List[MessageResponse])
+@router.post("/", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)
+async def create_or_get_conversation(
+    payload: CreateConvIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    me = _me(current_user)
+    them = UUID(payload.recipient_id)
+
+    if me == them:
+        raise HTTPException(status_code=400, detail="Vous ne pouvez pas vous écrire à vous-même.")
+
+    them_profile = _get_profile(them, db)
+    if not them_profile:
+        raise HTTPException(status_code=404, detail="Utilisateur introuvable.")
+
+    me_role = current_user.get("role", "student")
+    them_role = _get_role(them, db)
+
+    if not _can_chat(me, me_role, them, them_role, db):
+        raise HTTPException(
+            status_code=403,
+            detail="Vous ne pouvez écrire qu'aux enseignants avec qui vous avez une réservation.",
+        )
+
+    # Find existing direct conversation between the two users
+    my_conv_ids = {
+        p.conv_id
+        for p in db.exec(
+            select(ConversationParticipant).where(ConversationParticipant.user_id == me)
+        ).all()
+    }
+    existing_conv_id: Optional[UUID] = None
+    for cid in my_conv_ids:
+        match = db.exec(
+            select(ConversationParticipant).where(
+                ConversationParticipant.conv_id == cid,
+                ConversationParticipant.user_id == them,
+            )
+        ).first()
+        if match:
+            existing_conv_id = cid
+            break
+
+    if existing_conv_id:
+        conv_id = existing_conv_id
+    else:
+        conv = Conversation(id=uuid4(), type="direct", created_at=datetime.now(timezone.utc))
+        db.add(conv)
+        db.flush()
+        db.add(ConversationParticipant(conv_id=conv.id, user_id=me, role="member"))
+        db.add(ConversationParticipant(conv_id=conv.id, user_id=them, role="member"))
+        db.commit()
+        conv_id = conv.id
+
+    return ConversationOut(
+        id=str(conv_id),
+        other_user_id=str(them),
+        other_name=them_profile.full_name or "Utilisateur",
+        other_role=them_role,
+        other_avatar=them_profile.avatar_url,
+        last_message=None,
+        last_message_at=None,
+        unread_count=0,
+        is_online=_is_online(str(them)),
+        last_seen_at=them_profile.last_seen_at.isoformat() if them_profile.last_seen_at else None,
+    )
+
+
+@router.get("/{conv_id}/messages", response_model=List[MessageOut])
 async def get_messages(
-    conversation_id: UUID,
-    page: int = Query(1, ge=1),
+    conv_id: UUID,
+    before: Optional[str] = Query(None),
     size: int = Query(50, ge=1, le=100),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get messages in a conversation."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    me = _me(current_user)
+    _assert_participant(me, conv_id, db)
 
-    conv = db.get(Conversation, conversation_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    stmt = select(ChatMessage).where(ChatMessage.conv_id == conv_id)
+    if before:
+        try:
+            before_dt = datetime.fromisoformat(before)
+            stmt = stmt.where(ChatMessage.created_at < before_dt)
+        except ValueError:
+            pass
+    stmt = stmt.order_by(ChatMessage.created_at.desc()).limit(size)
 
-    participant_ids = json.loads(conv.participant_ids or "[]")
-    if str(user.id) not in participant_ids:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    messages = db.exec(
-        select(Message)
-        .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.desc())
-    ).all()
-
-    total = len(messages)
-    offset = (page - 1) * size
-    paginated = list(reversed(messages[offset: offset + size]))
-
-    return [MessageResponse.model_validate(m) for m in paginated]
+    msgs = list(reversed(db.exec(stmt).all()))
+    return [_fmt(m, me) for m in msgs]
 
 
-@router.post("/", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/{conv_id}/messages", response_model=MessageOut, status_code=status.HTTP_201_CREATED)
 async def send_message(
-    payload: MessageSend,
+    conv_id: UUID,
+    payload: SendMessageIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send a message (create conversation if needed)."""
-    from datetime import datetime
+    me = _me(current_user)
+    _assert_participant(me, conv_id, db)
+    _rate_limit(str(me))
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    body = html.escape(payload.body[:_MAX_BODY]) if payload.body else None
+    atts = payload.attachments or []
+    if not body and not atts:
+        raise HTTPException(status_code=400, detail="Message vide.")
+    if len(atts) > _MAX_ATTACH:
+        raise HTTPException(status_code=400, detail=f"Maximum {_MAX_ATTACH} pièces jointes.")
 
-    conv_id = payload.conversation_id
+    att_list = [
+        {"name": a.name[:255], "url": a.url, "type": a.type[:100], "size": min(a.size, _MAX_FILE)}
+        for a in atts
+    ]
 
-    if conv_id is None:
-        # Create new conversation
-        if payload.recipient_id is None:
-            raise HTTPException(status_code=400, detail="conversation_id or recipient_id required")
-
-        recipient = db.get(User, payload.recipient_id)
-        if recipient is None:
-            raise HTTPException(status_code=404, detail="Recipient not found")
-
-        # Check for existing conversation
-        all_convs = db.exec(select(Conversation)).all()
-        existing = None
-        for c in all_convs:
-            pids = set(json.loads(c.participant_ids or "[]"))
-            if pids == {str(user.id), str(recipient.id)}:
-                existing = c
-                break
-
-        if existing:
-            conv_id = existing.id
-        else:
-            new_conv = Conversation(
-                participant_ids=json.dumps([str(user.id), str(recipient.id)]),
-                last_message_at=datetime.utcnow(),
-            )
-            db.add(new_conv)
-            db.commit()
-            db.refresh(new_conv)
-            conv_id = new_conv.id
-
-    conv = db.get(Conversation, conv_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    participant_ids = json.loads(conv.participant_ids or "[]")
-    if str(user.id) not in participant_ids:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    message = Message(
-        conversation_id=conv_id,
-        sender_id=user.id,
-        content=payload.content,
-        attachment_url=payload.attachment_url,
-        attachment_type=payload.attachment_type,
+    msg = ChatMessage(
+        conv_id=conv_id,
+        sender_id=me,
+        body=body,
+        attachments=att_list or None,
+        created_at=datetime.now(timezone.utc),
     )
-    db.add(message)
-
-    conv.last_message_at = datetime.utcnow()
-    db.add(conv)
+    db.add(msg)
     db.commit()
-    db.refresh(message)
+    db.refresh(msg)
 
-    # Publish to Redis pub/sub for WebSocket delivery
-    try:
-        redis = get_redis_client()
-        msg_data = json.dumps({
-            "type": "new_message",
-            "conversation_id": str(conv_id),
-            "message": {
-                "id": str(message.id),
-                "sender_id": str(message.sender_id),
-                "content": message.content,
-                "created_at": message.created_at.isoformat(),
-            },
-        })
-        for pid in participant_ids:
-            redis.publish(f"user:{pid}:messages", msg_data)
-    except Exception:
-        pass
+    event = {
+        "type": "new_message",
+        "conv_id": str(conv_id),
+        "message": {
+            "id": str(msg.id),
+            "conv_id": str(conv_id),
+            "sender_id": str(me),
+            "body": msg.body,
+            "attachments": att_list,
+            "created_at": msg.created_at.isoformat(),
+            "read_at": None,
+            "is_mine": False,  # recipient's perspective
+        },
+    }
+    for pid in _participant_ids(conv_id, db):
+        _publish(f"chat:user:{pid}", event)
 
-    return MessageResponse.model_validate(message)
+    return _fmt(msg, me)
 
 
-@router.patch("/{message_id}/read")
-async def mark_message_read(
-    message_id: UUID,
+@router.post("/{conv_id}/read")
+async def mark_read(
+    conv_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Mark a message as read."""
-    message = db.get(Message, message_id)
-    if message is None:
-        raise HTTPException(status_code=404, detail="Message not found")
+    me = _me(current_user)
+    _assert_participant(me, conv_id, db)
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    part = db.exec(
+        select(ConversationParticipant).where(
+            ConversationParticipant.conv_id == conv_id,
+            ConversationParticipant.user_id == me,
+        )
+    ).first()
+    if part:
+        part.last_read_at = datetime.now(timezone.utc)
+        db.add(part)
+        db.commit()
 
-    # Verify user is a participant
-    conv = db.get(Conversation, message.conversation_id)
-    if conv:
-        participant_ids = json.loads(conv.participant_ids or "[]")
-        if user and str(user.id) not in participant_ids:
-            raise HTTPException(status_code=403, detail="Access denied")
+    for pid in _participant_ids(conv_id, db):
+        if pid != str(me):
+            _publish(f"chat:user:{pid}", {
+                "type": "message_read",
+                "conv_id": str(conv_id),
+                "user_id": str(me),
+            })
 
-    message.is_read = True
-    db.add(message)
-    db.commit()
-    return {"message": "Marked as read"}
+    return {"ok": True}
+
+
+@router.post("/upload")
+async def upload_attachment(
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    content = await file.read()
+    if len(content) > _MAX_FILE:
+        raise HTTPException(status_code=413, detail="Fichier trop volumineux (max 10 Mo).")
+
+    from app.services.storage import upload_file
+    filename = file.filename or "file"
+    url = upload_file(
+        content,
+        filename,
+        content_type=file.content_type or "application/octet-stream",
+        folder="chat",
+    )
+
+    return {
+        "name": filename,
+        "url": url,
+        "type": file.content_type or "application/octet-stream",
+        "size": len(content),
+    }
+
+
+@router.get("/contacts")
+async def list_contacts(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    me = _me(current_user)
+    me_role = current_user.get("role", "student")
+
+    contacts = []
+
+    if me_role in ("student", "parent"):
+        from app.models.booking import Booking
+        if me_role == "student":
+            teacher_ids = list({
+                b.teacher_id
+                for b in db.exec(select(Booking).where(Booking.student_id == me)).all()
+            })
+        else:
+            from app.models.parent_link import ParentStudentLink
+            links = db.exec(
+                select(ParentStudentLink).where(ParentStudentLink.parent_id == me)
+            ).all()
+            student_ids = [l.student_id for l in links]
+            teacher_ids = list({
+                b.teacher_id
+                for b in db.exec(
+                    select(Booking).where(Booking.student_id.in_(student_ids))
+                ).all()
+            }) if student_ids else []
+
+        for tid in teacher_ids:
+            p = _get_profile(tid, db)
+            if p:
+                contacts.append({
+                    "id": str(tid), "name": p.full_name or "Enseignant",
+                    "role": "teacher", "avatar": p.avatar_url,
+                    "is_online": _is_online(str(tid)),
+                })
+
+    elif me_role == "teacher":
+        from app.models.booking import Booking
+        bookings = db.exec(select(Booking).where(Booking.teacher_id == me)).all()
+        seen: set[UUID] = set()
+
+        for b in bookings:
+            if b.student_id not in seen:
+                seen.add(b.student_id)
+                p = _get_profile(b.student_id, db)
+                if p:
+                    contacts.append({
+                        "id": str(b.student_id), "name": p.full_name or "Étudiant",
+                        "role": "student", "avatar": p.avatar_url,
+                        "is_online": _is_online(str(b.student_id)),
+                    })
+
+        from app.models.parent_link import ParentStudentLink
+        student_ids = [b.student_id for b in bookings]
+        if student_ids:
+            parent_links = db.exec(
+                select(ParentStudentLink).where(
+                    ParentStudentLink.student_id.in_(student_ids)
+                )
+            ).all()
+            parent_seen: set[UUID] = set()
+            for link in parent_links:
+                if link.parent_id not in parent_seen:
+                    parent_seen.add(link.parent_id)
+                    p = _get_profile(link.parent_id, db)
+                    if p:
+                        contacts.append({
+                            "id": str(link.parent_id), "name": p.full_name or "Parent",
+                            "role": "parent", "avatar": p.avatar_url,
+                            "is_online": _is_online(str(link.parent_id)),
+                        })
+
+    return contacts

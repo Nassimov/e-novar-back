@@ -474,6 +474,7 @@ notification_manager = ConnectionManager()
 @app.websocket("/ws/messages")
 async def websocket_messages(websocket: WebSocket, token: str = ""):
     """Real-time messaging channel. Connect with `?token=<jwt>`."""
+    import asyncio
     from app.core.security import decode_supabase_jwt
 
     claims = decode_supabase_jwt(token) if token else None
@@ -487,6 +488,37 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
         return
 
     await message_manager.connect(user_id, websocket)
+
+    # Register online presence
+    try:
+        from app.core.redis import get_redis_client
+        _r = get_redis_client()
+        _r.sadd("chat:online_users", user_id)
+    except Exception:
+        pass
+
+    # Update profiles.last_seen_at (non-blocking)
+    async def _touch_presence():
+        try:
+            from uuid import UUID as _UUID
+            from datetime import datetime, timezone
+            from sqlmodel import select
+            from app.database import get_session
+            from app.models.profile import Profile
+            with next(get_session()) as _db:
+                _p = _db.exec(select(Profile).where(Profile.id == _UUID(user_id))).first()
+                if _p:
+                    _p.last_seen_at = datetime.now(timezone.utc)
+                    _db.add(_p)
+                    _db.commit()
+        except Exception as _exc:
+            logger.debug("presence touch failed: %s", _exc)
+
+    asyncio.create_task(_touch_presence())
+
+    stop_evt = asyncio.Event()
+    sub_task = asyncio.create_task(_chat_redis_subscriber(user_id, websocket, stop_evt))
+
     logger.info("WS /messages connected: user=%s", user_id)
 
     try:
@@ -494,19 +526,101 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
-                msg_type = msg.get("type")
-                if msg_type == "ping":
+                mtype = msg.get("type")
+                if mtype == "ping":
                     await websocket.send_json({"type": "pong"})
-                elif msg_type == "typing":
-                    await websocket.send_json({
-                        "type": "typing_ack",
-                        "conversation_id": msg.get("conversation_id"),
-                    })
+                    try:
+                        from app.core.redis import get_redis_client
+                        get_redis_client().sadd("chat:online_users", user_id)
+                    except Exception:
+                        pass
+                elif mtype in ("heartbeat",):
+                    try:
+                        from app.core.redis import get_redis_client
+                        get_redis_client().sadd("chat:online_users", user_id)
+                    except Exception:
+                        pass
+                elif mtype == "typing_start":
+                    _handle_chat_typing(user_id, msg.get("conv_id", ""), True)
+                elif mtype == "typing_stop":
+                    _handle_chat_typing(user_id, msg.get("conv_id", ""), False)
             except json.JSONDecodeError:
                 await websocket.send_json({"type": "error", "message": "Invalid JSON"})
     except WebSocketDisconnect:
+        pass
+    finally:
+        stop_evt.set()
+        sub_task.cancel()
         message_manager.disconnect(user_id, websocket)
+        try:
+            from app.core.redis import get_redis_client
+            get_redis_client().srem("chat:online_users", user_id)
+        except Exception:
+            pass
+        asyncio.create_task(_touch_presence())
         logger.info("WS /messages disconnected: user=%s", user_id)
+
+
+async def _chat_redis_subscriber(user_id: str, websocket: WebSocket, stop: "asyncio.Event"):
+    """Subscribe to user's Redis pub/sub channel and forward events to the WebSocket."""
+    import asyncio
+    try:
+        import redis.asyncio as aioredis
+        from app.config import get_settings
+        r = aioredis.Redis.from_url(get_settings().redis_url, decode_responses=True)
+        ps = r.pubsub(ignore_subscribe_messages=True)
+        await ps.subscribe(f"chat:user:{user_id}")
+        try:
+            while not stop.is_set():
+                msg = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if msg and msg.get("type") == "message":
+                    try:
+                        await websocket.send_json(json.loads(msg["data"]))
+                    except Exception:
+                        break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await ps.unsubscribe(f"chat:user:{user_id}")
+            await r.aclose()
+    except Exception as exc:
+        logger.warning("chat Redis subscriber error: %s", exc)
+
+
+def _handle_chat_typing(user_id: str, conv_id: str, is_typing: bool):
+    """Set/clear the typing Redis key and notify other conversation participants."""
+    if not conv_id:
+        return
+    try:
+        from uuid import UUID as _UUID
+        from app.core.redis import get_redis_client
+        from app.database import get_session
+        from app.models.conversation import ConversationParticipant
+        from sqlmodel import select
+
+        r = get_redis_client()
+        key = f"chat:typing:{conv_id}:{user_id}"
+        if is_typing:
+            r.setex(key, 3, "1")
+        else:
+            r.delete(key)
+
+        with next(get_session()) as _db:
+            parts = _db.exec(
+                select(ConversationParticipant).where(
+                    ConversationParticipant.conv_id == _UUID(conv_id),
+                    ConversationParticipant.user_id != _UUID(user_id),
+                )
+            ).all()
+            event = json.dumps({
+                "type": "typing_start" if is_typing else "typing_stop",
+                "conv_id": conv_id,
+                "user_id": user_id,
+            })
+            for p in parts:
+                r.publish(f"chat:user:{p.user_id}", event)
+    except Exception as exc:
+        logger.debug("typing handler error: %s", exc)
 
 
 @app.websocket("/ws/notifications")
