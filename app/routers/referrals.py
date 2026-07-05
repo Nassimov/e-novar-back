@@ -154,6 +154,38 @@ async def apply_code(
     return {"ok": True, "kp_earned": result["kp_earned"], "referrer_name": result["referrer_name"]}
 
 
+@router.get("/preview/{code}")
+async def preview_code(
+    code: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Public (unauthenticated) endpoint.
+    Returns minimal referrer info so the registration page can show
+    'Your friend X invited you — you'll receive N EP'.
+
+    Intentionally returns only name + reward amount.  No IDs, emails, etc.
+    Returns 404 if code is invalid so the frontend can validate silently.
+    """
+    code = code.strip().upper()
+    if not code or len(code) > 30:
+        raise HTTPException(status_code=404, detail="Code invalide.")
+
+    referrer = db.exec(
+        select(Profile).where(Profile.referral_code == code)
+    ).first()
+    if referrer is None:
+        raise HTTPException(status_code=404, detail="Code de parrainage introuvable.")
+
+    role = _role(referrer.id, db)
+    return {
+        "valid": True,
+        "referrer_name": referrer.full_name or "Un ami",
+        "referee_kp": REFEREE_KP.get(role, 100),
+        "referrer_kp": REFERRAL_KP.get(role, 200),
+    }
+
+
 @router.get("/stats")
 async def get_stats(
     current_user: Dict[str, Any] = Depends(get_current_user),
