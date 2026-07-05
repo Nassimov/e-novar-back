@@ -65,3 +65,7 @@ class ChatMessage(SQLModel, table=True):
         sa_column=sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false")),
     )
     flag_reason: Optional[str] = Field(default=None)
+    reply_to_id: Optional[UUID] = Field(
+        default=None,
+        sa_column=sa.Column(sa.UUID(as_uuid=True), nullable=True),
+    )

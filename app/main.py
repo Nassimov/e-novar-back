@@ -482,6 +482,7 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
     """Real-time messaging channel. Connect with `?token=<jwt>`."""
     import asyncio
     from app.core.security import decode_supabase_jwt
+    from app.core.connections import chat_connections
 
     claims = decode_supabase_jwt(token) if token else None
     if not claims:
@@ -494,6 +495,7 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
         return
 
     await message_manager.connect(user_id, websocket)
+    chat_connections.register(user_id, websocket)
 
     # Register online presence
     try:
@@ -503,7 +505,6 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
     except Exception:
         pass
 
-    # Update profiles.last_seen_at (non-blocking)
     async def _touch_presence():
         try:
             from uuid import UUID as _UUID
@@ -521,6 +522,7 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
             logger.debug("presence touch failed: %s", _exc)
 
     asyncio.create_task(_touch_presence())
+    asyncio.create_task(_broadcast_presence_event(user_id, {"type": "user_online", "user_id": user_id}))
 
     stop_evt = asyncio.Event()
     sub_task = asyncio.create_task(_chat_redis_subscriber(user_id, websocket, stop_evt))
@@ -558,17 +560,25 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
         stop_evt.set()
         sub_task.cancel()
         message_manager.disconnect(user_id, websocket)
+        chat_connections.unregister(user_id, websocket)
         try:
             from app.core.redis import get_redis_client
             get_redis_client().srem("chat:online_users", user_id)
         except Exception:
             pass
+        from datetime import datetime, timezone as _tz
+        last_seen_at = datetime.now(_tz.utc).isoformat()
         asyncio.create_task(_touch_presence())
+        asyncio.create_task(_broadcast_presence_event(user_id, {
+            "type": "user_offline",
+            "user_id": user_id,
+            "last_seen_at": last_seen_at,
+        }))
         logger.info("WS /messages disconnected: user=%s", user_id)
 
 
 async def _chat_redis_subscriber(user_id: str, websocket: WebSocket, stop: "asyncio.Event"):
-    """Subscribe to user's Redis pub/sub channel and forward events to the WebSocket."""
+    """Subscribe to user's Redis pub/sub channel and forward events to the WebSocket (cross-worker delivery)."""
     import asyncio
     try:
         import redis.asyncio as aioredis
@@ -577,20 +587,63 @@ async def _chat_redis_subscriber(user_id: str, websocket: WebSocket, stop: "asyn
         ps = r.pubsub(ignore_subscribe_messages=True)
         await ps.subscribe(f"chat:user:{user_id}")
         try:
-            while not stop.is_set():
-                msg = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if msg and msg.get("type") == "message":
-                    try:
-                        await websocket.send_json(json.loads(msg["data"]))
-                    except Exception:
-                        break
+            async for raw in ps.listen():
+                if stop.is_set():
+                    break
+                if not isinstance(raw, dict) or raw.get("type") != "message":
+                    continue
+                try:
+                    await websocket.send_json(json.loads(raw["data"]))
+                except Exception:
+                    break
         except asyncio.CancelledError:
             pass
         finally:
-            await ps.unsubscribe(f"chat:user:{user_id}")
-            await r.aclose()
+            try:
+                await ps.unsubscribe(f"chat:user:{user_id}")
+                await r.aclose()
+            except Exception:
+                pass
     except Exception as exc:
         logger.warning("chat Redis subscriber error: %s", exc)
+
+
+async def _broadcast_presence_event(user_id: str, event: dict) -> None:
+    """Notify all conversation partners of a presence change."""
+    try:
+        from uuid import UUID as _UUID
+        from sqlmodel import select as _select
+        from app.database import get_session
+        from app.models.conversation import ConversationParticipant
+        from app.core.connections import chat_connections as _cc
+
+        with next(get_session()) as _db:
+            my_parts = _db.exec(
+                _select(ConversationParticipant).where(
+                    ConversationParticipant.user_id == _UUID(user_id)
+                )
+            ).all()
+            conv_ids = [p.conv_id for p in my_parts]
+            if not conv_ids:
+                return
+            partner_parts = _db.exec(
+                _select(ConversationParticipant).where(
+                    ConversationParticipant.conv_id.in_(conv_ids),
+                    ConversationParticipant.user_id != _UUID(user_id),
+                )
+            ).all()
+            partner_ids = list({str(p.user_id) for p in partner_parts})
+
+        for pid in partner_ids:
+            delivered = await _cc.send(pid, event)
+            if not delivered:
+                try:
+                    from app.core.redis import get_redis_client
+                    get_redis_client().publish(f"chat:user:{pid}", json.dumps(event))
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("presence broadcast error: %s", exc)
 
 
 def _handle_chat_typing(user_id: str, conv_id: str, is_typing: bool):

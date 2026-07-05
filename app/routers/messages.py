@@ -37,7 +37,6 @@ _RATE_MAX = 30
 
 
 # ── Suspicious-content scanner ────────────────────────────────────────────────
-# Patterns are intentionally broad: flag and let admin review rather than miss.
 
 _SUSPICIOUS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b0[567]\d{8}\b", re.I), "numéro de téléphone"),
@@ -60,7 +59,6 @@ _SUSPICIOUS: list[tuple[re.Pattern[str], str]] = [
 
 
 def _scan_suspicious(body: str) -> Optional[str]:
-    """Return the flag reason if body matches a suspicious pattern, else None."""
     if not body:
         return None
     for pattern, reason in _SUSPICIOUS:
@@ -94,6 +92,9 @@ class MessageOut(BaseModel):
     created_at: str
     read_at: Optional[str]
     is_mine: bool
+    reply_to_id: Optional[str] = None
+    replied_body: Optional[str] = None
+    replied_sender_name: Optional[str] = None
 
 
 class ConversationOut(BaseModel):
@@ -107,11 +108,13 @@ class ConversationOut(BaseModel):
     unread_count: int
     is_online: bool
     last_seen_at: Optional[str]
+    other_last_read_at: Optional[str] = None
 
 
 class SendMessageIn(BaseModel):
     body: Optional[str] = None
     attachments: Optional[List[AttachmentIn]] = None
+    reply_to_id: Optional[str] = None
 
 
 class CreateConvIn(BaseModel):
@@ -125,6 +128,12 @@ def _me(current_user: Dict[str, Any]) -> UUID:
 
 
 def _is_online(user_id: str) -> bool:
+    try:
+        from app.core.connections import chat_connections
+        if chat_connections.is_connected(user_id):
+            return True
+    except Exception:
+        pass
     try:
         from app.core.redis import get_redis_client
         return bool(get_redis_client().sismember("chat:online_users", user_id))
@@ -145,7 +154,7 @@ def _rate_limit(user_id: str) -> None:
     except HTTPException:
         raise
     except Exception:
-        pass  # fail open if Redis unavailable
+        pass
 
 
 def _publish(channel: str, event: dict) -> None:
@@ -213,17 +222,15 @@ def _can_chat(me: UUID, me_role: str, them: UUID, them_role: str, db: Session) -
         )
 
     if me_role == "student" and them_role == "teacher":
-        # Students can contact any approved teacher to ask questions before booking
         from app.models.profile import TeacherProfile
         tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == them)).first()
         return tp is not None and tp.status == "approved"
 
     if me_role == "teacher" and them_role == "student":
-        # Teachers can only initiate conversations with students they've worked with
         return _has_booking(them, me)
 
     if me_role in ("student", "teacher") and them_role in ("student", "teacher"):
-        return False  # same-role chat not allowed
+        return False
 
     def _parent_teacher(parent: UUID, teacher: UUID) -> bool:
         from app.models.parent_link import ParentStudentLink
@@ -241,7 +248,12 @@ def _can_chat(me: UUID, me_role: str, them: UUID, them_role: str, db: Session) -
     return False
 
 
-def _fmt(msg: ChatMessage, me: UUID) -> MessageOut:
+def _fmt(
+    msg: ChatMessage,
+    me: UUID,
+    replied_body: Optional[str] = None,
+    replied_sender_name: Optional[str] = None,
+) -> MessageOut:
     atts: List[AttachmentOut] = []
     if msg.attachments and isinstance(msg.attachments, list):
         atts = [
@@ -262,6 +274,9 @@ def _fmt(msg: ChatMessage, me: UUID) -> MessageOut:
         created_at=msg.created_at.isoformat(),
         read_at=msg.read_at.isoformat() if msg.read_at else None,
         is_mine=msg.sender_id == me,
+        reply_to_id=str(msg.reply_to_id) if msg.reply_to_id else None,
+        replied_body=replied_body,
+        replied_sender_name=replied_sender_name,
     )
 
 
@@ -273,7 +288,6 @@ async def list_conversations(
     db: Session = Depends(get_db),
 ):
     me = _me(current_user)
-    # Only include conversations not hidden by this participant
     my_parts = db.exec(
         select(ConversationParticipant).where(
             ConversationParticipant.user_id == me,
@@ -324,6 +338,7 @@ async def list_conversations(
             unread_count=unread_count,
             is_online=_is_online(str(other_part.user_id)),
             last_seen_at=other.last_seen_at.isoformat() if other.last_seen_at else None,
+            other_last_read_at=other_part.last_read_at.isoformat() if other_part.last_read_at else None,
         ))
 
     result.sort(key=lambda c: c.last_message_at or "", reverse=True)
@@ -355,7 +370,6 @@ async def create_or_get_conversation(
             detail="Ce profil enseignant n'est pas disponible pour la messagerie.",
         )
 
-    # Find existing direct conversation between the two users
     my_conv_ids = {
         p.conv_id
         for p in db.exec(
@@ -375,7 +389,6 @@ async def create_or_get_conversation(
             break
 
     if existing_conv_id:
-        # Un-hide if this participant had previously hidden it
         my_part = db.exec(
             select(ConversationParticipant).where(
                 ConversationParticipant.conv_id == existing_conv_id,
@@ -396,11 +409,17 @@ async def create_or_get_conversation(
         db.commit()
         conv_id = conv.id
 
-    # Get last message for the response
     last_msg = db.exec(
         select(ChatMessage)
         .where(ChatMessage.conv_id == conv_id)
         .order_by(ChatMessage.created_at.desc())
+    ).first()
+
+    other_part_obj = db.exec(
+        select(ConversationParticipant).where(
+            ConversationParticipant.conv_id == conv_id,
+            ConversationParticipant.user_id == them,
+        )
     ).first()
 
     return ConversationOut(
@@ -414,6 +433,7 @@ async def create_or_get_conversation(
         unread_count=0,
         is_online=_is_online(str(them)),
         last_seen_at=them_profile.last_seen_at.isoformat() if them_profile.last_seen_at else None,
+        other_last_read_at=other_part_obj.last_read_at.isoformat() if other_part_obj and other_part_obj.last_read_at else None,
     )
 
 
@@ -438,7 +458,30 @@ async def get_messages(
     stmt = stmt.order_by(ChatMessage.created_at.desc()).limit(size)
 
     msgs = list(reversed(db.exec(stmt).all()))
-    return [_fmt(m, me) for m in msgs]
+
+    # Batch-load reply context
+    reply_ids = {m.reply_to_id for m in msgs if m.reply_to_id}
+    replied_map: dict[UUID, ChatMessage] = {}
+    if reply_ids:
+        replied_msgs = db.exec(select(ChatMessage).where(ChatMessage.id.in_(reply_ids))).all()
+        replied_map = {rm.id: rm for rm in replied_msgs}
+
+    sender_ids = {rm.sender_id for rm in replied_map.values()}
+    sender_names: dict[UUID, str] = {}
+    if sender_ids:
+        profiles = db.exec(select(Profile).where(Profile.id.in_(sender_ids))).all()
+        sender_names = {p.id: (p.full_name or "Utilisateur") for p in profiles}
+
+    result = []
+    for m in msgs:
+        rb: Optional[str] = None
+        rsn: Optional[str] = None
+        if m.reply_to_id and m.reply_to_id in replied_map:
+            rm = replied_map[m.reply_to_id]
+            rb = rm.body
+            rsn = sender_names.get(rm.sender_id, "Utilisateur")
+        result.append(_fmt(m, me, rb, rsn))
+    return result
 
 
 @router.post("/{conv_id}/messages", response_model=MessageOut, status_code=status.HTTP_201_CREATED)
@@ -464,8 +507,32 @@ async def send_message(
         for a in atts
     ]
 
-    # Scan for suspicious off-platform content
     flag_reason = _scan_suspicious(body) if body else None
+
+    # Validate reply_to_id
+    reply_to_id_val: Optional[UUID] = None
+    replied_body_val: Optional[str] = None
+    replied_sender_name_val: Optional[str] = None
+
+    if payload.reply_to_id:
+        try:
+            rid = UUID(payload.reply_to_id)
+            replied = db.exec(
+                select(ChatMessage).where(
+                    ChatMessage.id == rid,
+                    ChatMessage.conv_id == conv_id,
+                )
+            ).first()
+            if not replied:
+                raise HTTPException(status_code=400, detail="Message de référence introuvable.")
+            reply_to_id_val = rid
+            replied_body_val = replied.body
+            replied_sender = _get_profile(replied.sender_id, db)
+            replied_sender_name_val = (replied_sender.full_name or "Utilisateur") if replied_sender else "Utilisateur"
+        except HTTPException:
+            raise
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="reply_to_id invalide.")
 
     msg = ChatMessage(
         conv_id=conv_id,
@@ -475,6 +542,7 @@ async def send_message(
         created_at=datetime.now(timezone.utc),
         is_flagged=flag_reason is not None,
         flag_reason=flag_reason,
+        reply_to_id=reply_to_id_val,
     )
     db.add(msg)
     db.commit()
@@ -497,13 +565,23 @@ async def send_message(
             "attachments": att_list,
             "created_at": msg.created_at.isoformat(),
             "read_at": None,
-            "is_mine": False,  # recipient's perspective
+            "is_mine": False,
+            "reply_to_id": str(reply_to_id_val) if reply_to_id_val else None,
+            "replied_body": replied_body_val,
+            "replied_sender_name": replied_sender_name_val,
         },
     }
-    for pid in _participant_ids(conv_id, db):
-        _publish(f"chat:user:{pid}", event)
 
-    return _fmt(msg, me)
+    # Push only to recipients — not sender (sender has message from HTTP response)
+    from app.core.connections import chat_connections
+    for pid in _participant_ids(conv_id, db):
+        if pid == str(me):
+            continue
+        delivered = await chat_connections.send(pid, event)
+        if not delivered:
+            _publish(f"chat:user:{pid}", event)
+
+    return _fmt(msg, me, replied_body_val, replied_sender_name_val)
 
 
 @router.post("/{conv_id}/read")
@@ -515,6 +593,7 @@ async def mark_read(
     me = _me(current_user)
     _assert_participant(me, conv_id, db)
 
+    now = datetime.now(timezone.utc)
     part = db.exec(
         select(ConversationParticipant).where(
             ConversationParticipant.conv_id == conv_id,
@@ -522,17 +601,24 @@ async def mark_read(
         )
     ).first()
     if part:
-        part.last_read_at = datetime.now(timezone.utc)
+        part.last_read_at = now
         db.add(part)
         db.commit()
 
+    read_at_str = now.isoformat()
+    mark_event = {
+        "type": "message_read",
+        "conv_id": str(conv_id),
+        "user_id": str(me),
+        "read_at": read_at_str,
+    }
+
+    from app.core.connections import chat_connections
     for pid in _participant_ids(conv_id, db):
         if pid != str(me):
-            _publish(f"chat:user:{pid}", {
-                "type": "message_read",
-                "conv_id": str(conv_id),
-                "user_id": str(me),
-            })
+            delivered = await chat_connections.send(pid, mark_event)
+            if not delivered:
+                _publish(f"chat:user:{pid}", mark_event)
 
     return {"ok": True}
 
