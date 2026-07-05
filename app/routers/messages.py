@@ -572,14 +572,15 @@ async def send_message(
         },
     }
 
-    # Push only to recipients — not sender (sender has message from HTTP response)
+    # Push to all recipients (not sender — sender has message from HTTP response).
+    # Direct push for instant same-worker delivery, Redis for cross-worker + reliability.
+    # Frontend deduplicates by message ID, so receiving both paths is harmless.
     from app.core.connections import chat_connections
     for pid in _participant_ids(conv_id, db):
         if pid == str(me):
             continue
-        delivered = await chat_connections.send(pid, event)
-        if not delivered:
-            _publish(f"chat:user:{pid}", event)
+        await chat_connections.send(pid, event)
+        _publish(f"chat:user:{pid}", event)
 
     return _fmt(msg, me, replied_body_val, replied_sender_name_val)
 
