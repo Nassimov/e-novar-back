@@ -575,8 +575,8 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
     finally:
         stop_evt.set()
         sub_task.cancel()
-        # unregister puts None sentinel into send_queue → sender task exits cleanly
-        chat_connections.unregister(user_id)
+        # unregister removes this specific queue and puts None sentinel → sender exits
+        chat_connections.unregister(user_id, send_queue)
         sender_task.cancel()
         message_manager.disconnect(user_id, websocket)
         try:
