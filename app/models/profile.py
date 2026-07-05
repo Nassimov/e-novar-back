@@ -42,6 +42,7 @@ class Profile(SQLModel, table=True):
     )
     phone: Optional[str] = Field(default=None)
     avatar_url: Optional[str] = Field(default=None)
+    active_sticker_url: Optional[str] = Field(default=None)
     bio: Optional[str] = Field(default=None)
     wilaya: Optional[str] = Field(default=None)
     city: Optional[str] = Field(default=None)

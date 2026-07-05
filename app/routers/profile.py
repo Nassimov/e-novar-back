@@ -99,6 +99,7 @@ class StudentFullProfileResponse(BaseModel):
     birth_date: Optional[str] = None
     gender: Optional[str] = None
     avatar_url: Optional[str] = None
+    active_sticker_url: Optional[str] = None
     wilaya: Optional[str] = None
     student_code: Optional[str] = None
     parent_link_code: Optional[str] = None
@@ -180,6 +181,7 @@ async def get_student_profile(
         birth_date=birth,
         gender=profile.gender,
         avatar_url=profile.avatar_url,
+        active_sticker_url=profile.active_sticker_url,
         wilaya=profile.wilaya,
         student_code=sp.student_code if sp else None,
         parent_link_code=sp.parent_link_code if sp else None,

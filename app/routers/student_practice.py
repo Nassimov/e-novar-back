@@ -450,16 +450,7 @@ def _award_ep(student_id: UUID, ep: int, label: str, attempt_id: UUID, db: Sessi
     except Exception:
         pass
 
-    bal = db.exec(select(KpBalance).where(KpBalance.user_id == student_id)).first()
-    if bal is None:
-        bal = KpBalance(user_id=student_id, balance=0, total_earned=0, week_earned=0, xp=0, next_level_at=500)
-        db.add(bal)
-    bal.balance      += actual_ep
-    bal.total_earned += actual_ep
-    bal.week_earned  += actual_ep
-    bal.xp           += actual_ep
-    bal.updated_at    = datetime.utcnow()
-    db.add(bal)
+    # Balance/XP maintained by apply_kp_transaction() trigger — insert only.
     db.add(KpTransaction(
         user_id=student_id,
         amount=actual_ep,

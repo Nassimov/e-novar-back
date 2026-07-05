@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
@@ -228,6 +229,98 @@ async def get_pdf_pack_files(
         })
 
     return {"packs": packs}
+
+
+@router.get("/entitlements/stickers/files")
+async def get_sticker_files(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return signed URLs for all sticker images the user has unlocked."""
+    uid = UUID(current_user["id"])
+    now = datetime.now(timezone.utc)
+
+    active = db.exec(
+        select(UserEntitlement).where(
+            UserEntitlement.user_id == uid,
+            UserEntitlement.effect_type == "stickers_pack",
+            UserEntitlement.status == "active",
+        )
+    ).all()
+    active = [e for e in active if not e.expires_at or e.expires_at > now]
+
+    if not active:
+        raise HTTPException(status_code=403, detail="Aucun pack stickers actif.")
+
+    from app.services.storage import list_folder, get_signed_url
+    from app.models.profile import Profile
+
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    current_sticker = profile.active_sticker_url if profile else None
+
+    packs = []
+    seen: set[str] = set()
+    for ent in active:
+        pack_id = (ent.effect_config or {}).get("pack_id", "pack1")
+        if pack_id in seen:
+            continue
+        seen.add(pack_id)
+
+        files = list_folder(f"sticker-packs/{pack_id}")
+        stickers = []
+        for f in files:
+            url = get_signed_url(f["path"], expires_in=3600)
+            if url:
+                stickers.append({"filename": f["name"], "url": url})
+
+        packs.append({
+            "pack_id": pack_id,
+            "entitlement_id": str(ent.id),
+            "stickers": stickers,
+            "sticker_count": len(stickers),
+        })
+
+    return {"packs": packs, "active_sticker_url": current_sticker}
+
+
+class _StickerActivateBody(BaseModel):
+    sticker_url: str
+
+
+@router.patch("/entitlements/stickers/activate")
+async def activate_sticker(
+    body: _StickerActivateBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Set (or clear) the student's equipped sticker shown on their profile."""
+    uid = UUID(current_user["id"])
+    now = datetime.now(timezone.utc)
+
+    # Verify the user actually owns an active stickers_pack
+    owned = db.exec(
+        select(UserEntitlement).where(
+            UserEntitlement.user_id == uid,
+            UserEntitlement.effect_type == "stickers_pack",
+            UserEntitlement.status == "active",
+        )
+    ).all()
+    if not any(not e.expires_at or e.expires_at > now for e in owned):
+        raise HTTPException(status_code=403, detail="Aucun pack stickers actif.")
+
+    from app.models.profile import Profile
+
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profil introuvable.")
+
+    # Empty string = unequip sticker
+    profile.active_sticker_url = body.sticker_url or None
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+
+    return {"active_sticker_url": profile.active_sticker_url}
 
 
 def _item_to_dict(it: StoreItem) -> Dict[str, Any]:

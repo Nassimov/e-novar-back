@@ -148,11 +148,7 @@ def redeem_item(
             f"{item.cost} EP requis."
         )
 
-    # Deduct balance (bypass boost — this is a spend, not an earn)
-    account.balance -= item.cost
-    account.updated_at = now
-    db.add(account)
-
+    # Balance is maintained by the apply_kp_transaction() trigger — insert only.
     db.add(KpTransaction(
         user_id=user_id,
         amount=-item.cost,
