@@ -477,21 +477,49 @@ message_manager = ConnectionManager()
 notification_manager = ConnectionManager()
 
 
+async def _resolve_ws_user(token: str) -> tuple[str, str]:
+    """Return (user_id, email) from a WS token, or raise ValueError on auth failure.
+
+    Mirrors the two-path strategy in get_current_user():
+      1. Fast local HMAC decode (requires SUPABASE_JWT_SECRET).
+      2. Supabase Auth API fallback (always correct, one extra round-trip).
+    """
+    from app.core.security import decode_supabase_jwt
+
+    if not token:
+        raise ValueError("missing token")
+
+    claims = decode_supabase_jwt(token)
+    if claims:
+        uid = claims.get("sub", "")
+        if not uid:
+            raise ValueError("missing sub")
+        return uid, claims.get("email", "")
+
+    # Fast decode failed — try Supabase Auth API (handles missing/wrong JWT secret)
+    logger.warning("WS: local JWT decode failed — falling back to Supabase get_user()")
+    try:
+        from app.database import get_supabase_service
+        resp = get_supabase_service().auth.get_user(token)
+        if resp and resp.user:
+            return str(resp.user.id), resp.user.email or ""
+    except Exception as exc:
+        logger.error("WS: Supabase get_user fallback failed: %s", exc)
+
+    raise ValueError("invalid or expired token")
+
+
 @app.websocket("/ws/messages")
 async def websocket_messages(websocket: WebSocket, token: str = ""):
     """Real-time messaging channel. Connect with `?token=<jwt>`."""
     import asyncio
-    from app.core.security import decode_supabase_jwt
     from app.core.connections import chat_connections
 
-    claims = decode_supabase_jwt(token) if token else None
-    if not claims:
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /messages rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
-        return
-
-    user_id = claims.get("sub", "")
-    if not user_id:
-        await websocket.close(code=4001, reason="Invalid token")
         return
 
     await message_manager.connect(user_id, websocket)
@@ -524,6 +552,7 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
 
     asyncio.create_task(_touch_presence())
     asyncio.create_task(_broadcast_presence_event(user_id, {"type": "user_online", "user_id": user_id}))
+    asyncio.create_task(_send_partner_online_statuses(user_id, send_queue))
 
     stop_evt = asyncio.Event()
 
@@ -673,6 +702,46 @@ async def _broadcast_presence_event(user_id: str, event: dict) -> None:
         logger.debug("presence broadcast error: %s", exc)
 
 
+async def _send_partner_online_statuses(user_id: str, send_queue: "asyncio.Queue") -> None:
+    """Push current online status of all conversation partners to a newly connected user.
+
+    Fixes the race condition where both users are already connected when the page
+    loads — neither receives a user_online event because both connected before the
+    other registered their WS.  Calling this on connect ensures the freshly arrived
+    user learns which partners are already online without waiting for those partners
+    to reconnect.
+    """
+    try:
+        from uuid import UUID as _UUID
+        from sqlmodel import select as _select
+        from app.database import get_session
+        from app.models.conversation import ConversationParticipant
+        from app.routers.messages import _is_online
+
+        with next(get_session()) as _db:
+            my_parts = _db.exec(
+                _select(ConversationParticipant).where(
+                    ConversationParticipant.user_id == _UUID(user_id)
+                )
+            ).all()
+            conv_ids = [p.conv_id for p in my_parts]
+            if not conv_ids:
+                return
+            partner_parts = _db.exec(
+                _select(ConversationParticipant).where(
+                    ConversationParticipant.conv_id.in_(conv_ids),
+                    ConversationParticipant.user_id != _UUID(user_id),
+                )
+            ).all()
+            partner_ids = list({str(p.user_id) for p in partner_parts})
+
+        for pid in partner_ids:
+            if _is_online(pid):
+                send_queue.put_nowait({"type": "user_online", "user_id": pid})
+    except Exception as exc:
+        logger.debug("partner status push failed: %s", exc)
+
+
 def _handle_chat_typing(user_id: str, conv_id: str, is_typing: bool):
     """Set/clear the typing Redis key and notify other conversation participants."""
     if not conv_id:
@@ -712,16 +781,11 @@ def _handle_chat_typing(user_id: str, conv_id: str, is_typing: bool):
 @app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket, token: str = ""):
     """Real-time notification channel. Connect with `?token=<jwt>`."""
-    from app.core.security import decode_supabase_jwt
-
-    claims = decode_supabase_jwt(token) if token else None
-    if not claims:
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /notifications rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
-        return
-
-    user_id = claims.get("sub", "")
-    if not user_id:
-        await websocket.close(code=4001, reason="Invalid token")
         return
 
     await notification_manager.connect(user_id, websocket)
