@@ -51,6 +51,10 @@ class Profile(SQLModel, table=True):
     theme: Optional[str] = Field(default="system")       # public.theme_pref enum value
     onboarding_completed: bool = Field(default=False)
     last_seen_at: Optional[datetime] = Field(default=None)
+    referral_code: Optional[str] = Field(
+        default=None,
+        sa_column=sa.Column(sa.String(30), unique=True, nullable=True),
+    )
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

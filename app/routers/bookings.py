@@ -195,6 +195,10 @@ async def update_booking(
     if payload.status:
         if payload.status not in valid_statuses:
             raise HTTPException(status_code=400, detail="Invalid status")
+        if payload.status == "completed" and booking.status != "completed":
+            # Validate any pending referral for the student
+            from app.services.referral import validate_referral_for_user
+            validate_referral_for_user(booking.student_id, db)
         booking.status = payload.status
     if payload.date:
         booking.date = payload.date
