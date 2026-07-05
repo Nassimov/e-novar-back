@@ -175,6 +175,10 @@ TAGS_METADATA = [
         "description": "Admin: platform KPIs — total users, revenue, sessions completed, average rating, activity feed.",
     },
     {
+        "name": "Admin — Messages",
+        "description": "Admin: surveillance des messages — liste des messages signalés (hors-plateforme, contacts externes), avertissements aux expéditeurs.",
+    },
+    {
         "name": "Admin — Questions",
         "description": (
             "Admin: full question-bank management. "
@@ -317,6 +321,7 @@ from app.routers.student_badges import router as student_badges_router
 from app.routers.student_leaderboard import router as student_leaderboard_router
 from app.routers.admin.questions import router as admin_questions_router
 from app.routers.admin.auth import router as admin_auth_router
+from app.routers.admin.messages import router as admin_messages_router
 from app.routers.store import router as store_router
 from app.routers.admin.store import router as admin_store_router
 
@@ -355,6 +360,7 @@ app.include_router(admin_promos_router,     prefix="/api/admin/promos",     tags
 app.include_router(admin_content_router,    prefix="/api/admin/content",    tags=["Admin — Content"])
 app.include_router(admin_stats_router,      prefix="/api/admin/stats",      tags=["Admin — Stats"])
 app.include_router(admin_questions_router,  prefix="/api/admin/questions",  tags=["Admin — Questions"])
+app.include_router(admin_messages_router,   prefix="/api/admin/messages",   tags=["Admin — Messages"])
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 

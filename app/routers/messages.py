@@ -1,16 +1,18 @@
 """
 Chat router — conversations, messages, file uploads.
 
-Permission model:
-  student ↔ teacher  requires a Booking or TutoringSession between them
-  parent  ↔ teacher  requires parent_student_link + booking/session on the child
-  teacher ↔ student/parent  symmetric of the above
+Permission model (updated):
+  student  → teacher   allowed for any approved teacher (no booking required)
+  teacher  → student   requires a Booking or TutoringSession (teacher cannot cold-contact)
+  parent   ↔ teacher   requires parent_student_link + booking/session on the child
+  teacher  → parent    symmetric of the above
 """
 from __future__ import annotations
 
 import html
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -32,6 +34,39 @@ _MAX_ATTACH = 5
 _MAX_FILE = 10 * 1024 * 1024
 _RATE_WINDOW = 60
 _RATE_MAX = 30
+
+
+# ── Suspicious-content scanner ────────────────────────────────────────────────
+# Patterns are intentionally broad: flag and let admin review rather than miss.
+
+_SUSPICIOUS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b0[567]\d{8}\b", re.I), "numéro de téléphone"),
+    (re.compile(r"\+213\s*\d{8,9}", re.I), "numéro international"),
+    (re.compile(r"\bwhatsapp\b", re.I), "WhatsApp"),
+    (re.compile(r"\btelegram\b", re.I), "Telegram"),
+    (re.compile(r"\bviber\b", re.I), "Viber"),
+    (re.compile(r"\bbaridimob\b", re.I), "BaridiMob"),
+    (re.compile(r"\bccp\s*\d", re.I), "paiement CCP"),
+    (re.compile(r"\bwestern\s+union\b", re.I), "Western Union"),
+    (re.compile(r"\bmoneygram\b", re.I), "MoneyGram"),
+    (re.compile(r"hors\s+(?:de\s+)?(?:la\s+)?plateforme", re.I), "hors plateforme"),
+    (re.compile(r"en\s+dehors\s+de", re.I), "hors plateforme"),
+    (re.compile(r"payer?\s+directement", re.I), "paiement direct"),
+    (re.compile(r"virement\s+(?:direct|priv)", re.I), "virement direct"),
+    (re.compile(r"\binstagram\b", re.I), "Instagram"),
+    (re.compile(r"\bfacebook\b|\bfb\.com\b|\bfb\.me\b", re.I), "Facebook"),
+    (re.compile(r"\bsnapchat\b", re.I), "Snapchat"),
+]
+
+
+def _scan_suspicious(body: str) -> Optional[str]:
+    """Return the flag reason if body matches a suspicious pattern, else None."""
+    if not body:
+        return None
+    for pattern, reason in _SUSPICIOUS:
+        if pattern.search(body):
+            return reason
+    return None
 
 
 # ── Pydantic I/O ──────────────────────────────────────────────────────────────
@@ -152,7 +187,14 @@ def _get_role(uid: UUID, db: Session) -> str:
 
 
 def _can_chat(me: UUID, me_role: str, them: UUID, them_role: str, db: Session) -> bool:
-    """Return True if the two users are allowed to exchange messages."""
+    """
+    Return True if the two users are allowed to start a NEW conversation.
+    Rules:
+      student  → teacher:  always allowed if teacher status = 'approved'
+      teacher  → student:  requires an existing Booking or TutoringSession
+      parent   → teacher:  requires parent_student_link + booking on the child
+      teacher  → parent:   symmetric of parent→teacher
+    """
     from app.models.booking import Booking, TutoringSession
 
     def _has_booking(student: UUID, teacher: UUID) -> bool:
@@ -171,21 +213,24 @@ def _can_chat(me: UUID, me_role: str, them: UUID, them_role: str, db: Session) -
         )
 
     if me_role == "student" and them_role == "teacher":
-        return _has_booking(me, them)
+        # Students can contact any approved teacher to ask questions before booking
+        from app.models.profile import TeacherProfile
+        tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == them)).first()
+        return tp is not None and tp.status == "approved"
 
     if me_role == "teacher" and them_role == "student":
+        # Teachers can only initiate conversations with students they've worked with
         return _has_booking(them, me)
 
     if me_role in ("student", "teacher") and them_role in ("student", "teacher"):
-        # Different roles already handled; same-role chat not allowed
-        return False
+        return False  # same-role chat not allowed
 
     def _parent_teacher(parent: UUID, teacher: UUID) -> bool:
         from app.models.parent_link import ParentStudentLink
         links = db.exec(
             select(ParentStudentLink).where(ParentStudentLink.parent_id == parent)
         ).all()
-        return any(_has_booking(l.student_id, teacher) for l in links)
+        return any(_has_booking(lnk.student_id, teacher) for lnk in links)
 
     if me_role == "parent" and them_role == "teacher":
         return _parent_teacher(me, them)
@@ -228,8 +273,12 @@ async def list_conversations(
     db: Session = Depends(get_db),
 ):
     me = _me(current_user)
+    # Only include conversations not hidden by this participant
     my_parts = db.exec(
-        select(ConversationParticipant).where(ConversationParticipant.user_id == me)
+        select(ConversationParticipant).where(
+            ConversationParticipant.user_id == me,
+            ConversationParticipant.hidden_at.is_(None),
+        )
     ).all()
     if not my_parts:
         return []
@@ -256,7 +305,6 @@ async def list_conversations(
             .order_by(ChatMessage.created_at.desc())
         ).first()
 
-        # Unread: messages from others after my last_read_at
         stmt = select(ChatMessage).where(
             ChatMessage.conv_id == cid,
             ChatMessage.sender_id != me,
@@ -304,7 +352,7 @@ async def create_or_get_conversation(
     if not _can_chat(me, me_role, them, them_role, db):
         raise HTTPException(
             status_code=403,
-            detail="Vous ne pouvez écrire qu'aux enseignants avec qui vous avez une réservation.",
+            detail="Ce profil enseignant n'est pas disponible pour la messagerie.",
         )
 
     # Find existing direct conversation between the two users
@@ -327,6 +375,17 @@ async def create_or_get_conversation(
             break
 
     if existing_conv_id:
+        # Un-hide if this participant had previously hidden it
+        my_part = db.exec(
+            select(ConversationParticipant).where(
+                ConversationParticipant.conv_id == existing_conv_id,
+                ConversationParticipant.user_id == me,
+            )
+        ).first()
+        if my_part and my_part.hidden_at is not None:
+            my_part.hidden_at = None
+            db.add(my_part)
+            db.commit()
         conv_id = existing_conv_id
     else:
         conv = Conversation(id=uuid4(), type="direct", created_at=datetime.now(timezone.utc))
@@ -337,14 +396,21 @@ async def create_or_get_conversation(
         db.commit()
         conv_id = conv.id
 
+    # Get last message for the response
+    last_msg = db.exec(
+        select(ChatMessage)
+        .where(ChatMessage.conv_id == conv_id)
+        .order_by(ChatMessage.created_at.desc())
+    ).first()
+
     return ConversationOut(
         id=str(conv_id),
         other_user_id=str(them),
         other_name=them_profile.full_name or "Utilisateur",
         other_role=them_role,
         other_avatar=them_profile.avatar_url,
-        last_message=None,
-        last_message_at=None,
+        last_message=last_msg.body if last_msg else None,
+        last_message_at=last_msg.created_at.isoformat() if last_msg else None,
         unread_count=0,
         is_online=_is_online(str(them)),
         last_seen_at=them_profile.last_seen_at.isoformat() if them_profile.last_seen_at else None,
@@ -398,16 +464,27 @@ async def send_message(
         for a in atts
     ]
 
+    # Scan for suspicious off-platform content
+    flag_reason = _scan_suspicious(body) if body else None
+
     msg = ChatMessage(
         conv_id=conv_id,
         sender_id=me,
         body=body,
         attachments=att_list or None,
         created_at=datetime.now(timezone.utc),
+        is_flagged=flag_reason is not None,
+        flag_reason=flag_reason,
     )
     db.add(msg)
     db.commit()
     db.refresh(msg)
+
+    if flag_reason:
+        logger.warning(
+            "Flagged message: id=%s conv=%s sender=%s reason=%r",
+            msg.id, conv_id, me, flag_reason,
+        )
 
     event = {
         "type": "new_message",
@@ -460,6 +537,32 @@ async def mark_read(
     return {"ok": True}
 
 
+@router.delete("/{conv_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def hide_conversation(
+    conv_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Hide a conversation from the requesting user's list.
+    The other participant is unaffected. All messages are preserved.
+    Re-opening via create_or_get_conversation restores visibility.
+    """
+    me = _me(current_user)
+    _assert_participant(me, conv_id, db)
+
+    part = db.exec(
+        select(ConversationParticipant).where(
+            ConversationParticipant.conv_id == conv_id,
+            ConversationParticipant.user_id == me,
+        )
+    ).first()
+    if part:
+        part.hidden_at = datetime.now(timezone.utc)
+        db.add(part)
+        db.commit()
+
+
 @router.post("/upload")
 async def upload_attachment(
     file: UploadFile = File(...),
@@ -508,7 +611,7 @@ async def list_contacts(
             links = db.exec(
                 select(ParentStudentLink).where(ParentStudentLink.parent_id == me)
             ).all()
-            student_ids = [l.student_id for l in links]
+            student_ids = [lnk.student_id for lnk in links]
             teacher_ids = list({
                 b.teacher_id
                 for b in db.exec(
@@ -550,15 +653,15 @@ async def list_contacts(
                 )
             ).all()
             parent_seen: set[UUID] = set()
-            for link in parent_links:
-                if link.parent_id not in parent_seen:
-                    parent_seen.add(link.parent_id)
-                    p = _get_profile(link.parent_id, db)
+            for lnk in parent_links:
+                if lnk.parent_id not in parent_seen:
+                    parent_seen.add(lnk.parent_id)
+                    p = _get_profile(lnk.parent_id, db)
                     if p:
                         contacts.append({
-                            "id": str(link.parent_id), "name": p.full_name or "Parent",
+                            "id": str(lnk.parent_id), "name": p.full_name or "Parent",
                             "role": "parent", "avatar": p.avatar_url,
-                            "is_online": _is_online(str(link.parent_id)),
+                            "is_online": _is_online(str(lnk.parent_id)),
                         })
 
     return contacts

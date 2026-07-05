@@ -246,6 +246,67 @@ def send_store_redeem_email(
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_teacher_approved_email(self, to: str, name: str) -> bool:
+    """Sent when an admin approves a teacher's profile."""
+    dashboard_url = f"{settings.frontend_url}/teacher"
+    html = f"""
+    <html>
+    <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
+      <h1 style="color:#4F46E5;">🎉 Félicitations, {name} !</h1>
+      <p>Votre profil enseignant <strong>E-NOVAR</strong> a été <strong>validé</strong> par notre équipe.</p>
+      <div style="background:#ECFDF5;border-left:4px solid #10B981;padding:16px;border-radius:6px;margin:24px 0;">
+        <p style="margin:0;font-weight:bold;color:#065F46;">✅ Votre compte est maintenant actif</p>
+        <p style="margin:8px 0 0;color:#065F46;">
+          Configurez vos disponibilités et commencez à recevoir des réservations d'élèves.
+        </p>
+      </div>
+      <p>En cadeau de bienvenue, <strong>50 EP</strong> ont été crédités sur votre compte.</p>
+      <p style="margin-top:28px;">
+        <a href="{dashboard_url}"
+           style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;">
+          Accéder à mon espace enseignant
+        </a>
+      </p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe E-NOVAR</p>
+    </body>
+    </html>
+    """
+    try:
+        return _send(to, "✅ Votre profil enseignant a été validé — E-NOVAR", html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_teacher_rejected_email(self, to: str, name: str, reason: str) -> bool:
+    """Sent when an admin rejects a teacher's profile."""
+    html = f"""
+    <html>
+    <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
+      <h1 style="color:#4F46E5;">E-NOVAR — Candidature enseignant</h1>
+      <p>Bonjour {name},</p>
+      <p>Après examen de votre dossier, nous ne sommes pas en mesure d'approuver votre candidature.</p>
+      <div style="background:#FEF2F2;border-left:4px solid #EF4444;padding:16px;border-radius:6px;margin:24px 0;">
+        <p style="margin:0;font-weight:bold;color:#991B1B;">Motif du refus</p>
+        <p style="margin:8px 0 0;color:#991B1B;">{reason}</p>
+      </div>
+      <p>
+        Si vous souhaitez soumettre une nouvelle candidature avec des documents mis à jour,
+        vous pouvez créer un nouveau compte sur E-NOVAR.
+      </p>
+      <p style="color:#6B7280;font-size:13px;margin-top:40px;">
+        Cordialement,<br/>L'équipe E-NOVAR
+      </p>
+    </body>
+    </html>
+    """
+    try:
+        return _send(to, "Candidature enseignant E-NOVAR", html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
 def send_withdrawal_processed_email(self, to: str, name: str, amount: int, status: str) -> bool:
     status_label = "approuvée" if status == "approved" else "refusée"
     color = "#10B981" if status == "approved" else "#EF4444"

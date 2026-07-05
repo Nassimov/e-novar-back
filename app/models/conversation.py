@@ -27,6 +27,8 @@ class ConversationParticipant(SQLModel, table=True):
     Mirrors public.conversation_participants.
     Composite PK on (conv_id, user_id).
     role: 'owner' | 'member'
+    hidden_at: set when the participant hides the conversation (NULL = visible).
+               Messages are preserved; setting to NULL restores it.
     """
 
     __tablename__ = "conversation_participants"
@@ -35,12 +37,14 @@ class ConversationParticipant(SQLModel, table=True):
     user_id: UUID = Field(foreign_key="profiles.id", primary_key=True)
     role: Optional[str] = Field(default=None)
     last_read_at: Optional[datetime] = Field(default=None)
+    hidden_at: Optional[datetime] = Field(default=None)
 
 
 class ChatMessage(SQLModel, table=True):
     """
     Mirrors public.messages.
     attachments: jsonb array of [{name, url, type, size}]
+    is_flagged / flag_reason: set by the suspicious-content scanner in send_message.
     Named ChatMessage to avoid conflicts with Python's built-in or other imports.
     """
 
@@ -56,3 +60,8 @@ class ChatMessage(SQLModel, table=True):
     )
     created_at: datetime = Field(default_factory=datetime.utcnow)
     read_at: Optional[datetime] = Field(default=None)
+    is_flagged: bool = Field(
+        default=False,
+        sa_column=sa.Column(sa.Boolean, nullable=False, server_default=sa.text("false")),
+    )
+    flag_reason: Optional[str] = Field(default=None)

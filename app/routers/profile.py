@@ -333,15 +333,16 @@ async def reject_teacher(
     current_user: Dict[str, Any] = Depends(require_role("admin")),
     db: Session = Depends(get_db),
 ):
-    """Reject a teacher account: set status='rejected'."""
+    """Reject a teacher account: delete from Supabase auth (cascades to all tables)."""
     tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == teacher_user_id)).first()
     if tp is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    tp.status = "rejected"
-    tp.verified = False
-    db.add(tp)
-    db.commit()
+    try:
+        from app.database import get_supabase_service
+        get_supabase_service().auth.admin.delete_user(str(teacher_user_id))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Erreur lors de la suppression du compte.")
     return {"status": "rejected", "teacher_user_id": str(teacher_user_id)}
 
 
