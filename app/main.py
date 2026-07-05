@@ -495,7 +495,8 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
         return
 
     await message_manager.connect(user_id, websocket)
-    chat_connections.register(user_id, websocket)
+    # Register user in queue-based delivery manager; get the queue back
+    send_queue = chat_connections.register(user_id)
 
     # Register online presence
     try:
@@ -525,7 +526,22 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
     asyncio.create_task(_broadcast_presence_event(user_id, {"type": "user_online", "user_id": user_id}))
 
     stop_evt = asyncio.Event()
-    sub_task = asyncio.create_task(_chat_redis_subscriber(user_id, websocket, stop_evt))
+
+    # Single sender task: the ONLY coroutine that calls ws.send_json().
+    # All other paths (HTTP handlers, Redis subscriber) enqueue via send_queue.
+    async def _sender():
+        while True:
+            data = await send_queue.get()
+            if data is None:  # sentinel from unregister()
+                break
+            try:
+                await websocket.send_json(data)
+            except Exception as exc:
+                logger.debug("WS send error user=%s: %s", user_id, exc)
+                break
+
+    sender_task = asyncio.create_task(_sender())
+    sub_task = asyncio.create_task(_chat_redis_subscriber(user_id, send_queue, stop_evt))
 
     logger.info("WS /messages connected: user=%s", user_id)
 
@@ -536,13 +552,13 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
                 msg = json.loads(data)
                 mtype = msg.get("type")
                 if mtype == "ping":
-                    await websocket.send_json({"type": "pong"})
+                    send_queue.put_nowait({"type": "pong"})
                     try:
                         from app.core.redis import get_redis_client
                         get_redis_client().sadd("chat:online_users", user_id)
                     except Exception:
                         pass
-                elif mtype in ("heartbeat",):
+                elif mtype == "heartbeat":
                     try:
                         from app.core.redis import get_redis_client
                         get_redis_client().sadd("chat:online_users", user_id)
@@ -553,14 +569,16 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
                 elif mtype == "typing_stop":
                     _handle_chat_typing(user_id, msg.get("conv_id", ""), False)
             except json.JSONDecodeError:
-                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                send_queue.put_nowait({"type": "error", "message": "Invalid JSON"})
     except WebSocketDisconnect:
         pass
     finally:
         stop_evt.set()
         sub_task.cancel()
+        # unregister puts None sentinel into send_queue → sender task exits cleanly
+        chat_connections.unregister(user_id)
+        sender_task.cancel()
         message_manager.disconnect(user_id, websocket)
-        chat_connections.unregister(user_id, websocket)
         try:
             from app.core.redis import get_redis_client
             get_redis_client().srem("chat:online_users", user_id)
@@ -577,35 +595,44 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
         logger.info("WS /messages disconnected: user=%s", user_id)
 
 
-async def _chat_redis_subscriber(user_id: str, websocket: WebSocket, stop: "asyncio.Event"):
-    """Subscribe to user's Redis pub/sub channel and forward events to the WebSocket (cross-worker delivery)."""
+async def _chat_redis_subscriber(user_id: str, send_queue: "asyncio.Queue", stop: "asyncio.Event"):
+    """Subscribe to Redis pub/sub and enqueue messages for the sender task (cross-worker delivery)."""
     import asyncio
-    try:
-        import redis.asyncio as aioredis
-        from app.config import get_settings
-        r = aioredis.Redis.from_url(get_settings().redis_url, decode_responses=True)
-        ps = r.pubsub(ignore_subscribe_messages=True)
-        await ps.subscribe(f"chat:user:{user_id}")
+    import redis.asyncio as aioredis
+    from app.config import get_settings
+
+    url = get_settings().redis_url
+
+    while not stop.is_set():
+        r = None
         try:
-            async for raw in ps.listen():
-                if stop.is_set():
-                    break
-                if not isinstance(raw, dict) or raw.get("type") != "message":
+            r = aioredis.Redis.from_url(url, decode_responses=True)
+            ps = r.pubsub()
+            await ps.subscribe(f"chat:user:{user_id}")
+            logger.debug("Redis subscriber ready: user=%s", user_id)
+
+            while not stop.is_set():
+                # get_message with timeout=1.0 blocks up to 1 s then returns None.
+                # Messages arrive instantly (no need to wait the full second).
+                raw = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if raw is None:
                     continue
-                try:
-                    await websocket.send_json(json.loads(raw["data"]))
-                except Exception:
-                    break
+                if raw.get("type") == "message":
+                    try:
+                        await send_queue.put(json.loads(raw["data"]))
+                    except Exception as exc:
+                        logger.debug("Redis msg parse error: %s", exc)
         except asyncio.CancelledError:
-            pass
+            return
+        except Exception as exc:
+            logger.warning("Redis subscriber error user=%s: %s — reconnecting", user_id, exc)
+            await asyncio.sleep(2.0)
         finally:
-            try:
-                await ps.unsubscribe(f"chat:user:{user_id}")
-                await r.aclose()
-            except Exception:
-                pass
-    except Exception as exc:
-        logger.warning("chat Redis subscriber error: %s", exc)
+            if r:
+                try:
+                    await r.aclose()
+                except Exception:
+                    pass
 
 
 async def _broadcast_presence_event(user_id: str, event: dict) -> None:

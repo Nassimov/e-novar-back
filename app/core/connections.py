@@ -1,49 +1,61 @@
-"""In-process WebSocket registry for direct same-worker message delivery."""
+"""Queue-based WebSocket delivery manager.
+
+Only ONE asyncio task (the sender) ever calls ws.send_json() per connection.
+HTTP handlers and Redis subscribers simply put events into the asyncio.Queue.
+This avoids concurrent-write races on the WebSocket transport.
+
+None is the sentinel that tells the sender task to stop.
+"""
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, Set
-
-if TYPE_CHECKING:
-    from fastapi import WebSocket
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
 
 class ChatConnectionManager:
-    """Maps user_id → active WebSocket connections on this worker."""
+    """Maps user_id → asyncio.Queue[dict | None].
+
+    Usage:
+        q = chat_connections.register(user_id)
+        # start sender task: reads from q, calls ws.send_json()
+        ...
+        chat_connections.unregister(user_id)  # puts None sentinel, removes mapping
+    """
 
     def __init__(self) -> None:
-        self._connections: Dict[str, Set["WebSocket"]] = defaultdict(set)
+        self._queues: Dict[str, asyncio.Queue] = {}
 
-    def register(self, user_id: str, ws: "WebSocket") -> None:
-        self._connections[user_id].add(ws)
+    def register(self, user_id: str) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._queues[user_id] = q
+        return q
 
-    def unregister(self, user_id: str, ws: "WebSocket") -> None:
-        self._connections[user_id].discard(ws)
-        if not self._connections[user_id]:
-            self._connections.pop(user_id, None)
+    def unregister(self, user_id: str) -> None:
+        q = self._queues.pop(user_id, None)
+        if q is not None:
+            q.put_nowait(None)  # sentinel → sender task exits cleanly
 
     def is_connected(self, user_id: str) -> bool:
-        return bool(self._connections.get(user_id))
+        return user_id in self._queues
 
     async def send(self, user_id: str, data: dict) -> bool:
-        """Push to all active sockets for user_id. Returns True if at least one delivered."""
-        sockets = list(self._connections.get(user_id, set()))
-        if not sockets:
+        """Enqueue data for delivery. Returns True if user is currently connected."""
+        q = self._queues.get(user_id)
+        if q is None:
             return False
-        dead = []
-        delivered = False
-        for ws in sockets:
-            try:
-                await ws.send_json(data)
-                delivered = True
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            self._connections[user_id].discard(ws)
-        return delivered
+        await q.put(data)
+        return True
+
+    def send_nowait(self, user_id: str, data: dict) -> bool:
+        """Non-blocking enqueue. Returns True if user is currently connected."""
+        q = self._queues.get(user_id)
+        if q is None:
+            return False
+        q.put_nowait(data)
+        return True
 
 
 chat_connections = ChatConnectionManager()
