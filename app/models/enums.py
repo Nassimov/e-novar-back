@@ -139,6 +139,7 @@ class KpSource(str, Enum):
     referral = "referral"
     homework = "homework"
     evaluation = "evaluation"
+    promo = "promo"
 
 
 class BadgeTier(str, Enum):

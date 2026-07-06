@@ -48,22 +48,39 @@ class LegalAcceptance(SQLModel, table=True):
 class PromoCode(SQLModel, table=True):
     """
     Mirrors public.promo_codes.
-    discount_type: 'percent' | 'fixed'
-    valid_from / valid_to: optional time window.
-    max_uses: None = unlimited.
+
+    Two mutually exclusive reward modes:
+    - KP bonus  (kp_reward > 0)          : awarded immediately when user applies the code.
+    - Discount  (discount_type is set)    : applied at booking checkout to reduce the price.
+    A code may have both (e.g. +50 EP bonus + -10% discount).
+
+    valid_from / valid_to : optional activation window.
+    max_uses              : None = unlimited global uses.
+    target_role           : 'all' | 'student' | 'teacher' | 'parent'
     """
 
     __tablename__ = "promo_codes"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     code: str = Field(sa_column=sa.Column(sa.String, unique=True, nullable=False))
-    discount_type: str = Field()                         # 'percent' | 'fixed'
-    discount_value: int = Field()
+    title: Optional[str] = Field(default=None)
+    description: Optional[str] = Field(default=None)
+    # Booking-discount reward
+    discount_type: Optional[str] = Field(
+        default=None,
+        sa_column=sa.Column(sa.String, nullable=True),
+    )  # 'percent' | 'fixed' | None
+    discount_value: int = Field(default=0)
+    # Instant KP reward
+    kp_reward: int = Field(default=0)
+    # Validity
     valid_from: Optional[datetime] = Field(default=None)
     valid_to: Optional[datetime] = Field(default=None)
     max_uses: Optional[int] = Field(default=None)
     uses: int = Field(default=0)
     active: bool = Field(default=True)
+    target_role: str = Field(default="all")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class PromoRedemption(SQLModel, table=True):

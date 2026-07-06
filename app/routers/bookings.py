@@ -8,8 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
+from app.models.admin import PromoCode, PromoRedemption
 from app.models.booking import Booking
-from app.models.promo import PromoCode
 from app.models.teacher import TeacherProfile
 from app.models.user import User
 from app.schemas.booking import BookingCreate, BookingResponse, BookingUpdate
@@ -36,10 +36,11 @@ async def create_booking(
     db: Session = Depends(get_db),
 ):
     """Create a new booking."""
-    from datetime import datetime
+    from datetime import datetime, timezone
+    from uuid import UUID as _UUID
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    student = db.exec(stmt).first()
+    student_uid = _UUID(current_user["id"])
+    student = db.exec(select(User).where(User.id == student_uid)).first()
     if student is None:
         raise HTTPException(status_code=404, detail="Student not found")
 
@@ -55,20 +56,51 @@ async def create_booking(
     amount = teacher_profile.price_per_session * FORMULA_PRICES.get(payload.formula, 1)
     kp_reward = FORMULA_KP.get(payload.formula, 50)
 
-    # Apply promo code if provided
+    # Apply discount promo code if provided
+    _promo_to_attach: PromoCode | None = None
     if payload.promo_code:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        code_clean = payload.promo_code.strip().upper()
+
         promo = db.exec(
             select(PromoCode).where(
-                PromoCode.code == payload.promo_code,
-                PromoCode.is_active == True,
+                PromoCode.code == code_clean,
+                PromoCode.active == True,
             )
         ).first()
-        if promo:
-            if promo.discount_percent:
-                amount = int(amount * (1 - promo.discount_percent / 100))
-            elif promo.discount_dzd:
-                amount = max(0, amount - promo.discount_dzd)
-            promo.used_count += 1
+
+        if promo is None:
+            raise HTTPException(status_code=400, detail="Code promo invalide.")
+        if promo.valid_from and promo.valid_from > now:
+            raise HTTPException(status_code=400, detail="Ce code promo n'est pas encore actif.")
+        if promo.valid_to and promo.valid_to < now:
+            raise HTTPException(status_code=400, detail="Ce code promo a expiré.")
+        if promo.max_uses is not None and promo.uses >= promo.max_uses:
+            raise HTTPException(status_code=400, detail="Ce code a atteint sa limite d'utilisation.")
+        if promo.target_role != "all" and promo.target_role != current_user.get("role", "student"):
+            raise HTTPException(status_code=403, detail="Ce code n'est pas valable pour ton rôle.")
+
+        # Check if user pre-claimed this code in the promo section
+        existing_redemption = db.exec(
+            select(PromoRedemption).where(
+                PromoRedemption.code_id == promo.id,
+                PromoRedemption.user_id == student_uid,
+            )
+        ).first()
+
+        if existing_redemption and existing_redemption.booking_id is not None:
+            raise HTTPException(status_code=400, detail="Tu as déjà utilisé ce code pour une réservation.")
+
+        if promo.discount_type and promo.discount_value:
+            if promo.discount_type == "percent":
+                amount = int(amount * (1 - promo.discount_value / 100))
+            elif promo.discount_type == "fixed":
+                amount = max(0, amount - promo.discount_value)
+
+        _promo_to_attach = promo
+        if not existing_redemption:
+            # First time using this code — increment global counter
+            promo.uses = (promo.uses or 0) + 1
             db.add(promo)
 
     booking = Booking(
@@ -88,6 +120,27 @@ async def create_booking(
         notes=payload.notes,
     )
     db.add(booking)
+    db.flush()  # get booking.id before commit
+
+    # Attach promo redemption with the booking id
+    if _promo_to_attach:
+        existing_rd = db.exec(
+            select(PromoRedemption).where(
+                PromoRedemption.code_id == _promo_to_attach.id,
+                PromoRedemption.user_id == student_uid,
+            )
+        ).first()
+        if existing_rd:
+            # Pre-claimed in promo section — link to this booking
+            existing_rd.booking_id = booking.id
+            db.add(existing_rd)
+        else:
+            db.add(PromoRedemption(
+                code_id=_promo_to_attach.id,
+                user_id=student_uid,
+                booking_id=booking.id,
+            ))
+
     db.commit()
     db.refresh(booking)
 
@@ -121,7 +174,8 @@ async def list_bookings(
     db: Session = Depends(get_db),
 ):
     """List bookings for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    from uuid import UUID as _UUID
+    stmt = select(User).where(User.id == _UUID(current_user["id"]))
     user = db.exec(stmt).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
@@ -156,7 +210,8 @@ async def get_booking(
     db: Session = Depends(get_db),
 ):
     """Get a specific booking."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    from uuid import UUID as _UUID
+    stmt = select(User).where(User.id == _UUID(current_user["id"]))
     user = db.exec(stmt).first()
 
     booking = db.get(Booking, booking_id)
@@ -179,8 +234,9 @@ async def update_booking(
 ):
     """Update a booking (reschedule or change status)."""
     from datetime import datetime
+    from uuid import UUID as _UUID
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == _UUID(current_user["id"]))
     user = db.exec(stmt).first()
 
     booking = db.get(Booking, booking_id)
@@ -225,8 +281,9 @@ async def cancel_booking(
 ):
     """Cancel a booking."""
     from datetime import datetime
+    from uuid import UUID as _UUID
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
+    stmt = select(User).where(User.id == _UUID(current_user["id"]))
     user = db.exec(stmt).first()
 
     booking = db.get(Booking, booking_id)

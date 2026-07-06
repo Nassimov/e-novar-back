@@ -325,6 +325,7 @@ from app.routers.admin.messages import router as admin_messages_router
 from app.routers.store import router as store_router
 from app.routers.admin.store import router as admin_store_router
 from app.routers.admin.referrals import router as admin_referrals_router
+from app.routers.promos import router as promos_router
 
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
@@ -341,6 +342,7 @@ app.include_router(challenges_router,    prefix="/api/challenges",     tags=["Ch
 app.include_router(ai_router,            prefix="/api/ai",             tags=["AI Tutor"])
 app.include_router(favorites_router,     prefix="/api/favorites",      tags=["Favorites"])
 app.include_router(referrals_router,     prefix="/api/referrals",      tags=["Referrals"])
+app.include_router(promos_router,        prefix="/api/promos",          tags=["Promos"])
 app.include_router(catalogs_router,      prefix="/api/catalogs",       tags=["Catalogs"])
 app.include_router(parent_router,        prefix="/api/parent",         tags=["Parent"])
 app.include_router(files_router,         prefix="/api/files",          tags=["Files"])

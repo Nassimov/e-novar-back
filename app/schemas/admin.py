@@ -32,18 +32,33 @@ class ReviewModerationAction(BaseModel):
 
 class PromoCodeCreate(BaseModel):
     code: str = Field(min_length=3, max_length=30)
-    discount_percent: Optional[int] = Field(default=None, ge=1, le=100)
-    discount_dzd: Optional[int] = Field(default=None, gt=0)
-    max_uses: int = Field(default=100, gt=0)
-    expires_at: Optional[datetime] = None
+    title: Optional[str] = Field(default=None, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=300)
+    # Instant KP reward (0 = none)
+    kp_reward: int = Field(default=0, ge=0)
+    # Booking discount (optional)
+    discount_type: Optional[str] = None        # 'percent' | 'fixed' | None
+    discount_value: int = Field(default=0, ge=0)
+    # Validity
+    valid_from: Optional[datetime] = None
+    valid_to: Optional[datetime] = None
+    max_uses: Optional[int] = Field(default=None, gt=0)
+    # Targeting
+    target_role: str = Field(default="all")    # 'all' | 'student' | 'teacher' | 'parent'
+    active: bool = True
 
 
 class PromoCodeUpdate(BaseModel):
-    discount_percent: Optional[int] = None
-    discount_dzd: Optional[int] = None
-    max_uses: Optional[int] = None
-    expires_at: Optional[datetime] = None
-    is_active: Optional[bool] = None
+    title: Optional[str] = Field(default=None, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=300)
+    kp_reward: Optional[int] = Field(default=None, ge=0)
+    discount_type: Optional[str] = None
+    discount_value: Optional[int] = Field(default=None, ge=0)
+    valid_from: Optional[datetime] = None
+    valid_to: Optional[datetime] = None
+    max_uses: Optional[int] = Field(default=None, gt=0)
+    target_role: Optional[str] = None
+    active: Optional[bool] = None
 
 
 class StatsResponse(BaseModel):
