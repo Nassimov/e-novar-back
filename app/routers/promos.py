@@ -33,15 +33,22 @@ router = APIRouter(tags=["Promos"])
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(timezone.utc)
+
+
+def _aware(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC). TIMESTAMPTZ from Postgres may or may not carry tzinfo."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _is_valid(code: PromoCode, now: datetime) -> tuple[bool, str]:
     if not code.active:
         return False, "Ce code est inactif."
-    if code.valid_from and code.valid_from > now:
+    if code.valid_from and _aware(code.valid_from) > now:
         return False, "Ce code n'est pas encore actif."
-    if code.valid_to and code.valid_to < now:
+    if code.valid_to and _aware(code.valid_to) < now:
         return False, "Ce code a expiré."
     if code.max_uses is not None and code.uses >= code.max_uses:
         return False, "Ce code a atteint sa limite d'utilisation."

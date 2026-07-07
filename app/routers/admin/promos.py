@@ -55,14 +55,17 @@ async def get_promo_stats(
     db: Session = Depends(get_db),
 ):
     """Global promo code overview stats for the admin dashboard."""
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc)
     codes = db.exec(select(PromoCode)).all()
+
+    def _aware(dt: datetime) -> datetime:
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
     active_count = sum(
         1 for c in codes
         if c.active
-        and (c.valid_from is None or c.valid_from <= now)
-        and (c.valid_to is None or c.valid_to >= now)
+        and (c.valid_from is None or _aware(c.valid_from) <= now)
+        and (c.valid_to is None or _aware(c.valid_to) >= now)
         and (c.max_uses is None or c.uses < c.max_uses)
     )
     total_uses = sum(c.uses for c in codes)

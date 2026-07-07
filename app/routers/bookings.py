@@ -39,6 +39,9 @@ async def create_booking(
     from datetime import datetime, timezone
     from uuid import UUID as _UUID
 
+    def _aware(dt: datetime) -> datetime:
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
     student_uid = _UUID(current_user["id"])
     student = db.exec(select(User).where(User.id == student_uid)).first()
     if student is None:
@@ -59,7 +62,7 @@ async def create_booking(
     # Apply discount promo code if provided
     _promo_to_attach: PromoCode | None = None
     if payload.promo_code:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        now = datetime.now(timezone.utc)
         code_clean = payload.promo_code.strip().upper()
 
         promo = db.exec(
@@ -71,9 +74,9 @@ async def create_booking(
 
         if promo is None:
             raise HTTPException(status_code=400, detail="Code promo invalide.")
-        if promo.valid_from and promo.valid_from > now:
+        if promo.valid_from and _aware(promo.valid_from) > now:
             raise HTTPException(status_code=400, detail="Ce code promo n'est pas encore actif.")
-        if promo.valid_to and promo.valid_to < now:
+        if promo.valid_to and _aware(promo.valid_to) < now:
             raise HTTPException(status_code=400, detail="Ce code promo a expiré.")
         if promo.max_uses is not None and promo.uses >= promo.max_uses:
             raise HTTPException(status_code=400, detail="Ce code a atteint sa limite d'utilisation.")
