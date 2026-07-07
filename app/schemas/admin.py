@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class UserListParams(BaseModel):
@@ -44,8 +44,16 @@ class PromoCodeCreate(BaseModel):
     valid_to: Optional[datetime] = None
     max_uses: Optional[int] = Field(default=None, gt=0)
     # Targeting
-    target_role: str = Field(default="all")    # 'all' | 'student' | 'teacher' | 'parent'
+    target_role: str = Field(default="all")
     active: bool = True
+
+    @field_validator("target_role")
+    @classmethod
+    def validate_target_role(cls, v: str) -> str:
+        from app.services.promo_targeting import VALID_TARGET_ROLES
+        if v not in VALID_TARGET_ROLES:
+            raise ValueError(f"target_role invalide : '{v}'.")
+        return v
 
 
 class PromoCodeUpdate(BaseModel):
@@ -58,6 +66,16 @@ class PromoCodeUpdate(BaseModel):
     valid_to: Optional[datetime] = None
     max_uses: Optional[int] = Field(default=None, gt=0)
     target_role: Optional[str] = None
+
+    @field_validator("target_role")
+    @classmethod
+    def validate_target_role(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        from app.services.promo_targeting import VALID_TARGET_ROLES
+        if v not in VALID_TARGET_ROLES:
+            raise ValueError(f"target_role invalide : '{v}'.")
+        return v
     active: Optional[bool] = None
 
 

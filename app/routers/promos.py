@@ -3,7 +3,7 @@ Student-facing promo code endpoints.
 
 Workflow:
   1. Student opens /student/promo.
-  2. GET /api/promos  →  list of active codes visible to this user.
+  2. GET /api/promos/  →  list of active codes the user is eligible for.
   3. Student types a code → POST /api/promos/validate  (preview, no side-effects).
   4. Student confirms → POST /api/promos/apply:
        - KP codes   → KP awarded immediately via award_kp().
@@ -11,6 +11,9 @@ Workflow:
                          discount is applied when a booking is created with
                          this code (bookings router picks it up).
   5. GET /api/promos/my-redemptions  →  user's history.
+
+Targeting: each code has a `target_role` that restricts eligibility.
+See app/services/promo_targeting.py for the full list of values and rules.
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import or_
 from sqlmodel import Session, select
@@ -26,6 +29,7 @@ from sqlmodel import Session, select
 from app.dependencies import get_current_user, get_db
 from app.models.admin import PromoCode, PromoRedemption
 from app.models.enums import KpSource
+from app.services.promo_targeting import build_context, check_eligibility
 
 router = APIRouter(tags=["Promos"])
 
@@ -36,11 +40,8 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _aware(dt: datetime) -> datetime:
-    """Ensure a datetime is timezone-aware (UTC). TIMESTAMPTZ from Postgres may or may not carry tzinfo."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+def _aware(d: datetime) -> datetime:
+    return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
 
 
 def _is_valid(code: PromoCode, now: datetime) -> tuple[bool, str]:
@@ -93,12 +94,15 @@ async def list_active_promos(
     db: Session = Depends(get_db),
 ):
     """
-    Return active promo codes visible to this user.
-    Includes already_used flag per code.
+    Return active promo codes the current user is eligible for.
+    Pre-fetches targeting data once to avoid N+1 queries.
     """
     uid = UUID(current_user["id"])
     role = current_user.get("role", "student")
     now = _utcnow()
+
+    # Pre-fetch user data needed by all targeting checks (max 3 extra queries)
+    ctx = build_context(uid, role, db)
 
     # IDs already redeemed by this user
     redeemed_ids: set[UUID] = {
@@ -106,6 +110,8 @@ async def list_active_promos(
         for r in db.exec(select(PromoRedemption).where(PromoRedemption.user_id == uid)).all()
     }
 
+    # Fetch all currently active codes (date/uses window only — role filtering is Python-side
+    # because sub-roles like student_bac require runtime evaluation, not SQL predicates)
     codes = db.exec(
         select(PromoCode)
         .where(
@@ -113,12 +119,17 @@ async def list_active_promos(
             or_(PromoCode.valid_from == None, PromoCode.valid_from <= now),
             or_(PromoCode.valid_to == None, PromoCode.valid_to >= now),
             or_(PromoCode.max_uses == None, PromoCode.uses < PromoCode.max_uses),
-            or_(PromoCode.target_role == "all", PromoCode.target_role == role),
         )
         .order_by(PromoCode.created_at.desc())
     ).all()
 
-    return [_serialize(c, c.id in redeemed_ids) for c in codes]
+    result = []
+    for c in codes:
+        eligible, _ = check_eligibility(ctx, c.target_role)
+        if eligible:
+            result.append(_serialize(c, c.id in redeemed_ids))
+
+    return result
 
 
 @router.post("/validate")
@@ -129,16 +140,13 @@ async def validate_code(
 ):
     """
     Preview a code without applying it.
-    Returns the code details + whether the user has already used it.
+    Returns code details + eligibility. Raises 4xx on any problem.
     """
     uid = UUID(current_user["id"])
     role = current_user.get("role", "student")
     now = _utcnow()
 
-    code_obj = db.exec(
-        select(PromoCode).where(PromoCode.code == payload.code)
-    ).first()
-
+    code_obj = db.exec(select(PromoCode).where(PromoCode.code == payload.code)).first()
     if code_obj is None:
         raise HTTPException(status_code=404, detail="Code introuvable.")
 
@@ -146,11 +154,10 @@ async def validate_code(
     if not valid:
         raise HTTPException(status_code=400, detail=reason)
 
-    if code_obj.target_role != "all" and code_obj.target_role != role:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Ce code est réservé aux {code_obj.target_role}s.",
-        )
+    ctx = build_context(uid, role, db)
+    eligible, eligibility_reason = check_eligibility(ctx, code_obj.target_role)
+    if not eligible:
+        raise HTTPException(status_code=403, detail=eligibility_reason)
 
     existing = db.exec(
         select(PromoRedemption).where(
@@ -173,17 +180,14 @@ async def apply_code(
 
     - KP codes: KP awarded immediately.
     - Discount codes: redemption record created (booking_id=NULL);
-      discount is applied when the user creates a booking with this code.
+      the discount is applied when the user creates a booking with this code.
     - Mixed codes (KP + discount): both happen.
     """
     uid = UUID(current_user["id"])
     role = current_user.get("role", "student")
     now = _utcnow()
 
-    code_obj = db.exec(
-        select(PromoCode).where(PromoCode.code == payload.code)
-    ).first()
-
+    code_obj = db.exec(select(PromoCode).where(PromoCode.code == payload.code)).first()
     if code_obj is None:
         raise HTTPException(status_code=404, detail="Code introuvable.")
 
@@ -191,11 +195,11 @@ async def apply_code(
     if not valid:
         raise HTTPException(status_code=400, detail=reason)
 
-    if code_obj.target_role != "all" and code_obj.target_role != role:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Ce code est réservé aux {code_obj.target_role}s.",
-        )
+    # Full targeting check — always enforced server-side regardless of what the UI shows
+    ctx = build_context(uid, role, db)
+    eligible, eligibility_reason = check_eligibility(ctx, code_obj.target_role)
+    if not eligible:
+        raise HTTPException(status_code=403, detail=eligibility_reason)
 
     # Idempotency: one redemption per (code, user)
     existing = db.exec(
@@ -205,31 +209,20 @@ async def apply_code(
         )
     ).first()
     if existing:
-        raise HTTPException(
-            status_code=409,
-            detail="Tu as déjà utilisé ce code.",
-        )
+        raise HTTPException(status_code=409, detail="Tu as déjà utilisé ce code.")
 
-    # Atomic increment: guard against race conditions at the limit
-    if code_obj.max_uses is not None:
-        code_obj.uses = (code_obj.uses or 0) + 1
-        if code_obj.uses > code_obj.max_uses:
-            raise HTTPException(
-                status_code=400,
-                detail="Ce code vient d'atteindre sa limite d'utilisation.",
-            )
-    else:
-        code_obj.uses = (code_obj.uses or 0) + 1
+    # Increment uses (guard against concurrent exhaustion at the limit)
+    code_obj.uses = (code_obj.uses or 0) + 1
+    if code_obj.max_uses is not None and code_obj.uses > code_obj.max_uses:
+        raise HTTPException(status_code=400, detail="Ce code vient d'atteindre sa limite d'utilisation.")
 
     db.add(code_obj)
-
     redemption = PromoRedemption(code_id=code_obj.id, user_id=uid)
     db.add(redemption)
 
     kp_awarded = 0
     if code_obj.kp_reward and code_obj.kp_reward > 0:
-        # flush pending writes before award_kp commits
-        db.flush()
+        db.flush()  # ensure redemption row exists before award_kp commits
         from app.services.kp import award_kp
         award_kp(
             uid,

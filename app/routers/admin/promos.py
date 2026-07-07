@@ -127,7 +127,8 @@ async def create_promo_code(
 
     _validate_payload(payload.kp_reward, payload.discount_type, payload.discount_value)
 
-    if payload.target_role not in ("all", "student", "teacher", "parent"):
+    from app.services.promo_targeting import VALID_TARGET_ROLES
+    if payload.target_role not in VALID_TARGET_ROLES:
         raise HTTPException(status_code=400, detail="target_role invalide.")
 
     if payload.valid_from and payload.valid_to and payload.valid_from >= payload.valid_to:
@@ -215,7 +216,8 @@ async def update_promo_code(
     if payload.max_uses is not None:
         promo.max_uses = payload.max_uses
     if payload.target_role is not None:
-        if payload.target_role not in ("all", "student", "teacher", "parent"):
+        from app.services.promo_targeting import VALID_TARGET_ROLES
+        if payload.target_role not in VALID_TARGET_ROLES:
             raise HTTPException(status_code=400, detail="target_role invalide.")
         promo.target_role = payload.target_role
     if payload.active is not None:
