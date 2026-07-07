@@ -137,6 +137,10 @@ class TeacherProfile(SQLModel, table=True):
     iban: Optional[str] = Field(default=None)
     bank_holder: Optional[str] = Field(default=None)
     bank_last4: Optional[str] = Field(default=None)
+    slug: Optional[str] = Field(
+        default=None,
+        sa_column=sa.Column(sa.Text, unique=True, nullable=True),
+    )
     status: str = Field(default="pending")                # public.teacher_status
     teaching_wilaya: Optional[str] = Field(default=None)
     teaching_wilayas: Optional[List[str]] = Field(

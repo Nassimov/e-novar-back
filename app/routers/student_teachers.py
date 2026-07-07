@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import re
 import unicodedata
-from datetime import date as dt_date, date
+from datetime import date as dt_date, date, timedelta
 from typing import Any, Dict, List, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field as PydanticField
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
+from app.models.booking import TutoringSession
 from app.models.catalog import Level, Subject, TeacherDiploma, TeacherMode, TeacherSessionType, TeacherSubjectPrice
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.models.review import Review
@@ -30,8 +32,39 @@ def _norm(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
 
 
+def _make_teacher_slug(first_name: str, last_name: str, user_id: UUID) -> str:
+    """Generate a URL-safe slug: prenom-nom-uuid8"""
+    def slugify(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+        return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    fn = slugify(first_name) or "prof"
+    ln = slugify(last_name) or "enovar"
+    uid8 = str(user_id).replace("-", "")[:8]
+    return f"{fn}-{ln}-{uid8}"
+
+
+def _get_or_make_slug(tp: TeacherProfile, p: Profile) -> str:
+    """Return stored slug or generate one on-the-fly (for teachers pre-migration)."""
+    return tp.slug or _make_teacher_slug(p.first_name or "", p.last_name or "", tp.user_id)
+
+
+def _resolve_teacher(db: Session, teacher_ref: str) -> TeacherProfile:
+    """Look up a teacher by UUID (backwards-compat) or slug."""
+    try:
+        teacher_uuid = UUID(teacher_ref)
+        tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == teacher_uuid)).first()
+    except ValueError:
+        tp = db.exec(select(TeacherProfile).where(TeacherProfile.slug == teacher_ref)).first()
+    if tp is None or tp.status not in ("approved",):
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    return tp
+
+
+# ─── Search ──────────────────────────────────────────────────────────────────
+
 class TeacherSearchItem(BaseModel):
     id: str
+    slug: str
     first_name: str
     last_name: str
     full_name: str
@@ -50,8 +83,8 @@ class TeacherSearchItem(BaseModel):
     levels: List[str]
     modes: List[str]
     session_types: List[str]
-    lesson_formats: List[str]  # lesson formats offered across all subjects (flat)
-    subject_formats: Dict[str, str]  # subject_name → dominant lesson format
+    lesson_formats: List[str]
+    subject_formats: Dict[str, str]
     languages: List[str] = []
 
 
@@ -72,57 +105,44 @@ async def student_teachers_search(
     price_max: Optional[int] = Query(None),
     min_rating: Optional[float] = Query(None),
     language: Optional[str] = Query(None),
-    date_from: Optional[str] = Query(None),   # ISO "YYYY-MM-DD"
-    date_to:   Optional[str] = Query(None),   # ISO "YYYY-MM-DD"
+    date_from: Optional[str] = Query(None),
+    date_to:   Optional[str] = Query(None),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    # Parse comma-separated multi-value params
     wilaya_list: list[str] = [w.strip() for w in (wilaya or "").split(",") if w.strip()]
     level_list: list[str] = [l.strip() for l in (level or "").split(",") if l.strip()]
     language_list: list[str] = [l.strip().lower() for l in (language or "").split(",") if l.strip()]
 
-    # 0. Load requesting student's lesson format preference (optional — non-fatal)
     uid = UUID(current_user["id"])
     student_lesson_format: Optional[str] = None
     try:
-        sp_student = db.exec(
-            select(StudentProfile).where(StudentProfile.user_id == uid)
-        ).first()
+        sp_student = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
         if sp_student:
             student_lesson_format = sp_student.lesson_format
     except Exception:
         pass
 
-    # 1. All approved teachers
-    all_tp = db.exec(
-        select(TeacherProfile).where(TeacherProfile.status == "approved")
-    ).all()
+    all_tp = db.exec(select(TeacherProfile).where(TeacherProfile.status == "approved")).all()
     if not all_tp:
         return TeacherSearchResponse(items=[], total=0)
 
     teacher_ids: list[UUID] = [tp.user_id for tp in all_tp]
     tp_map: dict[UUID, TeacherProfile] = {tp.user_id: tp for tp in all_tp}
 
-    # 2. Mode filter
     if mode:
         mode_rows = db.exec(
-            select(TeacherMode).where(
-                TeacherMode.teacher_id.in_(teacher_ids),
-                TeacherMode.mode == mode,
-            )
+            select(TeacherMode).where(TeacherMode.teacher_id.in_(teacher_ids), TeacherMode.mode == mode)
         ).all()
         mode_set = {r.teacher_id for r in mode_rows}
         teacher_ids = [tid for tid in teacher_ids if tid in mode_set]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 3. Session type filter
     if session_type:
         st_rows = db.exec(
             select(TeacherSessionType).where(
-                TeacherSessionType.teacher_id.in_(teacher_ids),
-                TeacherSessionType.type == session_type,
+                TeacherSessionType.teacher_id.in_(teacher_ids), TeacherSessionType.type == session_type,
             )
         ).all()
         st_set = {r.teacher_id for r in st_rows}
@@ -130,17 +150,14 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 4. Batch-load subject/level data (needed for filtering and response)
     sp_all = db.exec(
         select(TeacherSubjectPrice).where(
-            TeacherSubjectPrice.teacher_id.in_(teacher_ids),
-            TeacherSubjectPrice.active == True,  # noqa: E712
+            TeacherSubjectPrice.teacher_id.in_(teacher_ids), TeacherSubjectPrice.active == True,  # noqa: E712
         )
     ).all()
 
     all_sub_ids = list({r.subject_id for r in sp_all})
     all_lev_ids = list({r.level_id for r in sp_all})
-
     sub_name_map: dict[UUID, str] = {}
     lev_code_map: dict[UUID, str] = {}
     lev_label_map: dict[UUID, str] = {}
@@ -148,14 +165,12 @@ async def student_teachers_search(
     if all_sub_ids:
         subs = db.exec(select(Subject).where(Subject.id.in_(all_sub_ids))).all()
         sub_name_map = {s.id: s.name for s in subs}
-
     if all_lev_ids:
         levs = db.exec(select(Level).where(Level.id.in_(all_lev_ids))).all()
         lev_code_map = {l.id: l.code for l in levs}
         lev_label_map = {l.id: l.label for l in levs}
 
     def _dominant_format(fmts: set[str]) -> str:
-        """Collapse a set of lesson_format values to a single representative string."""
         clean = fmts - {"both"}
         if not clean or "both" in fmts:
             return "both"
@@ -163,15 +178,13 @@ async def student_teachers_search(
             return "individual"
         if clean == {"group"}:
             return "group"
-        return "both"  # mixed individual+group → treat as both
+        return "both"
 
-    # Build per-teacher dicts (unique ordered lists) + minimum price from subject prices
     teacher_subjects: dict[UUID, list[str]] = {}
     teacher_level_codes: dict[UUID, list[str]] = {}
     teacher_level_labels: dict[UUID, list[str]] = {}
     teacher_min_price: dict[UUID, int] = {}
     teacher_lesson_formats: dict[UUID, set[str]] = {}
-    # subject_name → set of lesson_format values, per teacher
     teacher_subject_formats: dict[UUID, dict[str, set[str]]] = {}
 
     for r in sp_all:
@@ -185,17 +198,14 @@ async def student_teachers_search(
             teacher_level_codes.setdefault(tid, []).append(lc)
         if ll and ll not in teacher_level_labels.get(tid, []):
             teacher_level_labels.setdefault(tid, []).append(ll)
-        # Track minimum price_single across all subject/level combos
         if r.price_single > 0:
             if tid not in teacher_min_price or r.price_single < teacher_min_price[tid]:
                 teacher_min_price[tid] = r.price_single
-        # Collect lesson formats — flat set and per-subject set
         fmt = getattr(r, "lesson_format", "both") or "both"
         teacher_lesson_formats.setdefault(tid, set()).add(fmt)
         if sn:
             teacher_subject_formats.setdefault(tid, {}).setdefault(sn, set()).add(fmt)
 
-    # 5. Subject filter — comma-separated list, OR logic (teacher matches any requested subject)
     if subject:
         subject_list = [s.strip() for s in subject.split(",") if s.strip()]
         if subject_list:
@@ -207,7 +217,6 @@ async def student_teachers_search(
             if not teacher_ids:
                 return TeacherSearchResponse(items=[], total=0)
 
-    # 6. Level group filter (supports multiple comma-separated levels)
     if level_list:
         norm_codes: set[str] = set()
         for lv in level_list:
@@ -220,81 +229,52 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 7. Load profiles for remaining teachers
-    profiles = db.exec(
-        select(Profile).where(Profile.id.in_(teacher_ids))
-    ).all()
+    profiles = db.exec(select(Profile).where(Profile.id.in_(teacher_ids))).all()
     prof_map: dict[UUID, Profile] = {p.id: p for p in profiles}
 
-    # 8. Wilaya filter — multi-wilaya: teacher matches if any requested wilaya is covered
     if wilaya_list:
         norm_wilayas = {_norm(w) for w in wilaya_list}
 
         def _teacher_serves_any_wilaya(tid: UUID) -> bool:
             tp = tp_map[tid]
-            # Nationwide coverage (at_student with no wilaya restriction)
             if getattr(tp, "teaching_nationwide", False):
                 return True
-            # at_student: check multi-wilaya array
             tw_arr = getattr(tp, "teaching_wilayas", None) or []
-            if tw_arr:
-                if any(_norm(w) in norm_wilayas for w in tw_arr):
-                    return True
-            # at_home / legacy: single teaching_wilaya field
+            if tw_arr and any(_norm(w) in norm_wilayas for w in tw_arr):
+                return True
             if _norm(tp.teaching_wilaya or "") in norm_wilayas:
                 return True
-            # Profile home wilaya
             p = prof_map.get(tid)
-            if p and _norm(p.wilaya or "") in norm_wilayas:
-                return True
-            return False
+            return bool(p and _norm(p.wilaya or "") in norm_wilayas)
 
         teacher_ids = [tid for tid in teacher_ids if _teacher_serves_any_wilaya(tid)]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 9. Price filter
     if price_min is not None:
-        teacher_ids = [
-            tid for tid in teacher_ids
-            if tp_map[tid].price_per_session >= price_min
-        ]
+        teacher_ids = [tid for tid in teacher_ids if tp_map[tid].price_per_session >= price_min]
     if price_max is not None:
-        teacher_ids = [
-            tid for tid in teacher_ids
-            if tp_map[tid].price_per_session <= price_max
-        ]
+        teacher_ids = [tid for tid in teacher_ids if tp_map[tid].price_per_session <= price_max]
     if not teacher_ids:
         return TeacherSearchResponse(items=[], total=0)
 
-    # 10. Min-rating filter
     if min_rating is not None and min_rating > 0:
-        teacher_ids = [
-            tid for tid in teacher_ids
-            if tp_map[tid].rating_avg >= min_rating
-        ]
+        teacher_ids = [tid for tid in teacher_ids if tp_map[tid].rating_avg >= min_rating]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 10b. Language filter
     if language_list:
         teacher_ids = [
             tid for tid in teacher_ids
-            if any(
-                lang in (getattr(tp_map[tid], "languages", None) or [])
-                for lang in language_list
-            )
+            if any(lang in (getattr(tp_map[tid], "languages", None) or []) for lang in language_list)
         ]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 10c. Date availability filter
     if date_from or date_to:
-        from app.models.scheduling import TeacherSlot
         try:
             slot_query = select(TeacherSlot).where(
-                TeacherSlot.teacher_id.in_(teacher_ids),
-                TeacherSlot.status == "open",
+                TeacherSlot.teacher_id.in_(teacher_ids), TeacherSlot.status == "open",
             )
             if date_from:
                 try:
@@ -309,14 +289,12 @@ async def student_teachers_search(
             open_slots = db.exec(slot_query).all()
             teachers_with_slots = {s.teacher_id for s in open_slots}
             if teachers_with_slots:
-                # Only filter if some teachers have slots — graceful fallback if table is empty
                 teacher_ids = [tid for tid in teacher_ids if tid in teachers_with_slots]
                 if not teacher_ids:
                     return TeacherSearchResponse(items=[], total=0)
         except Exception:
-            pass  # graceful: date filter is best-effort
+            pass
 
-    # 11. Free-text query filter (name, headline, or subject match)
     if q and q.strip():
         norm_q = _norm(q.strip())
 
@@ -333,22 +311,16 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    # 12. Batch-load modes and session types for response
-    modes_all = db.exec(
-        select(TeacherMode).where(TeacherMode.teacher_id.in_(teacher_ids))
-    ).all()
+    modes_all = db.exec(select(TeacherMode).where(TeacherMode.teacher_id.in_(teacher_ids))).all()
     teacher_modes: dict[UUID, list[str]] = {}
     for m in modes_all:
         teacher_modes.setdefault(m.teacher_id, []).append(m.mode)
 
-    stypes_all = db.exec(
-        select(TeacherSessionType).where(TeacherSessionType.teacher_id.in_(teacher_ids))
-    ).all()
+    stypes_all = db.exec(select(TeacherSessionType).where(TeacherSessionType.teacher_id.in_(teacher_ids))).all()
     teacher_stypes: dict[UUID, list[str]] = {}
     for st in stypes_all:
         teacher_stypes.setdefault(st.teacher_id, []).append(st.type)
 
-    # 13. Sort: sponsored first, then by ranking score
     def _format_compatible(tid: UUID) -> bool:
         if not student_lesson_format or student_lesson_format == "both":
             return True
@@ -361,7 +333,7 @@ async def student_teachers_search(
         if tp.verified:
             s += 5.0
         if _format_compatible(tid):
-            s += 3.0  # soft boost for lesson format match
+            s += 3.0
         return s
 
     teacher_ids_sorted = sorted(
@@ -370,7 +342,6 @@ async def student_teachers_search(
         reverse=True,
     )
 
-    # 14. Build response
     items: list[TeacherSearchItem] = []
     for tid in teacher_ids_sorted:
         p = prof_map.get(tid)
@@ -379,6 +350,7 @@ async def student_teachers_search(
             continue
         items.append(TeacherSearchItem(
             id=str(tid),
+            slug=_get_or_make_slug(tp, p),
             first_name=p.first_name or "",
             last_name=p.last_name or "",
             full_name=p.full_name or "",
@@ -408,7 +380,7 @@ async def student_teachers_search(
     return TeacherSearchResponse(items=items, total=len(items))
 
 
-# ─── Teacher public profile detail ───────────────────────────────────────────
+# ─── Teacher public profile ───────────────────────────────────────────────────
 
 class TeacherSubjectItem(BaseModel):
     name: str
@@ -426,6 +398,7 @@ class TeacherDiplomaItem(BaseModel):
 
 class TeacherPublicProfile(BaseModel):
     id: str
+    slug: str
     first_name: str
     last_name: str
     full_name: str
@@ -466,24 +439,19 @@ class TeacherSlotItem(BaseModel):
     type: str
 
 
-@router.get("/teachers/{teacher_id}", response_model=TeacherPublicProfile)
+@router.get("/teachers/{teacher_ref}", response_model=TeacherPublicProfile)
 async def get_teacher_profile(
-    teacher_id: UUID,
+    teacher_ref: str,
     db: Session = Depends(get_db),
     _: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Public teacher profile page data."""
-    tp = db.exec(
-        select(TeacherProfile).where(TeacherProfile.user_id == teacher_id)
-    ).first()
-    if tp is None or tp.status not in ("approved",):
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    tp = _resolve_teacher(db, teacher_ref)
+    teacher_id = tp.user_id
 
     p = db.get(Profile, teacher_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    # Subjects from TeacherSubjectPrice + Subject + Level
     sp_rows = db.exec(
         select(TeacherSubjectPrice, Subject, Level)
         .join(Subject, Subject.id == TeacherSubjectPrice.subject_id)
@@ -496,22 +464,13 @@ async def get_teacher_profile(
         for tsp, subj, lvl in sp_rows
     ]
 
-    # Modes
-    mode_rows = db.exec(
-        select(TeacherMode).where(TeacherMode.teacher_id == teacher_id)
-    ).all()
+    mode_rows = db.exec(select(TeacherMode).where(TeacherMode.teacher_id == teacher_id)).all()
     modes = [m.mode for m in mode_rows]
 
-    # Session types
-    stype_rows = db.exec(
-        select(TeacherSessionType).where(TeacherSessionType.teacher_id == teacher_id)
-    ).all()
+    stype_rows = db.exec(select(TeacherSessionType).where(TeacherSessionType.teacher_id == teacher_id)).all()
     session_types = [st.type for st in stype_rows]
 
-    # Diplomas
-    diploma_rows = db.exec(
-        select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)
-    ).all()
+    diploma_rows = db.exec(select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)).all()
     diplomas = [
         TeacherDiplomaItem(
             id=str(d.id), name=d.name, file_url=d.file_url,
@@ -522,6 +481,7 @@ async def get_teacher_profile(
 
     return TeacherPublicProfile(
         id=str(teacher_id),
+        slug=_get_or_make_slug(tp, p),
         first_name=p.first_name or "",
         last_name=p.last_name or "",
         full_name=p.full_name or "",
@@ -546,20 +506,16 @@ async def get_teacher_profile(
     )
 
 
-@router.get("/teachers/{teacher_id}/reviews")
+@router.get("/teachers/{teacher_ref}/reviews")
 async def get_teacher_reviews(
-    teacher_id: UUID,
+    teacher_ref: str,
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
     _: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Public reviews for a teacher, with reviewer name."""
-    tp = db.exec(
-        select(TeacherProfile).where(TeacherProfile.user_id == teacher_id)
-    ).first()
-    if tp is None:
-        raise HTTPException(status_code=404, detail="Teacher not found")
+    tp = _resolve_teacher(db, teacher_ref)
+    teacher_id = tp.user_id
 
     reviews = db.exec(
         select(Review)
@@ -568,7 +524,6 @@ async def get_teacher_reviews(
         .order_by(Review.created_at.desc())
     ).all()
 
-    # Batch-load reviewer names
     reviewer_ids = list({r.student_id for r in reviews})
     profiles = db.exec(select(Profile).where(Profile.id.in_(reviewer_ids))).all()
     prof_map = {p.id: p for p in profiles}
@@ -582,10 +537,10 @@ async def get_teacher_reviews(
         reviewer = prof_map.get(r.student_id)
         if reviewer:
             name_parts = (reviewer.full_name or "").split()
-            if len(name_parts) >= 2:
-                reviewer_name = f"{name_parts[0]} {name_parts[-1][0]}."
-            else:
-                reviewer_name = reviewer.full_name or "Étudiant"
+            reviewer_name = (
+                f"{name_parts[0]} {name_parts[-1][0]}." if len(name_parts) >= 2
+                else reviewer.full_name or "Étudiant"
+            )
         else:
             reviewer_name = "Étudiant"
         items.append(TeacherReviewItem(
@@ -599,15 +554,15 @@ async def get_teacher_reviews(
     return {"items": items, "total": total, "page": page, "size": size}
 
 
-@router.get("/teachers/{teacher_id}/slots")
+@router.get("/teachers/{teacher_ref}/slots")
 async def get_teacher_slots(
-    teacher_id: UUID,
+    teacher_ref: str,
     db: Session = Depends(get_db),
     _: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Upcoming open slots for a teacher (next 30 days)."""
+    tp = _resolve_teacher(db, teacher_ref)
+    teacher_id = tp.user_id
     today = date.today()
-    from datetime import timedelta
     end = today + timedelta(days=30)
 
     slots = db.exec(
@@ -630,3 +585,148 @@ async def get_teacher_slots(
         )
         for s in slots
     ]
+
+
+# ─── Student reviews (authenticated student) ─────────────────────────────────
+
+class MyReviewItem(BaseModel):
+    id: str
+    session_id: str
+    rating: int
+    comment: Optional[str] = None
+    created_at: str
+
+
+class EligibleSession(BaseModel):
+    id: str
+    scheduled_at: str
+    subject: Optional[str] = None
+
+
+class MyReviewsResponse(BaseModel):
+    my_reviews: List[MyReviewItem]
+    eligible_sessions: List[EligibleSession]
+
+
+class ReviewSubmitBody(BaseModel):
+    session_id: UUID
+    rating: int = PydanticField(ge=1, le=5)
+    comment: Optional[str] = None
+
+
+@router.get("/teachers/{teacher_ref}/my-reviews", response_model=MyReviewsResponse)
+async def get_my_reviews(
+    teacher_ref: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return this student's existing reviews + sessions still eligible for review."""
+    tp = _resolve_teacher(db, teacher_ref)
+    teacher_id = tp.user_id
+    student_id = UUID(current_user["id"])
+
+    # Completed sessions between this student and teacher
+    sessions = db.exec(
+        select(TutoringSession)
+        .where(TutoringSession.student_id == student_id)
+        .where(TutoringSession.teacher_id == teacher_id)
+        .where(TutoringSession.status == "completed")
+        .order_by(TutoringSession.scheduled_at.desc())
+    ).all()
+
+    if not sessions:
+        return MyReviewsResponse(my_reviews=[], eligible_sessions=[])
+
+    session_ids = [s.id for s in sessions]
+    session_map = {s.id: s for s in sessions}
+
+    # Existing reviews by this student for this teacher
+    existing_reviews = db.exec(
+        select(Review)
+        .where(Review.student_id == student_id)
+        .where(Review.teacher_id == teacher_id)
+        .where(Review.session_id.in_(session_ids))
+    ).all()
+    reviewed_session_ids = {r.session_id for r in existing_reviews}
+
+    # Sessions that can still be reviewed
+    eligible_ids = [sid for sid in session_ids if sid not in reviewed_session_ids]
+
+    subject_ids = list({session_map[sid].subject_id for sid in eligible_ids if session_map[sid].subject_id})
+    subject_name_map: dict[UUID, str] = {}
+    if subject_ids:
+        subjs = db.exec(select(Subject).where(Subject.id.in_(subject_ids))).all()
+        subject_name_map = {s.id: s.name for s in subjs}
+
+    return MyReviewsResponse(
+        my_reviews=[
+            MyReviewItem(
+                id=str(r.id),
+                session_id=str(r.session_id),
+                rating=r.rating,
+                comment=r.comment,
+                created_at=r.created_at.isoformat(),
+            )
+            for r in existing_reviews
+        ],
+        eligible_sessions=[
+            EligibleSession(
+                id=str(sid),
+                scheduled_at=session_map[sid].scheduled_at.isoformat(),
+                subject=subject_name_map.get(session_map[sid].subject_id),
+            )
+            for sid in eligible_ids
+        ],
+    )
+
+
+@router.post("/teachers/{teacher_ref}/reviews", status_code=201)
+async def submit_teacher_review(
+    teacher_ref: str,
+    body: ReviewSubmitBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Submit a review for a teacher. Requires a completed session with that teacher."""
+    tp = _resolve_teacher(db, teacher_ref)
+    teacher_id = tp.user_id
+    student_id = UUID(current_user["id"])
+
+    # Verify session: must belong to this student-teacher pair and be completed
+    session = db.exec(
+        select(TutoringSession)
+        .where(TutoringSession.id == body.session_id)
+        .where(TutoringSession.student_id == student_id)
+        .where(TutoringSession.teacher_id == teacher_id)
+        .where(TutoringSession.status == "completed")
+    ).first()
+    if session is None:
+        raise HTTPException(status_code=403, detail="Session not found or not eligible for review")
+
+    # One review per session
+    existing = db.exec(
+        select(Review)
+        .where(Review.student_id == student_id)
+        .where(Review.session_id == body.session_id)
+    ).first()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="You already reviewed this session")
+
+    review = Review(
+        student_id=student_id,
+        teacher_id=teacher_id,
+        session_id=body.session_id,
+        rating=body.rating,
+        comment=body.comment,
+        status="visible",
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+
+    return {
+        "id": str(review.id),
+        "rating": review.rating,
+        "comment": review.comment,
+        "created_at": review.created_at.isoformat(),
+    }
