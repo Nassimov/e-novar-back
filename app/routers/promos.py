@@ -94,11 +94,10 @@ async def list_active_promos(
     now = _utcnow()
 
     # IDs already redeemed by this user
-    redeemed_ids: set[UUID] = set(
-        db.exec(
-            select(PromoRedemption.code_id).where(PromoRedemption.user_id == uid)
-        ).all()
-    )
+    redeemed_ids: set[UUID] = {
+        r.code_id
+        for r in db.exec(select(PromoRedemption).where(PromoRedemption.user_id == uid)).all()
+    }
 
     codes = db.exec(
         select(PromoCode)
