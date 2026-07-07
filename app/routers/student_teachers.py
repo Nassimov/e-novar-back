@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import unicodedata
-from datetime import date as dt_date
+from datetime import date as dt_date, date
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.catalog import Level, Subject, TeacherMode, TeacherSessionType, TeacherSubjectPrice
+from app.models.catalog import Level, Subject, TeacherDiploma, TeacherMode, TeacherSessionType, TeacherSubjectPrice
 from app.models.profile import Profile, StudentProfile, TeacherProfile
+from app.models.review import Review
+from app.models.scheduling import TeacherSlot
 
 router = APIRouter(tags=["Student"])
 
@@ -404,3 +406,227 @@ async def student_teachers_search(
         ))
 
     return TeacherSearchResponse(items=items, total=len(items))
+
+
+# ─── Teacher public profile detail ───────────────────────────────────────────
+
+class TeacherSubjectItem(BaseModel):
+    name: str
+    level: str
+    price: int
+
+
+class TeacherDiplomaItem(BaseModel):
+    id: str
+    name: str
+    file_url: Optional[str] = None
+    file_type: Optional[str] = None
+    verified: bool = False
+
+
+class TeacherPublicProfile(BaseModel):
+    id: str
+    first_name: str
+    last_name: str
+    full_name: str
+    avatar_url: Optional[str] = None
+    bio: Optional[str] = None
+    headline: Optional[str] = None
+    wilaya: Optional[str] = None
+    price_per_session: int
+    kp_reward: int
+    rating_avg: float
+    reviews_count: int
+    verified: bool
+    badge: Optional[str] = None
+    experience_years: int
+    success_rate: Optional[float] = None
+    students_count: int
+    hours_taught: int
+    subjects: List[TeacherSubjectItem]
+    modes: List[str]
+    session_types: List[str]
+    diplomas: List[TeacherDiplomaItem]
+
+
+class TeacherReviewItem(BaseModel):
+    id: str
+    reviewer_name: str
+    rating: int
+    comment: Optional[str] = None
+    created_at: str
+
+
+class TeacherSlotItem(BaseModel):
+    id: str
+    slot_date: str
+    start_time: str
+    end_time: str
+    mode: str
+    type: str
+
+
+@router.get("/teachers/{teacher_id}", response_model=TeacherPublicProfile)
+async def get_teacher_profile(
+    teacher_id: UUID,
+    db: Session = Depends(get_db),
+    _: Dict[str, Any] = Depends(get_current_user),
+):
+    """Public teacher profile page data."""
+    tp = db.exec(
+        select(TeacherProfile).where(TeacherProfile.user_id == teacher_id)
+    ).first()
+    if tp is None or tp.status not in ("approved",):
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    p = db.get(Profile, teacher_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    # Subjects from TeacherSubjectPrice + Subject + Level
+    sp_rows = db.exec(
+        select(TeacherSubjectPrice, Subject, Level)
+        .join(Subject, Subject.id == TeacherSubjectPrice.subject_id)
+        .join(Level, Level.id == TeacherSubjectPrice.level_id)
+        .where(TeacherSubjectPrice.teacher_id == teacher_id)
+        .where(TeacherSubjectPrice.active == True)  # noqa: E712
+    ).all()
+    subjects = [
+        TeacherSubjectItem(name=subj.name, level=lvl.label, price=tsp.price_single)
+        for tsp, subj, lvl in sp_rows
+    ]
+
+    # Modes
+    mode_rows = db.exec(
+        select(TeacherMode).where(TeacherMode.teacher_id == teacher_id)
+    ).all()
+    modes = [m.mode for m in mode_rows]
+
+    # Session types
+    stype_rows = db.exec(
+        select(TeacherSessionType).where(TeacherSessionType.teacher_id == teacher_id)
+    ).all()
+    session_types = [st.type for st in stype_rows]
+
+    # Diplomas
+    diploma_rows = db.exec(
+        select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)
+    ).all()
+    diplomas = [
+        TeacherDiplomaItem(
+            id=str(d.id), name=d.name, file_url=d.file_url,
+            file_type=d.file_type, verified=d.verified,
+        )
+        for d in diploma_rows
+    ]
+
+    return TeacherPublicProfile(
+        id=str(teacher_id),
+        first_name=p.first_name or "",
+        last_name=p.last_name or "",
+        full_name=p.full_name or "",
+        avatar_url=p.avatar_url,
+        bio=tp.bio_long or p.bio,
+        headline=tp.headline,
+        wilaya=tp.teaching_wilaya or p.wilaya,
+        price_per_session=tp.price_per_session,
+        kp_reward=tp.kp_reward,
+        rating_avg=round(tp.rating_avg, 1),
+        reviews_count=tp.reviews_count,
+        verified=tp.verified,
+        badge=tp.badge,
+        experience_years=tp.experience_years,
+        success_rate=tp.success_rate,
+        students_count=tp.students_count,
+        hours_taught=tp.hours_taught,
+        subjects=subjects,
+        modes=modes if modes else ["online"],
+        session_types=session_types if session_types else ["individual"],
+        diplomas=diplomas,
+    )
+
+
+@router.get("/teachers/{teacher_id}/reviews")
+async def get_teacher_reviews(
+    teacher_id: UUID,
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=50),
+    db: Session = Depends(get_db),
+    _: Dict[str, Any] = Depends(get_current_user),
+):
+    """Public reviews for a teacher, with reviewer name."""
+    tp = db.exec(
+        select(TeacherProfile).where(TeacherProfile.user_id == teacher_id)
+    ).first()
+    if tp is None:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    reviews = db.exec(
+        select(Review)
+        .where(Review.teacher_id == teacher_id)
+        .where(Review.status == "visible")
+        .order_by(Review.created_at.desc())
+    ).all()
+
+    # Batch-load reviewer names
+    reviewer_ids = list({r.student_id for r in reviews})
+    profiles = db.exec(select(Profile).where(Profile.id.in_(reviewer_ids))).all()
+    prof_map = {p.id: p for p in profiles}
+
+    total = len(reviews)
+    offset = (page - 1) * size
+    page_reviews = reviews[offset: offset + size]
+
+    items = []
+    for r in page_reviews:
+        reviewer = prof_map.get(r.student_id)
+        if reviewer:
+            name_parts = (reviewer.full_name or "").split()
+            if len(name_parts) >= 2:
+                reviewer_name = f"{name_parts[0]} {name_parts[-1][0]}."
+            else:
+                reviewer_name = reviewer.full_name or "Étudiant"
+        else:
+            reviewer_name = "Étudiant"
+        items.append(TeacherReviewItem(
+            id=str(r.id),
+            reviewer_name=reviewer_name,
+            rating=r.rating,
+            comment=r.comment,
+            created_at=r.created_at.isoformat(),
+        ))
+
+    return {"items": items, "total": total, "page": page, "size": size}
+
+
+@router.get("/teachers/{teacher_id}/slots")
+async def get_teacher_slots(
+    teacher_id: UUID,
+    db: Session = Depends(get_db),
+    _: Dict[str, Any] = Depends(get_current_user),
+):
+    """Upcoming open slots for a teacher (next 30 days)."""
+    today = date.today()
+    from datetime import timedelta
+    end = today + timedelta(days=30)
+
+    slots = db.exec(
+        select(TeacherSlot)
+        .where(TeacherSlot.teacher_id == teacher_id)
+        .where(TeacherSlot.status == "open")
+        .where(TeacherSlot.slot_date >= today)
+        .where(TeacherSlot.slot_date <= end)
+        .order_by(TeacherSlot.slot_date, TeacherSlot.start_time)
+    ).all()
+
+    return [
+        TeacherSlotItem(
+            id=str(s.id),
+            slot_date=s.slot_date.isoformat(),
+            start_time=str(s.start_time)[:5],
+            end_time=str(s.end_time)[:5],
+            mode=s.mode,
+            type=s.type,
+        )
+        for s in slots
+    ]
