@@ -326,7 +326,9 @@ from app.routers.store import router as store_router
 from app.routers.admin.store import router as admin_store_router
 from app.routers.admin.referrals import router as admin_referrals_router
 from app.routers.promos import router as promos_router
+from app.routers.public import router as public_router
 
+app.include_router(public_router,        prefix="/api/public",         tags=["Public"])
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
 app.include_router(onboarding_router,    prefix="/api/onboarding",     tags=["Onboarding"])
