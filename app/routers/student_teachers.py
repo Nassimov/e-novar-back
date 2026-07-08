@@ -680,6 +680,124 @@ async def get_my_reviews(
     )
 
 
+class BookingBody(BaseModel):
+    slot_id: Optional[str] = None
+    formula: str = "single"
+    mode: str = "online"
+    date: str                  # "YYYY-MM-DD" required
+    slot_time: Optional[str] = None  # "HH:MM"
+    duration_min: int = 90
+    amount: Optional[int] = None
+
+
+@router.post("/teachers/{teacher_ref}/book", status_code=201)
+async def book_teacher_slot(
+    teacher_ref: str,
+    body: BookingBody,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Create a booking + Stripe Checkout Session.
+    Returns { booking_id, checkout_url, amount }.
+    """
+    import datetime as dt
+    from uuid import UUID as _UUID
+    from app.config import get_settings
+    from app.models.booking import Booking
+    from app.services.stripe import create_checkout_session
+
+    settings = get_settings()
+    tp = _resolve_teacher(db, teacher_ref)
+    teacher_id = tp.user_id
+    student_id = _UUID(current_user["id"])
+
+    # Parse date
+    try:
+        booking_date = dt.date.fromisoformat(body.date)
+    except ValueError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="Invalid date format — use YYYY-MM-DD")
+
+    # Parse slot time
+    slot_time: Optional[dt.time] = None
+    if body.slot_time:
+        try:
+            slot_time = dt.time.fromisoformat(body.slot_time)
+        except ValueError:
+            pass
+
+    # Validate / resolve slot
+    slot_id: Optional[_UUID] = None
+    if body.slot_id:
+        try:
+            slot_id = _UUID(body.slot_id)
+            slot = db.get(TeacherSlot, slot_id)
+            if slot and slot.status == "open":
+                booking_date = slot.slot_date
+                slot_time = slot.start_time
+        except (ValueError, Exception):
+            pass
+
+    # Determine amount
+    amount = body.amount or tp.price_per_session
+
+    # Create booking
+    booking = Booking(
+        student_id=student_id,
+        teacher_id=teacher_id,
+        slot_id=slot_id,
+        formula=body.formula,
+        mode=body.mode,
+        session_type="individual",
+        booking_date=booking_date,
+        slot_time=slot_time,
+        duration_min=body.duration_min,
+        amount=amount,
+        kp_reward=tp.kp_reward,
+        status="pending",
+    )
+    db.add(booking)
+    db.flush()  # get booking.id without committing
+
+    # Get teacher name for Stripe product label
+    teacher_profile = db.get(Profile, teacher_id)
+    teacher_name = teacher_profile.full_name if teacher_profile else "Professeur E-NOVAR"
+
+    # Create Stripe Checkout Session
+    base_url = settings.frontend_url or "http://localhost:5173"
+    checkout_url = f"{base_url}/student/payment/process?status=success"
+    try:
+        session = create_checkout_session(
+            amount_dzd=amount,
+            booking_id=str(booking.id),
+            teacher_name=teacher_name,
+            success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",
+            cancel_url=f"{base_url}/student/payment?cancelled=1",
+        )
+        booking.stripe_cs_id = session["session_id"]
+        checkout_url = session["url"]
+    except Exception as exc:
+        # If Stripe is not configured, proceed without payment URL
+        booking.stripe_cs_id = None
+
+    # Mark slot as booked
+    if slot_id:
+        slot = db.get(TeacherSlot, slot_id)
+        if slot:
+            slot.status = "booked"
+            db.add(slot)
+
+    db.commit()
+    db.refresh(booking)
+
+    return {
+        "booking_id": str(booking.id),
+        "checkout_url": checkout_url,
+        "amount": amount,
+    }
+
+
 @router.post("/teachers/{teacher_ref}/reviews", status_code=201)
 async def submit_teacher_review(
     teacher_ref: str,

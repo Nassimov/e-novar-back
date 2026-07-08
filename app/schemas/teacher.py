@@ -80,25 +80,80 @@ class TeacherProfileUpdate(BaseModel):
 
 
 class SlotCreate(BaseModel):
-    day_of_week: int = Field(ge=0, le=6)
-    start_time: str  # "HH:MM"
-    end_time: str  # "HH:MM"
+    date: str                   # "YYYY-MM-DD"
+    start_time: str             # "HH:MM"
+    end_time: str               # "HH:MM"
+    type: str = "individual"    # "individual" | "group"
+    max_students: int = 1
+    mode: str = "online"        # "online" | "presentiel"
+    price: int = 0              # DZD
+    status: str = "open"        # "open" | "blocked" | "draft"
 
 
 class SlotUpdate(BaseModel):
-    is_available: Optional[bool] = None
+    date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    type: Optional[str] = None
+    max_students: Optional[int] = None
+    mode: Optional[str] = None
+    price: Optional[int] = None
+    status: Optional[str] = None
 
 
 class SlotResponse(BaseModel):
-    id: UUID
-    day_of_week: int
+    id: str
+    date: str
     start_time: str
     end_time: str
-    is_available: bool
+    type: str
+    max_students: int
+    mode: str
+    price: int
+    status: str
 
     model_config = {"from_attributes": True}
+
+
+class TeacherBookingStudentInfo(BaseModel):
+    id: str
+    full_name: str
+    avatar_url: Optional[str] = None
+
+
+class TeacherBookingItem(BaseModel):
+    id: str
+    student: Optional[TeacherBookingStudentInfo] = None
+    formula: str
+    mode: str
+    date: Optional[str] = None
+    slot_time: Optional[str] = None
+    duration_min: int
+    amount: int
+    status: str
+    stripe_cs_id: Optional[str] = None
+    stripe_pi_id: Optional[str] = None
+    created_at: str
+
+
+class WalletResponse(BaseModel):
+    wallet_balance_dzd: int
+    payout_mode: str
+    ep_balance: int
+    ep_total_earned: int
+    iban: Optional[str] = None
+    bank_holder: Optional[str] = None
+    bank_last4: Optional[str] = None
+
+
+class PayoutModeUpdate(BaseModel):
+    payout_mode: str  # "platform" | "direct"
+
+
+class DzdWithdrawalRequest(BaseModel):
+    amount_dzd: int = Field(gt=0, description="Montant à retirer en DZD")
+    iban: str
+    bank_holder: str
 
 
 class DiplomaResponse(BaseModel):

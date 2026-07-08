@@ -44,6 +44,8 @@ class Booking(SQLModel, table=True):
     status: str = Field(default="pending")               # public.booking_status
     # Circular FK to payments.id — stored as plain UUID; constraint is in Supabase DB.
     payment_id: Optional[UUID] = Field(default=None)
+    stripe_cs_id: Optional[str] = Field(default=None)     # Stripe Checkout Session ID
+    stripe_pi_id: Optional[str] = Field(default=None)     # Stripe PaymentIntent ID
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

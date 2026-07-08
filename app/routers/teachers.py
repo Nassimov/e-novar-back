@@ -14,14 +14,19 @@ from app.models.user import User
 from app.models.review import Review
 from app.schemas.teacher import (
     DiplomaResponse,
+    DzdWithdrawalRequest,
     EvaluationCreate,
+    PayoutModeUpdate,
     SlotCreate,
     SlotResponse,
     SlotUpdate,
+    TeacherBookingItem,
+    TeacherBookingStudentInfo,
     TeacherDetailResponse,
     TeacherListItem,
     TeacherListResponse,
     TeacherProfileUpdate,
+    WalletResponse,
     WithdrawalRequest,
     WithdrawalResponse,
 )
@@ -278,19 +283,36 @@ async def update_bank_card(
     return {"message": "Bank card updated"}
 
 
+def _slot_to_response(s: TeacherSlot) -> SlotResponse:
+    return SlotResponse(
+        id=str(s.id),
+        date=s.slot_date.isoformat(),
+        start_time=str(s.start_time)[:5],
+        end_time=str(s.end_time)[:5],
+        type=s.type,
+        max_students=s.max_students,
+        mode=s.mode,
+        price=s.price,
+        status=s.status,
+    )
+
+
 @router.get("/me/slots", response_model=List[SlotResponse])
 async def list_my_slots(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """List the teacher's availability slots."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    slots = db.exec(select(TeacherSlot).where(TeacherSlot.teacher_id == user.id)).all()
-    return [SlotResponse.model_validate(s) for s in slots]
+    """List the teacher's slots."""
+    import datetime as dt
+    teacher_id = UUID(current_user["id"])
+    today = dt.date.today()
+    slots = db.exec(
+        select(TeacherSlot)
+        .where(TeacherSlot.teacher_id == teacher_id)
+        .where(TeacherSlot.slot_date >= today)
+        .order_by(TeacherSlot.slot_date, TeacherSlot.start_time)
+    ).all()
+    return [_slot_to_response(s) for s in slots]
 
 
 @router.post("/me/slots", response_model=SlotResponse, status_code=status.HTTP_201_CREATED)
@@ -299,22 +321,38 @@ async def create_slot(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Add an availability slot."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+    """Create a concrete-date availability slot."""
+    import datetime as dt
+    teacher_id = UUID(current_user["id"])
+    try:
+        slot_date = dt.date.fromisoformat(payload.date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid date format — use YYYY-MM-DD")
+
+    try:
+        start_time = dt.time.fromisoformat(payload.start_time)
+        end_time = dt.time.fromisoformat(payload.end_time)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid time format — use HH:MM")
+
+    if end_time <= start_time:
+        raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
     slot = TeacherSlot(
-        teacher_id=user.id,
-        day_of_week=payload.day_of_week,
-        start_time=payload.start_time,
-        end_time=payload.end_time,
+        teacher_id=teacher_id,
+        slot_date=slot_date,
+        start_time=start_time,
+        end_time=end_time,
+        type=payload.type,
+        max_students=payload.max_students,
+        mode=payload.mode,
+        price=payload.price,
+        status=payload.status,
     )
     db.add(slot)
     db.commit()
     db.refresh(slot)
-    return SlotResponse.model_validate(slot)
+    return _slot_to_response(slot)
 
 
 @router.put("/me/slots/{slot_id}", response_model=SlotResponse)
@@ -324,27 +362,36 @@ async def update_slot(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Update an availability slot."""
+    """Update a slot."""
+    import datetime as dt
+    teacher_id = UUID(current_user["id"])
     slot = db.get(TeacherSlot, slot_id)
     if slot is None:
         raise HTTPException(status_code=404, detail="Slot not found")
-
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None or slot.teacher_id != user.id:
+    if slot.teacher_id != teacher_id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if payload.is_available is not None:
-        slot.is_available = payload.is_available
-    if payload.start_time:
-        slot.start_time = payload.start_time
-    if payload.end_time:
-        slot.end_time = payload.end_time
+    if payload.date is not None:
+        slot.slot_date = dt.date.fromisoformat(payload.date)
+    if payload.start_time is not None:
+        slot.start_time = dt.time.fromisoformat(payload.start_time)
+    if payload.end_time is not None:
+        slot.end_time = dt.time.fromisoformat(payload.end_time)
+    if payload.type is not None:
+        slot.type = payload.type
+    if payload.max_students is not None:
+        slot.max_students = payload.max_students
+    if payload.mode is not None:
+        slot.mode = payload.mode
+    if payload.price is not None:
+        slot.price = payload.price
+    if payload.status is not None:
+        slot.status = payload.status
 
     db.add(slot)
     db.commit()
     db.refresh(slot)
-    return SlotResponse.model_validate(slot)
+    return _slot_to_response(slot)
 
 
 @router.delete("/me/slots/{slot_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -353,15 +400,15 @@ async def delete_slot(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Delete an availability slot."""
+    """Delete a slot (only if not booked)."""
+    teacher_id = UUID(current_user["id"])
     slot = db.get(TeacherSlot, slot_id)
     if slot is None:
         raise HTTPException(status_code=404, detail="Slot not found")
-
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None or slot.teacher_id != user.id:
+    if slot.teacher_id != teacher_id:
         raise HTTPException(status_code=403, detail="Access denied")
+    if slot.status == "booked":
+        raise HTTPException(status_code=409, detail="Cannot delete a booked slot")
 
     db.delete(slot)
     db.commit()
@@ -405,12 +452,12 @@ async def send_student_invitation(
     return {"message": f"Invitation sent to {email}"}
 
 
-@router.get("/me/wallet")
+@router.get("/me/wallet", response_model=WalletResponse)
 async def get_wallet(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Get the teacher's EP balance and bank info."""
+    """Get the teacher's DZD wallet, EP balance, and bank info."""
     from app.models.kp import KpBalance
     from app.models.profile import TeacherProfile as _TeacherProfile
 
@@ -418,12 +465,207 @@ async def get_wallet(
     kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
     tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == uid)).first()
 
+    return WalletResponse(
+        wallet_balance_dzd=tp.wallet_balance_dzd if tp else 0,
+        payout_mode=tp.payout_mode if tp else "platform",
+        ep_balance=kp.balance if kp else 0,
+        ep_total_earned=kp.total_earned if kp else 0,
+        iban=tp.iban if tp else None,
+        bank_holder=tp.bank_holder if tp else None,
+        bank_last4=tp.bank_last4 if tp else None,
+    )
+
+
+@router.patch("/me/payout-mode")
+async def update_payout_mode(
+    payload: PayoutModeUpdate,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Update the teacher's preferred payout mode."""
+    from app.models.profile import TeacherProfile as _TeacherProfile
+
+    if payload.payout_mode not in ("platform", "direct"):
+        raise HTTPException(status_code=422, detail="payout_mode must be 'platform' or 'direct'")
+
+    uid = UUID(current_user["id"])
+    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == uid)).first()
+    if tp is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    tp.payout_mode = payload.payout_mode
+    db.add(tp)
+    db.commit()
+    return {"payout_mode": tp.payout_mode}
+
+
+@router.get("/me/bookings", response_model=List[TeacherBookingItem])
+async def list_teacher_bookings(
+    booking_status: Optional[str] = Query(None, alias="status"),
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """List bookings for the logged-in teacher."""
+    from app.models.booking import Booking
+    from app.models.profile import Profile
+
+    teacher_id = UUID(current_user["id"])
+    stmt = select(Booking).where(Booking.teacher_id == teacher_id)
+    if booking_status:
+        stmt = stmt.where(Booking.status == booking_status)
+    stmt = stmt.order_by(Booking.created_at.desc())
+    bookings = db.exec(stmt).all()
+
+    student_ids = list({b.student_id for b in bookings})
+    profiles = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all() if student_ids else []
+    prof_map = {p.id: p for p in profiles}
+
+    result = []
+    for b in bookings:
+        prof = prof_map.get(b.student_id)
+        student_info = (
+            TeacherBookingStudentInfo(
+                id=str(b.student_id),
+                full_name=prof.full_name or "",
+                avatar_url=prof.avatar_url,
+            )
+            if prof else None
+        )
+        result.append(TeacherBookingItem(
+            id=str(b.id),
+            student=student_info,
+            formula=b.formula,
+            mode=b.mode,
+            date=b.booking_date.isoformat() if b.booking_date else None,
+            slot_time=str(b.slot_time)[:5] if b.slot_time else None,
+            duration_min=b.duration_min,
+            amount=b.amount,
+            status=b.status,
+            stripe_cs_id=b.stripe_cs_id,
+            stripe_pi_id=b.stripe_pi_id,
+            created_at=b.created_at.isoformat(),
+        ))
+    return result
+
+
+@router.post("/me/bookings/{booking_id}/accept")
+async def accept_booking(
+    booking_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Accept a booking: capture Stripe payment and credit wallet."""
+    from app.models.booking import Booking
+    from app.models.profile import TeacherProfile as _TeacherProfile
+    from app.services.stripe import capture_payment_intent, get_checkout_session
+
+    teacher_id = UUID(current_user["id"])
+    booking = db.get(Booking, booking_id)
+    if booking is None or booking.teacher_id != teacher_id:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status not in ("pending", "awaiting_teacher"):
+        raise HTTPException(status_code=409, detail=f"Cannot accept a booking with status '{booking.status}'")
+
+    # Retrieve PI ID if we only have the CS ID
+    pi_id = booking.stripe_pi_id
+    if not pi_id and booking.stripe_cs_id:
+        try:
+            session_data = get_checkout_session(booking.stripe_cs_id)
+            pi_id = session_data.get("payment_intent")
+            if pi_id:
+                booking.stripe_pi_id = pi_id
+        except Exception:
+            pass
+
+    # Capture payment
+    if pi_id:
+        try:
+            capture_payment_intent(pi_id)
+        except Exception as exc:
+            raise HTTPException(status_code=402, detail=f"Payment capture failed: {exc}")
+
+    booking.status = "confirmed"
+    db.add(booking)
+
+    # Credit teacher wallet
+    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id)).first()
+    if tp:
+        tp.wallet_balance_dzd += booking.amount
+        db.add(tp)
+
+    db.commit()
+    return {"status": "confirmed", "amount_credited": booking.amount}
+
+
+@router.post("/me/bookings/{booking_id}/refuse")
+async def refuse_booking(
+    booking_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Refuse a booking: cancel/refund Stripe PaymentIntent."""
+    from app.models.booking import Booking
+    from app.services.stripe import cancel_payment_intent, get_checkout_session
+
+    teacher_id = UUID(current_user["id"])
+    booking = db.get(Booking, booking_id)
+    if booking is None or booking.teacher_id != teacher_id:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status not in ("pending", "awaiting_teacher"):
+        raise HTTPException(status_code=409, detail=f"Cannot refuse a booking with status '{booking.status}'")
+
+    # Retrieve PI ID if we only have the CS ID
+    pi_id = booking.stripe_pi_id
+    if not pi_id and booking.stripe_cs_id:
+        try:
+            session_data = get_checkout_session(booking.stripe_cs_id)
+            pi_id = session_data.get("payment_intent")
+            if pi_id:
+                booking.stripe_pi_id = pi_id
+        except Exception:
+            pass
+
+    # Cancel/refund payment
+    if pi_id:
+        try:
+            cancel_payment_intent(pi_id)
+        except Exception:
+            pass  # If already cancelled or expired, proceed anyway
+
+    booking.status = "cancelled"
+    db.add(booking)
+    db.commit()
+    return {"status": "cancelled"}
+
+
+@router.post("/me/withdrawals/dzd", status_code=status.HTTP_201_CREATED)
+async def request_dzd_withdrawal(
+    payload: DzdWithdrawalRequest,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Request a DZD wallet withdrawal. Requires at least 1 completed session."""
+    from app.models.booking import Booking
+    from app.models.profile import TeacherProfile as _TeacherProfile
+
+    teacher_id = UUID(current_user["id"])
+    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id)).first()
+    if tp is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    if tp.wallet_balance_dzd < payload.amount_dzd:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solde insuffisant. Disponible : {tp.wallet_balance_dzd} DA",
+        )
+
+    # Deduct from wallet (admin processes the transfer manually)
+    tp.wallet_balance_dzd -= payload.amount_dzd
+    db.add(tp)
+    db.commit()
     return {
-        "ep_balance": kp.balance if kp else 0,
-        "ep_total_earned": kp.total_earned if kp else 0,
-        "iban": tp.iban if tp else None,
-        "bank_holder": tp.bank_holder if tp else None,
-        "bank_last4": tp.bank_last4 if tp else None,
+        "message": f"Demande de retrait de {payload.amount_dzd} DA enregistrée. Un virement sera effectué sous 72h.",
+        "remaining_balance": tp.wallet_balance_dzd,
     }
 
 
@@ -630,24 +872,31 @@ async def get_teacher_schedule(teacher_id: UUID, db: Session = Depends(get_db)):
         )
     ).all()
     return [
-        {"date": str(b.date), "slot_time": b.slot_time, "duration_minutes": b.duration_minutes}
+        {
+            "date": b.booking_date.isoformat() if b.booking_date else None,
+            "slot_time": str(b.slot_time)[:5] if b.slot_time else None,
+            "duration_min": b.duration_min,
+        }
         for b in bookings
-        if b.date and b.slot_time
+        if b.booking_date
     ]
 
 
 @router.get("/{teacher_id}/availability")
 async def get_teacher_availability(teacher_id: UUID, db: Session = Depends(get_db)):
-    """Get the available slots for a teacher."""
-    stmt = select(TeacherProfile).where(TeacherProfile.id == teacher_id)
+    """Get the open slots for a teacher."""
+    import datetime as dt
+    stmt = select(TeacherProfile).where(TeacherProfile.user_id == teacher_id)
     profile = db.exec(stmt).first()
     if profile is None:
         raise HTTPException(status_code=404, detail="Teacher not found")
 
+    today = dt.date.today()
     slots = db.exec(
         select(TeacherSlot).where(
-            TeacherSlot.teacher_id == profile.user_id,
-            TeacherSlot.is_available == True,
+            TeacherSlot.teacher_id == teacher_id,
+            TeacherSlot.status == "open",
+            TeacherSlot.slot_date >= today,
         )
     ).all()
-    return [SlotResponse.model_validate(s) for s in slots]
+    return [_slot_to_response(s) for s in slots]

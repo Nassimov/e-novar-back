@@ -154,6 +154,8 @@ class TeacherProfile(SQLModel, table=True):
     )
     cv_url: Optional[str] = Field(default=None)
     cover_letter: Optional[str] = Field(default=None)
+    wallet_balance_dzd: int = Field(default=0)
+    payout_mode: str = Field(default="platform")           # "platform" | "direct"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
