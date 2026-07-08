@@ -283,7 +283,7 @@ async def update_bank_card(
     return {"message": "Bank card updated"}
 
 
-def _slot_to_response(s: TeacherSlot) -> SlotResponse:
+def _slot_to_response(s: TeacherSlot, student_name: Optional[str] = None) -> SlotResponse:
     return SlotResponse(
         id=str(s.id),
         date=s.slot_date.isoformat(),
@@ -294,6 +294,7 @@ def _slot_to_response(s: TeacherSlot) -> SlotResponse:
         mode=s.mode,
         price=s.price,
         status=s.status,
+        student_name=student_name,
     )
 
 
@@ -302,8 +303,11 @@ async def list_my_slots(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """List the teacher's slots."""
+    """List the teacher's slots, enriched with student name for booked slots."""
     import datetime as dt
+    from app.models.booking import Booking
+    from app.models.profile import Profile
+
     teacher_id = UUID(current_user["id"])
     today = dt.date.today()
     slots = db.exec(
@@ -312,7 +316,26 @@ async def list_my_slots(
         .where(TeacherSlot.slot_date >= today)
         .order_by(TeacherSlot.slot_date, TeacherSlot.start_time)
     ).all()
-    return [_slot_to_response(s) for s in slots]
+
+    # Build slot_id → student_name map from confirmed bookings
+    slot_ids = [s.id for s in slots if s.status == "booked"]
+    student_name_map: dict = {}
+    if slot_ids:
+        bookings = db.exec(
+            select(Booking)
+            .where(Booking.slot_id.in_(slot_ids))
+            .where(Booking.status == "confirmed")
+        ).all()
+        student_ids = [b.student_id for b in bookings]
+        profiles = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all() if student_ids else []
+        prof_map = {p.id: p for p in profiles}
+        for b in bookings:
+            if b.slot_id:
+                prof = prof_map.get(b.student_id)
+                if prof:
+                    student_name_map[b.slot_id] = prof.full_name or ""
+
+    return [_slot_to_response(s, student_name_map.get(s.id)) for s in slots]
 
 
 @router.post("/me/slots", response_model=SlotResponse, status_code=status.HTTP_201_CREATED)
@@ -586,6 +609,13 @@ async def accept_booking(
 
     booking.status = "confirmed"
     db.add(booking)
+
+    # Mark the linked slot as booked so the teacher's calendar reflects it
+    if booking.slot_id:
+        slot = db.get(TeacherSlot, booking.slot_id)
+        if slot and slot.teacher_id == teacher_id:
+            slot.status = "booked"
+            db.add(slot)
 
     # Credit teacher wallet
     tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id)).first()

@@ -111,6 +111,7 @@ class SlotResponse(BaseModel):
     mode: str
     price: int
     status: str
+    student_name: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
