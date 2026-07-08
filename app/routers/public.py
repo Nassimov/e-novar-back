@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, distinct
 from sqlmodel import Session, select
 
-from app.db import get_session
+from app.dependencies import get_db
 from app.models.kp import KpBalance
 from app.models.profile import Profile, TeacherProfile, StudentProfile, UserRole
 
@@ -87,7 +87,7 @@ def _fetch_kp(db: Session, user_id: UUID) -> Optional[KpBalance]:
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=PlatformStats)
-def get_platform_stats(db: Session = Depends(get_session)):
+def get_platform_stats(db: Session = Depends(get_db)):
     """Return platform-wide aggregate numbers shown on the home page."""
     verified_teachers: int = db.exec(
         select(func.count()).select_from(TeacherProfile)
@@ -118,7 +118,7 @@ def get_platform_stats(db: Session = Depends(get_session)):
 
 
 @router.get("/leaderboard", response_model=LeaderboardResponse)
-def get_leaderboard(db: Session = Depends(get_session)):
+def get_leaderboard(db: Session = Depends(get_db)):
     """
     Return this week's top teachers (by earnings & by rating) and
     top students (by weekly EP earned). Used on the home page hero.
