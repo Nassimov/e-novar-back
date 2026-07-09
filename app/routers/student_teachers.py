@@ -438,6 +438,9 @@ class TeacherSlotItem(BaseModel):
     mode: str
     type: str
     max_students: int = 1
+    price: int = 0
+    price_pack5: int = 0
+    price_pack8: int = 0
 
 
 @router.get("/teachers/{teacher_ref}", response_model=TeacherPublicProfile)
@@ -584,6 +587,9 @@ async def get_teacher_slots(
             mode=s.mode,
             type=s.type,
             max_students=s.max_students,
+            price=s.price,
+            price_pack5=getattr(s, "price_pack5", 0) or 0,
+            price_pack8=getattr(s, "price_pack8", 0) or 0,
         )
         for s in slots
     ]
@@ -775,8 +781,19 @@ async def book_teacher_slot(
         if s and s.type not in ("both",):
             resolved_session_type = s.type
 
-    # Determine amount
-    amount = body.amount or tp.price_per_session
+    # Determine amount — use slot-level prices when available, else profile default
+    resolved_slot = db.get(TeacherSlot, slot_id) if slot_id else None
+    if body.amount:
+        amount = body.amount
+    elif body.formula == "pack5":
+        pack5_price = getattr(resolved_slot, "price_pack5", 0) if resolved_slot else 0
+        amount = pack5_price if pack5_price > 0 else round(tp.price_per_session * 5 * 0.9)
+    elif body.formula == "monthly":
+        pack8_price = getattr(resolved_slot, "price_pack8", 0) if resolved_slot else 0
+        amount = pack8_price if pack8_price > 0 else round(tp.price_per_session * 8 * 0.92)
+    else:
+        slot_price = getattr(resolved_slot, "price", 0) if resolved_slot else 0
+        amount = slot_price if slot_price > 0 else tp.price_per_session
 
     # Serialize pack_sessions if provided
     pack_sessions_json: Optional[str] = None

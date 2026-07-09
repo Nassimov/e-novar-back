@@ -32,6 +32,8 @@ class TeacherSlot(SQLModel, table=True):
     type: str = Field(default="individual")              # public.session_type
     max_students: int = Field(default=1)
     mode: str = Field(default="online")                  # public.teaching_mode
-    price: int = Field(default=0)                        # DZD
+    price: int = Field(default=0)                        # DZD — individual single session
+    price_pack5: int = Field(default=0)                  # DZD — total for pack of 5 (individual)
+    price_pack8: int = Field(default=0)                  # DZD — total for pack of 8/monthly (individual)
     status: str = Field(default="open")                  # public.slot_status
     created_at: datetime = Field(default_factory=datetime.utcnow)

@@ -293,6 +293,8 @@ def _slot_to_response(s: TeacherSlot, student_name: Optional[str] = None) -> Slo
         max_students=s.max_students,
         mode=s.mode,
         price=s.price,
+        price_pack5=getattr(s, "price_pack5", 0) or 0,
+        price_pack8=getattr(s, "price_pack8", 0) or 0,
         status=s.status,
         student_name=student_name,
     )
@@ -370,6 +372,8 @@ async def create_slot(
         max_students=payload.max_students,
         mode=payload.mode,
         price=payload.price,
+        price_pack5=payload.price_pack5 if payload.type != "group" else 0,
+        price_pack8=payload.price_pack8 if payload.type != "group" else 0,
         status=payload.status,
     )
     db.add(slot)
@@ -408,6 +412,10 @@ async def update_slot(
         slot.mode = payload.mode
     if payload.price is not None:
         slot.price = payload.price
+    if payload.price_pack5 is not None:
+        slot.price_pack5 = payload.price_pack5 if slot.type != "group" else 0
+    if payload.price_pack8 is not None:
+        slot.price_pack8 = payload.price_pack8 if slot.type != "group" else 0
     if payload.status is not None:
         slot.status = payload.status
 

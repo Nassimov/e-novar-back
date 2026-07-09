@@ -83,10 +83,12 @@ class SlotCreate(BaseModel):
     date: str                   # "YYYY-MM-DD"
     start_time: str             # "HH:MM"
     end_time: str               # "HH:MM"
-    type: str = "individual"    # "individual" | "group"
+    type: str = "individual"    # "individual" | "group" | "both"
     max_students: int = 1
-    mode: str = "online"        # "online" | "presentiel"
-    price: int = 0              # DZD
+    mode: str = "online"        # "online" | "presentiel" | "both"
+    price: int = 0              # DZD — individual single session (or group session)
+    price_pack5: int = 0        # DZD — total for pack of 5 (individual only)
+    price_pack8: int = 0        # DZD — total for pack of 8/monthly (individual only)
     status: str = "open"        # "open" | "blocked" | "draft"
 
 
@@ -98,6 +100,8 @@ class SlotUpdate(BaseModel):
     max_students: Optional[int] = None
     mode: Optional[str] = None
     price: Optional[int] = None
+    price_pack5: Optional[int] = None
+    price_pack8: Optional[int] = None
     status: Optional[str] = None
 
 
@@ -110,6 +114,8 @@ class SlotResponse(BaseModel):
     max_students: int
     mode: str
     price: int
+    price_pack5: int = 0
+    price_pack8: int = 0
     status: str
     student_name: Optional[str] = None
 
