@@ -437,6 +437,7 @@ class TeacherSlotItem(BaseModel):
     end_time: str
     mode: str
     type: str
+    max_students: int = 1
 
 
 @router.get("/teachers/{teacher_ref}", response_model=TeacherPublicProfile)
@@ -582,6 +583,7 @@ async def get_teacher_slots(
             end_time=str(s.end_time)[:5],
             mode=s.mode,
             type=s.type,
+            max_students=s.max_students,
         )
         for s in slots
     ]
@@ -680,14 +682,30 @@ async def get_my_reviews(
     )
 
 
+class PackSessionItem(BaseModel):
+    date: str                          # "YYYY-MM-DD"
+    slot_id: Optional[str] = None
+    slot_time: str                     # "HH:MM"
+    end_time: Optional[str] = None    # "HH:MM"
+    session_type: str = "individual"  # "individual" | "group"
+    subject: Optional[str] = None
+    comment: Optional[str] = None
+
+
 class BookingBody(BaseModel):
     slot_id: Optional[str] = None
     formula: str = "single"
     mode: str = "online"
-    date: str                  # "YYYY-MM-DD" required
-    slot_time: Optional[str] = None  # "HH:MM"
+    date: Optional[str] = None             # "YYYY-MM-DD" — required for single; inferred from pack_sessions[0] for packs
+    slot_time: Optional[str] = None       # "HH:MM"
+    end_time: Optional[str] = None        # "HH:MM" (for sub-slot selection)
     duration_min: int = 90
     amount: Optional[int] = None
+    payment_method: str = "cib"           # cib | edahabia | transfer | cash
+    subject: Optional[str] = None
+    comment: Optional[str] = None
+    session_type: Optional[str] = None    # override for "both" type slots
+    pack_sessions: Optional[List[PackSessionItem]] = None  # for pack5/monthly
 
 
 @router.post("/teachers/{teacher_ref}/book", status_code=201)
@@ -698,25 +716,32 @@ async def book_teacher_slot(
     db: Session = Depends(get_db),
 ):
     """
-    Create a booking + Stripe Checkout Session.
-    Returns { booking_id, checkout_url, amount }.
+    Create a booking for the given teacher.
+    - For payment_method=cib: creates Stripe Checkout Session, returns checkout_url.
+    - For payment_method=edahabia|transfer|cash: creates pending booking, returns booking_id.
+    - For formula=pack5|monthly: body.pack_sessions must contain all sessions.
+    Returns { booking_id, checkout_url|None, amount, payment_method }.
     """
     import datetime as dt
+    import json
     from uuid import UUID as _UUID
     from app.config import get_settings
     from app.models.booking import Booking
-    from app.services.stripe import create_checkout_session
 
     settings = get_settings()
     tp = _resolve_teacher(db, teacher_ref)
     teacher_id = tp.user_id
     student_id = _UUID(current_user["id"])
 
-    # Parse date
+    # Parse date — infer from first pack session when omitted
+    raw_date = body.date
+    if not raw_date and body.pack_sessions:
+        raw_date = body.pack_sessions[0].date
+    if not raw_date:
+        raise HTTPException(status_code=422, detail="date is required for single-session bookings")
     try:
-        booking_date = dt.date.fromisoformat(body.date)
+        booking_date = dt.date.fromisoformat(raw_date)
     except ValueError:
-        from fastapi import HTTPException
         raise HTTPException(status_code=422, detail="Invalid date format — use YYYY-MM-DD")
 
     # Parse slot time
@@ -739,8 +764,30 @@ async def book_teacher_slot(
         except (ValueError, Exception):
             pass
 
+    # Resolve session_type:
+    # - if slot type is "both", use student's choice; default "individual"
+    # - otherwise use slot's type; default "individual"
+    resolved_session_type = "individual"
+    if body.session_type in ("individual", "group"):
+        resolved_session_type = body.session_type
+    elif slot_id:
+        s = db.get(TeacherSlot, slot_id)
+        if s and s.type not in ("both",):
+            resolved_session_type = s.type
+
     # Determine amount
     amount = body.amount or tp.price_per_session
+
+    # Serialize pack_sessions if provided
+    pack_sessions_json: Optional[str] = None
+    if body.pack_sessions:
+        pack_sessions_json = json.dumps([s.model_dump() for s in body.pack_sessions])
+
+    # Determine booking status based on payment method
+    # - cash: pending admin approval then teacher acceptance
+    # - edahabia/transfer: pending (payment promise)
+    # - cib: pending (becomes confirmed after Stripe capture + teacher accept)
+    booking_status = "pending"
 
     # Create booking
     booking = Booking(
@@ -749,44 +796,61 @@ async def book_teacher_slot(
         slot_id=slot_id,
         formula=body.formula,
         mode=body.mode,
-        session_type="individual",
+        session_type=resolved_session_type,
         booking_date=booking_date,
         slot_time=slot_time,
         duration_min=body.duration_min,
         amount=amount,
         kp_reward=tp.kp_reward,
-        status="pending",
+        status=booking_status,
+        payment_method=body.payment_method,
+        subject=body.subject,
+        comment=body.comment,
+        pack_sessions=pack_sessions_json,
     )
     db.add(booking)
     db.flush()  # get booking.id without committing
 
-    # Get teacher name for Stripe product label
-    teacher_profile = db.get(Profile, teacher_id)
-    teacher_name = teacher_profile.full_name if teacher_profile else "Professeur E-NOVAR"
+    checkout_url: Optional[str] = None
 
-    # Create Stripe Checkout Session
-    base_url = settings.frontend_url or "http://localhost:5173"
-    checkout_url = f"{base_url}/student/payment/process?status=success"
-    try:
-        session = create_checkout_session(
-            amount_dzd=amount,
-            booking_id=str(booking.id),
-            teacher_name=teacher_name,
-            success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",
-            cancel_url=f"{base_url}/student/payment?cancelled=1",
-        )
-        booking.stripe_cs_id = session["session_id"]
-        checkout_url = session["url"]
-    except Exception as exc:
-        # If Stripe is not configured, proceed without payment URL
-        booking.stripe_cs_id = None
+    if body.payment_method == "cib":
+        # Create Stripe Checkout Session
+        from app.services.stripe import create_checkout_session
+        teacher_profile_row = db.get(Profile, teacher_id)
+        teacher_name = teacher_profile_row.full_name if teacher_profile_row else "Professeur E-NOVAR"
+        base_url = settings.frontend_url or "http://localhost:5173"
+        try:
+            session = create_checkout_session(
+                amount_dzd=amount,
+                booking_id=str(booking.id),
+                teacher_name=teacher_name,
+                success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",
+                cancel_url=f"{base_url}/student/payment?cancelled=1",
+            )
+            booking.stripe_cs_id = session["session_id"]
+            checkout_url = session["url"]
+        except Exception:
+            # Stripe not configured — proceed anyway, booking stays pending
+            checkout_url = f"{base_url}/student/payment/process?status=success&booking_id={booking.id}"
 
-    # Mark slot as booked
-    if slot_id:
-        slot = db.get(TeacherSlot, slot_id)
-        if slot:
-            slot.status = "booked"
-            db.add(slot)
+    # For pack5/monthly: reserve all named slots
+    if body.pack_sessions:
+        for ps in body.pack_sessions:
+            if ps.slot_id:
+                try:
+                    ps_slot_id = _UUID(ps.slot_id)
+                    ps_slot = db.get(TeacherSlot, ps_slot_id)
+                    if ps_slot and ps_slot.teacher_id == teacher_id and ps_slot.status == "open":
+                        ps_slot.status = "booked"
+                        db.add(ps_slot)
+                except (ValueError, Exception):
+                    pass
+    elif slot_id:
+        # Single booking: reserve the slot
+        single_slot = db.get(TeacherSlot, slot_id)
+        if single_slot:
+            single_slot.status = "booked"
+            db.add(single_slot)
 
     db.commit()
     db.refresh(booking)
@@ -795,6 +859,7 @@ async def book_teacher_slot(
         "booking_id": str(booking.id),
         "checkout_url": checkout_url,
         "amount": amount,
+        "payment_method": body.payment_method,
     }
 
 

@@ -46,6 +46,10 @@ class Booking(SQLModel, table=True):
     payment_id: Optional[UUID] = Field(default=None)
     stripe_cs_id: Optional[str] = Field(default=None)     # Stripe Checkout Session ID
     stripe_pi_id: Optional[str] = Field(default=None)     # Stripe PaymentIntent ID
+    payment_method: Optional[str] = Field(default=None)   # cib | edahabia | transfer | cash
+    subject: Optional[str] = Field(default=None)          # student-chosen subject
+    comment: Optional[str] = Field(default=None)          # student note / objective
+    pack_sessions: Optional[str] = Field(default=None)    # JSON array for pack5/monthly sessions
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -617,14 +617,22 @@ async def accept_booking(
             slot.status = "booked"
             db.add(slot)
 
-    # Credit teacher wallet
+    # Credit teacher wallet — per-session amount for packs, full amount for single
     tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id)).first()
     if tp:
-        tp.wallet_balance_dzd += booking.amount
+        if booking.formula == "pack5":
+            amount_credited = round(booking.amount / 5)
+        elif booking.formula == "monthly":
+            amount_credited = round(booking.amount / 8)
+        else:
+            amount_credited = booking.amount
+        tp.wallet_balance_dzd += amount_credited
         db.add(tp)
+    else:
+        amount_credited = booking.amount
 
     db.commit()
-    return {"status": "confirmed", "amount_credited": booking.amount}
+    return {"status": "confirmed", "amount_credited": amount_credited}
 
 
 @router.post("/me/bookings/{booking_id}/refuse")

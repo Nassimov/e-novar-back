@@ -325,6 +325,7 @@ from app.routers.admin.messages import router as admin_messages_router
 from app.routers.store import router as store_router
 from app.routers.admin.store import router as admin_store_router
 from app.routers.admin.referrals import router as admin_referrals_router
+from app.routers.admin.bookings import router as admin_bookings_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
 
@@ -367,6 +368,7 @@ app.include_router(admin_stats_router,      prefix="/api/admin/stats",      tags
 app.include_router(admin_questions_router,  prefix="/api/admin/questions",  tags=["Admin — Questions"])
 app.include_router(admin_messages_router,   prefix="/api/admin/messages",   tags=["Admin — Messages"])
 app.include_router(admin_referrals_router,  prefix="/api/admin/referrals",  tags=["Admin — Referrals"])
+app.include_router(admin_bookings_router,   prefix="/api/admin/bookings",   tags=["Admin — Bookings"])
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 
