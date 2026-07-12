@@ -9,6 +9,22 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 
+class PlatformSettings(SQLModel, table=True):
+    """
+    Mirrors public.platform_settings.
+    Singleton row (id is always TRUE) holding platform-wide, admin-configurable
+    business parameters. Currently: pack5/pack10 booking discount percentages —
+    the only place these percentages are ever defined; see app/services/pricing.py.
+    """
+
+    __tablename__ = "platform_settings"
+
+    id: bool = Field(default=True, primary_key=True)
+    pack5_discount_percent: int = Field(default=10)
+    pack10_discount_percent: int = Field(default=15)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class CmsPage(SQLModel, table=True):
     """
     Mirrors public.cms_pages.

@@ -96,3 +96,18 @@ class WithdrawalProcessRequest(BaseModel):
     action: str                       # "approve" or "reject"
     dzd_amount: Optional[int] = None  # obligatoire si action == "approve"
     admin_note: Optional[str] = None
+
+
+class PlatformPricingSettings(BaseModel):
+    pack5_discount_percent: int = Field(ge=0, le=100)
+    pack10_discount_percent: int = Field(ge=0, le=100)
+
+    @field_validator("pack10_discount_percent")
+    @classmethod
+    def validate_pack10_better(cls, v: int, info) -> int:
+        pack5 = info.data.get("pack5_discount_percent")
+        if pack5 is not None and v <= pack5:
+            raise ValueError(
+                "La réduction du pack de 10 doit être supérieure à celle du pack de 5."
+            )
+        return v

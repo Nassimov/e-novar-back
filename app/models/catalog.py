@@ -66,10 +66,8 @@ class TeacherSubjectPrice(SQLModel, table=True):
     teacher_id: UUID = Field(foreign_key="teacher_profiles.user_id", index=True)
     subject_id: UUID = Field(foreign_key="subjects.id", index=True)
     level_id: UUID = Field(foreign_key="levels.id", index=True)
-    price_single: int = Field(default=0)
-    price_pack5: int = Field(default=0)
-    price_monthly: int = Field(default=0)
-    lesson_format: str = Field(default="both")  # "individual" | "group" | "both"
+    price_single: int = Field(default=0)  # pack5/pack10 are always computed on read via
+                                           # app.services.pricing, never stored.
     active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -79,28 +77,25 @@ class TeacherSubjectPrice(SQLModel, table=True):
     )
 
 
-class TeacherMode(SQLModel, table=True):
-    """Mirrors public.teacher_modes — teaching modes offered by a teacher."""
+class TeacherDeliveryOption(SQLModel, table=True):
+    """
+    Mirrors public.teacher_delivery_options.
 
-    __tablename__ = "teacher_modes"
+    A teacher's global capability set: one row means "this teacher can
+    deliver lessons via (mode) as (type)". Replaces the old disjoint
+    teacher_modes + teacher_session_types tables, which could not express
+    which class-size applied to which delivery location.
 
-    teacher_id: UUID = Field(
-        foreign_key="teacher_profiles.user_id",
-        primary_key=True,
-    )
-    mode: str = Field(primary_key=True)               # public.teaching_mode value
+    Business rule (enforced by DB CHECK + app validation): mode='at_student'
+    only ever pairs with type='individual' — no group lessons at the
+    student's home.
+    """
 
+    __tablename__ = "teacher_delivery_options"
 
-class TeacherSessionType(SQLModel, table=True):
-    """Mirrors public.teacher_session_types — individual/group offering."""
-
-    __tablename__ = "teacher_session_types"
-
-    teacher_id: UUID = Field(
-        foreign_key="teacher_profiles.user_id",
-        primary_key=True,
-    )
-    type: str = Field(primary_key=True)               # public.session_type value
+    teacher_id: UUID = Field(foreign_key="teacher_profiles.user_id", primary_key=True)
+    mode: str = Field(primary_key=True)               # public.teaching_mode value: online|at_student|at_home
+    type: str = Field(primary_key=True)               # public.session_type value: individual|group
 
 
 class TeacherDiploma(SQLModel, table=True):

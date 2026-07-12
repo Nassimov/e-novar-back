@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from app.dependencies import get_current_user, get_db
 from app.models.booking import Booking
 from app.models.payment import Payment, PaymentMethod, PaymentStatus
+from app.models.profile import Profile
 from app.models.user import User
 from app.schemas.payment import (
     CibPaymentRequest,
@@ -31,8 +32,7 @@ async def initiate_payment(
     """Initiate a payment for a booking."""
     from datetime import datetime
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -66,8 +66,7 @@ async def pay_with_cib(
     from datetime import datetime
     from app.services.stripe import create_payment_intent
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -120,8 +119,7 @@ async def verify_transfer(
     if payment is None:
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None or payment.user_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -145,8 +143,7 @@ async def list_invoices(
     db: Session = Depends(get_db),
 ):
     """List invoices for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -177,8 +174,7 @@ async def get_invoice(
     if payment is None:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user and payment.user_id != user.id and current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Access denied")
 

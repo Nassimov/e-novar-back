@@ -47,7 +47,7 @@ TAGS_METADATA = [
         "name": "Bookings",
         "description": (
             "Full booking lifecycle: create → confirm → complete → cancel. "
-            "Formulas: `single`, `pack5`, `monthly`. Modes: `online`, `presentiel`, `hybrid`."
+            "Formulas: `single`, `pack5`, `pack10`. Modes: `online`, `at_student`, `at_home`."
         ),
     },
     {
@@ -291,7 +291,6 @@ from app.routers.auth import router as auth_router
 from app.routers.profile import router as profile_router
 from app.routers.onboarding import router as onboarding_router
 from app.routers.teachers import router as teachers_router
-from app.routers.bookings import router as bookings_router
 from app.routers.payments import router as payments_router
 from app.routers.sessions import router as sessions_router
 from app.routers.messages import router as messages_router
@@ -326,6 +325,7 @@ from app.routers.store import router as store_router
 from app.routers.admin.store import router as admin_store_router
 from app.routers.admin.referrals import router as admin_referrals_router
 from app.routers.admin.bookings import router as admin_bookings_router
+from app.routers.admin.settings import router as admin_settings_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
 
@@ -334,7 +334,6 @@ app.include_router(auth_router,          prefix="/api/auth",           tags=["Au
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
 app.include_router(onboarding_router,    prefix="/api/onboarding",     tags=["Onboarding"])
 app.include_router(teachers_router,      prefix="/api/teachers",       tags=["Teachers"])
-app.include_router(bookings_router,      prefix="/api/bookings",       tags=["Bookings"])
 app.include_router(payments_router,      prefix="/api/payments",       tags=["Payments"])
 app.include_router(sessions_router,      prefix="/api/sessions",       tags=["Sessions"])
 app.include_router(homework_router,      prefix="/api/homework",       tags=["Homework"])
@@ -369,6 +368,7 @@ app.include_router(admin_questions_router,  prefix="/api/admin/questions",  tags
 app.include_router(admin_messages_router,   prefix="/api/admin/messages",   tags=["Admin — Messages"])
 app.include_router(admin_referrals_router,  prefix="/api/admin/referrals",  tags=["Admin — Referrals"])
 app.include_router(admin_bookings_router,   prefix="/api/admin/bookings",   tags=["Admin — Bookings"])
+app.include_router(admin_settings_router,   prefix="/api/admin/settings",   tags=["Admin — Settings"])
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 

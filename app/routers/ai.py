@@ -7,12 +7,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.config import get_settings
 from app.dependencies import get_current_user, get_db
-from app.models.kp import KpBalance
-from app.models.profile import Profile
 from app.services import ai as ai_service
 
 settings = get_settings()
@@ -243,73 +241,11 @@ async def evaluate_practice(
     return result
 
 
-@router.get("/progress-report")
-async def get_progress_report(
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    uid = UUID(current_user["id"])
-    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    from app.models.booking import Booking
-    from app.models.homework import Homework
-    from app.models.session import Session as SessionModel, SessionStatus
-
-    sessions = db.exec(
-        select(SessionModel).where(
-            SessionModel.student_id == uid,
-            SessionModel.status == SessionStatus.completed,
-        )
-    ).all()
-    homeworks = db.exec(select(Homework).where(Homework.student_id == uid)).all()
-    kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
-
-    student_data = {
-        "name": profile.full_name,
-        "total_sessions": len(sessions),
-        "subjects_studied": list({s.subject for s in sessions if s.subject}),
-        "average_rating": sum(s.rating for s in sessions if s.rating) / max(1, sum(1 for s in sessions if s.rating)),
-        "homework_completed": sum(1 for h in homeworks if h.status.value == "graded"),
-        "homework_total": len(homeworks),
-        "kp_level": kp.level if kp else 1,
-        "kp_balance": kp.balance if kp else 0,
-    }
-    report = ai_service.generate_progress_report(student_data)
-    return {"report": report, "student_name": profile.full_name}
-
-
-@router.get("/session-summary/{session_id}")
-async def get_session_ai_summary(
-    session_id: UUID,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    from app.models.session import Session as SessionModel
-
-    session = db.get(SessionModel, session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    uid = UUID(current_user["id"])
-    if session.student_id != uid and session.teacher_id != uid:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if session.ai_summary:
-        return {"summary": session.ai_summary, "generated_fresh": False}
-
-    summary = ai_service.generate_session_summary({
-        "subject": session.subject,
-        "level": session.level,
-        "duration_minutes": session.duration_minutes,
-        "notes": session.notes,
-        "feedback": session.feedback,
-        "rating": session.rating,
-        "scheduled_at": session.scheduled_at.isoformat(),
-    })
-    session.ai_summary = summary
-    session.updated_at = datetime.utcnow()
-    db.add(session)
-    db.commit()
-    return {"summary": summary, "generated_fresh": True}
+# NOTE: a `/progress-report` and a `/session-summary/{id}` endpoint used to live
+# here, but both referenced fields that don't exist on `TutoringSession`
+# (`.subject`, `.rating`, `.duration_minutes`, `.ai_summary`, etc. — the model
+# has `.subject_id`, `.duration_min`, `.summary`, no session-level rating at
+# all, ratings live on the separate `Review` model). Neither had any frontend
+# caller, so they were removed rather than fixed. The equivalent, correct,
+# already-wired session-summary flow is `GET /api/sessions/{id}/summary`
+# (`app/routers/sessions.py`), which uses the real fields.

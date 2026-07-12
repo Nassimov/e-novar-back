@@ -42,6 +42,7 @@ from app.models.enums import (  # noqa: F401
     SessionType,
     SlotStatus,
     StoreCategory,
+    StudentLessonFormat,
     TeacherBadge,
     TeacherStatus,
     TeachingMode,
@@ -63,16 +64,15 @@ from app.models.profile import (  # noqa: F401
 from app.models.catalog import (  # noqa: F401
     Level,
     Subject,
+    TeacherDeliveryOption,
     TeacherDiploma,
-    TeacherMode,
-    TeacherSessionType,
     TeacherSubjectPrice,
     Wilaya,
 )
 
 # Relationships
 from app.models.parent_link import ParentStudentLink  # noqa: F401
-from app.models.scheduling import TeacherSlot  # noqa: F401
+from app.models.scheduling import TeacherSlot, TeacherSlotSubject  # noqa: F401
 
 # Booking & sessions
 from app.models.booking import (  # noqa: F401
@@ -142,6 +142,7 @@ from app.models.admin import (  # noqa: F401
     CmsPage,
     Invitation,
     LegalAcceptance,
+    PlatformSettings,
     PromoCode,
     PromoRedemption,
     Report,

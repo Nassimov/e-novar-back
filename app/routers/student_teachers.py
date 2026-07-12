@@ -12,10 +12,12 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
 from app.models.booking import TutoringSession
-from app.models.catalog import Level, Subject, TeacherDiploma, TeacherMode, TeacherSessionType, TeacherSubjectPrice
+from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.models.review import Review
-from app.models.scheduling import TeacherSlot
+from app.models.scheduling import TeacherSlot, TeacherSlotSubject
+from app.schemas.teacher import SlotSubjectLevelResponse
+from app.services import matching
 
 router = APIRouter(tags=["Student"])
 
@@ -58,6 +60,59 @@ def _resolve_teacher(db: Session, teacher_ref: str) -> TeacherProfile:
     if tp is None or tp.status not in ("approved",):
         raise HTTPException(status_code=404, detail="Teacher not found")
     return tp
+
+
+def _slot_subject_levels_for(slot_id: UUID, db: Session) -> List[SlotSubjectLevelResponse]:
+    """All (subject, level) combos this slot accepts, with resolved names —
+    student-facing mirror of the teacher-side helper in app.routers.teachers."""
+    rows = db.exec(
+        select(TeacherSlotSubject, Subject, Level)
+        .join(Subject, Subject.id == TeacherSlotSubject.subject_id)
+        .join(Level, Level.id == TeacherSlotSubject.level_id)
+        .where(TeacherSlotSubject.slot_id == slot_id)
+    ).all()
+    return [
+        SlotSubjectLevelResponse(
+            subject_id=subj.id, subject_name=subj.name, level_id=lvl.id, level_name=lvl.label,
+        )
+        for _, subj, lvl in rows
+    ]
+
+
+def _first_subject_level_for_slot(slot_id: UUID, db: Session) -> tuple[Optional[UUID], Optional[UUID]]:
+    """A slot can accept multiple subject/level combos (teacher_slot_subjects);
+    when the caller hasn't confirmed a specific one (see _resolve_requested_subject_level),
+    fall back to the first combo as the session's subject/level (best-effort metadata)."""
+    row = db.exec(
+        select(TeacherSlotSubject).where(TeacherSlotSubject.slot_id == slot_id)
+    ).first()
+    return (row.subject_id, row.level_id) if row else (None, None)
+
+
+def _resolve_requested_subject_level(
+    slot_id: Optional[UUID],
+    requested_subject_id: Optional[UUID],
+    requested_level_id: Optional[UUID],
+    db: Session,
+) -> tuple[Optional[UUID], Optional[UUID]]:
+    """Validate an explicitly-requested (subject_id, level_id) against a slot's
+    declared combos, or fall back to the slot's first combo when the caller
+    didn't specify one (keeps clients that don't send a choice yet working).
+    Raises 422 if the requested combo isn't one this slot actually accepts."""
+    if not slot_id:
+        return (requested_subject_id, requested_level_id)
+    if requested_subject_id is None and requested_level_id is None:
+        return _first_subject_level_for_slot(slot_id, db)
+    combos = db.exec(
+        select(TeacherSlotSubject).where(TeacherSlotSubject.slot_id == slot_id)
+    ).all()
+    for combo in combos:
+        if combo.subject_id == requested_subject_id and combo.level_id == requested_level_id:
+            return (combo.subject_id, combo.level_id)
+    raise HTTPException(
+        status_code=422,
+        detail="Ce créneau n'accepte pas la matière/niveau demandé(e).",
+    )
 
 
 # ─── Search ──────────────────────────────────────────────────────────────────
@@ -132,7 +187,9 @@ async def student_teachers_search(
 
     if mode:
         mode_rows = db.exec(
-            select(TeacherMode).where(TeacherMode.teacher_id.in_(teacher_ids), TeacherMode.mode == mode)
+            select(TeacherDeliveryOption).where(
+                TeacherDeliveryOption.teacher_id.in_(teacher_ids), TeacherDeliveryOption.mode == mode,
+            )
         ).all()
         mode_set = {r.teacher_id for r in mode_rows}
         teacher_ids = [tid for tid in teacher_ids if tid in mode_set]
@@ -141,8 +198,8 @@ async def student_teachers_search(
 
     if session_type:
         st_rows = db.exec(
-            select(TeacherSessionType).where(
-                TeacherSessionType.teacher_id.in_(teacher_ids), TeacherSessionType.type == session_type,
+            select(TeacherDeliveryOption).where(
+                TeacherDeliveryOption.teacher_id.in_(teacher_ids), TeacherDeliveryOption.type == session_type,
             )
         ).all()
         st_set = {r.teacher_id for r in st_rows}
@@ -170,22 +227,24 @@ async def student_teachers_search(
         lev_code_map = {l.id: l.code for l in levs}
         lev_label_map = {l.id: l.label for l in levs}
 
-    def _dominant_format(fmts: set[str]) -> str:
-        clean = fmts - {"both"}
-        if not clean or "both" in fmts:
+    def _dominant_format(types: set[str]) -> str:
+        # Format is no longer a per-subject concept (Phase 4 dropped
+        # TeacherSubjectPrice.lesson_format) — it's derived uniformly from the
+        # teacher's global delivery-option session types (individual/group).
+        has_individual = "individual" in types
+        has_group = "group" in types
+        if has_individual and has_group:
             return "both"
-        if clean == {"individual"}:
-            return "individual"
-        if clean == {"group"}:
+        if has_group:
             return "group"
-        return "both"
+        if has_individual:
+            return "individual"
+        return "both"  # no declared capability yet — neutral default, not exclusion
 
     teacher_subjects: dict[UUID, list[str]] = {}
     teacher_level_codes: dict[UUID, list[str]] = {}
     teacher_level_labels: dict[UUID, list[str]] = {}
     teacher_min_price: dict[UUID, int] = {}
-    teacher_lesson_formats: dict[UUID, set[str]] = {}
-    teacher_subject_formats: dict[UUID, dict[str, set[str]]] = {}
 
     for r in sp_all:
         tid = r.teacher_id
@@ -201,10 +260,6 @@ async def student_teachers_search(
         if r.price_single > 0:
             if tid not in teacher_min_price or r.price_single < teacher_min_price[tid]:
                 teacher_min_price[tid] = r.price_single
-        fmt = getattr(r, "lesson_format", "both") or "both"
-        teacher_lesson_formats.setdefault(tid, set()).add(fmt)
-        if sn:
-            teacher_subject_formats.setdefault(tid, {}).setdefault(sn, set()).add(fmt)
 
     if subject:
         subject_list = [s.strip() for s in subject.split(",") if s.strip()]
@@ -217,8 +272,8 @@ async def student_teachers_search(
             if not teacher_ids:
                 return TeacherSearchResponse(items=[], total=0)
 
+    norm_codes: set[str] = set()
     if level_list:
-        norm_codes: set[str] = set()
         for lv in level_list:
             for code in LEVEL_GROUP_CODES.get(lv, []):
                 norm_codes.add(_norm(code))
@@ -229,32 +284,44 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
+    # Resolve the requested subject/level names into catalog IDs so the
+    # date-range check below can confirm an actually-bookable OPEN SLOT
+    # carries this exact combo, not just "the teacher's general catalog
+    # lists it somewhere" (Spec B #10 — combos must be used, not just stored).
+    requested_subject_ids: set[UUID] = set()
+    requested_level_ids: set[UUID] = set()
+    if subject:
+        norm_subs_req = {_norm(s) for s in [x.strip() for x in subject.split(",") if x.strip()]}
+        requested_subject_ids = {
+            r.subject_id for r in sp_all if _norm(sub_name_map.get(r.subject_id, "")) in norm_subs_req
+        }
+    if norm_codes:
+        requested_level_ids = {
+            r.level_id for r in sp_all if _norm(lev_code_map.get(r.level_id, "")) in norm_codes
+        }
+
     profiles = db.exec(select(Profile).where(Profile.id.in_(teacher_ids))).all()
     prof_map: dict[UUID, Profile] = {p.id: p for p in profiles}
 
     if wilaya_list:
         norm_wilayas = {_norm(w) for w in wilaya_list}
-
-        def _teacher_serves_any_wilaya(tid: UUID) -> bool:
-            tp = tp_map[tid]
-            if getattr(tp, "teaching_nationwide", False):
-                return True
-            tw_arr = getattr(tp, "teaching_wilayas", None) or []
-            if tw_arr and any(_norm(w) in norm_wilayas for w in tw_arr):
-                return True
-            if _norm(tp.teaching_wilaya or "") in norm_wilayas:
-                return True
-            p = prof_map.get(tid)
-            return bool(p and _norm(p.wilaya or "") in norm_wilayas)
-
-        teacher_ids = [tid for tid in teacher_ids if _teacher_serves_any_wilaya(tid)]
+        teacher_ids = [
+            tid for tid in teacher_ids
+            if matching.wilaya_compatible(tp_map[tid], prof_map.get(tid), norm_wilayas)
+        ]
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
     if price_min is not None:
-        teacher_ids = [tid for tid in teacher_ids if tp_map[tid].price_per_session >= price_min]
+        teacher_ids = [
+            tid for tid in teacher_ids
+            if (teacher_min_price.get(tid) or tp_map[tid].price_per_session) >= price_min
+        ]
     if price_max is not None:
-        teacher_ids = [tid for tid in teacher_ids if tp_map[tid].price_per_session <= price_max]
+        teacher_ids = [
+            tid for tid in teacher_ids
+            if (teacher_min_price.get(tid) or tp_map[tid].price_per_session) <= price_max
+        ]
     if not teacher_ids:
         return TeacherSearchResponse(items=[], total=0)
 
@@ -273,9 +340,26 @@ async def student_teachers_search(
 
     if date_from or date_to:
         try:
-            slot_query = select(TeacherSlot).where(
-                TeacherSlot.teacher_id.in_(teacher_ids), TeacherSlot.status == "open",
-            )
+            # If the student is filtering by subject/level, confirm an actual
+            # OPEN slot in range carries that exact combo — not just that the
+            # teacher's general catalog lists it. Falls back to plain
+            # date-range slot existence when no subject/level filter is
+            # active, unchanged from before.
+            wants_combo_check = bool(requested_subject_ids or requested_level_ids)
+            if wants_combo_check:
+                slot_query = (
+                    select(TeacherSlot)
+                    .join(TeacherSlotSubject, TeacherSlotSubject.slot_id == TeacherSlot.id)
+                    .where(TeacherSlot.teacher_id.in_(teacher_ids), TeacherSlot.status == "open")
+                )
+                if requested_subject_ids:
+                    slot_query = slot_query.where(TeacherSlotSubject.subject_id.in_(requested_subject_ids))
+                if requested_level_ids:
+                    slot_query = slot_query.where(TeacherSlotSubject.level_id.in_(requested_level_ids))
+            else:
+                slot_query = select(TeacherSlot).where(
+                    TeacherSlot.teacher_id.in_(teacher_ids), TeacherSlot.status == "open",
+                )
             if date_from:
                 try:
                     slot_query = slot_query.where(TeacherSlot.slot_date >= dt_date.fromisoformat(date_from))
@@ -311,21 +395,25 @@ async def student_teachers_search(
         if not teacher_ids:
             return TeacherSearchResponse(items=[], total=0)
 
-    modes_all = db.exec(select(TeacherMode).where(TeacherMode.teacher_id.in_(teacher_ids))).all()
+    delivery_all = db.exec(
+        select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id.in_(teacher_ids))
+    ).all()
     teacher_modes: dict[UUID, list[str]] = {}
-    for m in modes_all:
-        teacher_modes.setdefault(m.teacher_id, []).append(m.mode)
-
-    stypes_all = db.exec(select(TeacherSessionType).where(TeacherSessionType.teacher_id.in_(teacher_ids))).all()
     teacher_stypes: dict[UUID, list[str]] = {}
-    for st in stypes_all:
-        teacher_stypes.setdefault(st.teacher_id, []).append(st.type)
+    teacher_delivery_pairs: dict[UUID, set[tuple[str, str]]] = {}
+    for d in delivery_all:
+        teacher_modes.setdefault(d.teacher_id, [])
+        if d.mode not in teacher_modes[d.teacher_id]:
+            teacher_modes[d.teacher_id].append(d.mode)
+        teacher_stypes.setdefault(d.teacher_id, [])
+        if d.type not in teacher_stypes[d.teacher_id]:
+            teacher_stypes[d.teacher_id].append(d.type)
+        teacher_delivery_pairs.setdefault(d.teacher_id, set()).add((d.mode, d.type))
 
     def _format_compatible(tid: UUID) -> bool:
-        if not student_lesson_format or student_lesson_format == "both":
-            return True
-        fmts = teacher_lesson_formats.get(tid, {"both"})
-        return "both" in fmts or student_lesson_format in fmts
+        return matching.lesson_format_compatible(
+            teacher_delivery_pairs.get(tid, set()), student_lesson_format
+        )
 
     def rank_score(tid: UUID) -> float:
         tp = tp_map[tid]
@@ -369,10 +457,10 @@ async def student_teachers_search(
             levels=teacher_level_labels.get(tid, []),
             modes=teacher_modes.get(tid, []),
             session_types=teacher_stypes.get(tid, []),
-            lesson_formats=sorted(teacher_lesson_formats.get(tid, {"both"})),
+            lesson_formats=[_dominant_format(set(teacher_stypes.get(tid, [])))],
             subject_formats={
-                sn: _dominant_format(fmts)
-                for sn, fmts in teacher_subject_formats.get(tid, {}).items()
+                sn: _dominant_format(set(teacher_stypes.get(tid, [])))
+                for sn in teacher_subjects.get(tid, [])
             },
             languages=getattr(tp_map.get(tid), "languages", None) or [],
         ))
@@ -383,6 +471,8 @@ async def student_teachers_search(
 # ─── Teacher public profile ───────────────────────────────────────────────────
 
 class TeacherSubjectItem(BaseModel):
+    subject_id: str
+    level_id: str
     name: str
     level: str
     price: int
@@ -439,8 +529,9 @@ class TeacherSlotItem(BaseModel):
     type: str
     max_students: int = 1
     price: int = 0
-    price_pack5: int = 0
-    price_pack8: int = 0
+    price_pack5: int = 0   # computed from `price` + platform discount config, never stored
+    price_pack10: int = 0  # computed from `price` + platform discount config, never stored
+    subject_levels: List[SlotSubjectLevelResponse] = []
 
 
 @router.get("/teachers/{teacher_ref}", response_model=TeacherPublicProfile)
@@ -464,15 +555,21 @@ async def get_teacher_profile(
         .where(TeacherSubjectPrice.active == True)  # noqa: E712
     ).all()
     subjects = [
-        TeacherSubjectItem(name=subj.name, level=lvl.label, price=tsp.price_single)
+        TeacherSubjectItem(
+            subject_id=str(subj.id),
+            level_id=str(lvl.id),
+            name=subj.name,
+            level=lvl.label,
+            price=tsp.price_single,
+        )
         for tsp, subj, lvl in sp_rows
     ]
 
-    mode_rows = db.exec(select(TeacherMode).where(TeacherMode.teacher_id == teacher_id)).all()
-    modes = [m.mode for m in mode_rows]
-
-    stype_rows = db.exec(select(TeacherSessionType).where(TeacherSessionType.teacher_id == teacher_id)).all()
-    session_types = [st.type for st in stype_rows]
+    delivery_rows = db.exec(
+        select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id == teacher_id)
+    ).all()
+    modes = list({d.mode for d in delivery_rows})
+    session_types = list({d.type for d in delivery_rows})
 
     diploma_rows = db.exec(select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)).all()
     diplomas = [
@@ -578,8 +675,13 @@ async def get_teacher_slots(
         .order_by(TeacherSlot.slot_date, TeacherSlot.start_time)
     ).all()
 
-    return [
-        TeacherSlotItem(
+    from app.services.pricing import compute_pack_prices, get_platform_settings
+
+    settings = get_platform_settings(db)
+    items = []
+    for s in slots:
+        packs = compute_pack_prices(s.price, settings)
+        items.append(TeacherSlotItem(
             id=str(s.id),
             slot_date=s.slot_date.isoformat(),
             start_time=str(s.start_time)[:5],
@@ -588,11 +690,11 @@ async def get_teacher_slots(
             type=s.type,
             max_students=s.max_students,
             price=s.price,
-            price_pack5=getattr(s, "price_pack5", 0) or 0,
-            price_pack8=getattr(s, "price_pack8", 0) or 0,
-        )
-        for s in slots
-    ]
+            price_pack5=packs["pack5"],
+            price_pack10=packs["pack10"],
+            subject_levels=_slot_subject_levels_for(s.id, db),
+        ))
+    return items
 
 
 # ─── Student reviews (authenticated student) ─────────────────────────────────
@@ -695,6 +797,8 @@ class PackSessionItem(BaseModel):
     end_time: Optional[str] = None    # "HH:MM"
     session_type: str = "individual"  # "individual" | "group"
     subject: Optional[str] = None
+    subject_id: Optional[UUID] = None  # must be one of the slot's declared combos, if provided
+    level_id: Optional[UUID] = None
     comment: Optional[str] = None
 
 
@@ -706,12 +810,13 @@ class BookingBody(BaseModel):
     slot_time: Optional[str] = None       # "HH:MM"
     end_time: Optional[str] = None        # "HH:MM" (for sub-slot selection)
     duration_min: int = 90
-    amount: Optional[int] = None
     payment_method: str = "cib"           # cib | edahabia | transfer | cash
     subject: Optional[str] = None
+    subject_id: Optional[UUID] = None      # must be one of the slot's declared combos, if provided
+    level_id: Optional[UUID] = None
     comment: Optional[str] = None
     session_type: Optional[str] = None    # override for "both" type slots
-    pack_sessions: Optional[List[PackSessionItem]] = None  # for pack5/monthly
+    pack_sessions: Optional[List[PackSessionItem]] = None  # for pack5/pack10
 
 
 @router.post("/teachers/{teacher_ref}/book", status_code=201)
@@ -725,7 +830,11 @@ async def book_teacher_slot(
     Create a booking for the given teacher.
     - For payment_method=cib: creates Stripe Checkout Session, returns checkout_url.
     - For payment_method=edahabia|transfer|cash: creates pending booking, returns booking_id.
-    - For formula=pack5|monthly: body.pack_sessions must contain all sessions.
+    - For formula=pack5|pack10: body.pack_sessions must contain all sessions.
+
+    The charged amount is always computed server-side from the teacher's
+    price_single plus the current admin-configured pack discounts
+    (app.services.pricing) — the client cannot supply or influence the price.
     Returns { booking_id, checkout_url|None, amount, payment_method }.
     """
     import datetime as dt
@@ -733,6 +842,7 @@ async def book_teacher_slot(
     from uuid import UUID as _UUID
     from app.config import get_settings
     from app.models.booking import Booking
+    from app.services.pricing import compute_pack_prices, get_platform_settings
 
     settings = get_settings()
     tp = _resolve_teacher(db, teacher_ref)
@@ -781,19 +891,57 @@ async def book_teacher_slot(
         if s and s.type not in ("both",):
             resolved_session_type = s.type
 
-    # Determine amount — use slot-level prices when available, else profile default
+    if body.formula not in ("single", "pack5", "pack10"):
+        raise HTTPException(status_code=422, detail="formula must be one of: single, pack5, pack10")
+
+    # Re-validate delivery capability server-side — the student may have
+    # searched a while ago, and the teacher's declared capabilities can have
+    # changed since. Never trust a stale search result.
+    if not matching.delivery_option_compatible(db, teacher_id, body.mode, resolved_session_type):
+        raise HTTPException(
+            status_code=422,
+            detail="Ce professeur ne propose pas ce format de cours (mode ou type de séance non disponible).",
+        )
+
+    if body.mode == "at_student":
+        student_profile = db.get(Profile, student_id)
+        student_wilaya = student_profile.wilaya if student_profile else None
+        teacher_base_profile = db.get(Profile, teacher_id)
+        if not student_wilaya or not matching.wilaya_compatible(tp, teacher_base_profile, student_wilaya):
+            raise HTTPException(
+                status_code=422,
+                detail="Ce professeur ne se déplace pas dans votre wilaya.",
+            )
+
+    # Fail fast (before creating anything) if the client explicitly named a
+    # subject/level that this slot doesn't actually offer — a slot can accept
+    # several subject/level combos, and the client is never trusted to name
+    # one it wasn't shown.
+    if body.subject_id is not None or body.level_id is not None:
+        _resolve_requested_subject_level(slot_id, body.subject_id, body.level_id, db)
+    for ps in (body.pack_sessions or []):
+        if ps.subject_id is not None or ps.level_id is not None:
+            ps_slot_uuid = _UUID(ps.slot_id) if ps.slot_id else None
+            _resolve_requested_subject_level(ps_slot_uuid, ps.subject_id, ps.level_id, db)
+
+    # Resolve the authoritative single-lesson price — slot-level price takes
+    # priority when the teacher set one for this specific slot, else the
+    # teacher's default rate. The client never supplies or influences this.
     resolved_slot = db.get(TeacherSlot, slot_id) if slot_id else None
-    if body.amount:
-        amount = body.amount
-    elif body.formula == "pack5":
-        pack5_price = getattr(resolved_slot, "price_pack5", 0) if resolved_slot else 0
-        amount = pack5_price if pack5_price > 0 else round(tp.price_per_session * 5 * 0.9)
-    elif body.formula == "monthly":
-        pack8_price = getattr(resolved_slot, "price_pack8", 0) if resolved_slot else 0
-        amount = pack8_price if pack8_price > 0 else round(tp.price_per_session * 8 * 0.92)
-    else:
-        slot_price = getattr(resolved_slot, "price", 0) if resolved_slot else 0
-        amount = slot_price if slot_price > 0 else tp.price_per_session
+    slot_price = getattr(resolved_slot, "price", 0) if resolved_slot else 0
+    price_single = slot_price if slot_price > 0 else tp.price_per_session
+
+    pack_prices = compute_pack_prices(price_single, get_platform_settings(db))
+    amount = pack_prices[body.formula]
+
+    # A pack purchase must name exactly as many sessions as the pack contains.
+    required_sessions = {"single": None, "pack5": 5, "pack10": 10}[body.formula]
+    if required_sessions is not None:
+        if not body.pack_sessions or len(body.pack_sessions) != required_sessions:
+            raise HTTPException(
+                status_code=422,
+                detail=f"formula={body.formula} requires exactly {required_sessions} pack_sessions entries",
+            )
 
     # Serialize pack_sessions if provided
     pack_sessions_json: Optional[str] = None
@@ -850,7 +998,7 @@ async def book_teacher_slot(
             # Stripe not configured — proceed anyway, booking stays pending
             checkout_url = f"{base_url}/student/payment/process?status=success&booking_id={booking.id}"
 
-    # For pack5/monthly: reserve all named slots
+    # For pack5/pack10: reserve all named slots
     if body.pack_sessions:
         for ps in body.pack_sessions:
             if ps.slot_id:
@@ -868,6 +1016,58 @@ async def book_teacher_slot(
         if single_slot:
             single_slot.status = "booked"
             db.add(single_slot)
+
+    # Materialize one TutoringSession row per lesson in the booking — this is
+    # what /sessions/{id}/complete later credits payout against, one lesson
+    # at a time, even for packs (see PACK_SIZES in app.services.pricing).
+    if body.pack_sessions:
+        for ps in body.pack_sessions:
+            ps_subject_id = None
+            ps_level_id = None
+            if ps.slot_id:
+                try:
+                    ps_subject_id, ps_level_id = _resolve_requested_subject_level(
+                        _UUID(ps.slot_id), ps.subject_id, ps.level_id, db
+                    )
+                except ValueError:
+                    pass
+            try:
+                ps_time = dt.time.fromisoformat(ps.slot_time)
+            except ValueError:
+                ps_time = dt.time(0, 0)
+            try:
+                ps_date = dt.date.fromisoformat(ps.date)
+            except ValueError:
+                ps_date = booking_date
+            db.add(
+                TutoringSession(
+                    booking_id=booking.id,
+                    teacher_id=teacher_id,
+                    student_id=student_id,
+                    subject_id=ps_subject_id,
+                    level_id=ps_level_id,
+                    scheduled_at=dt.datetime.combine(ps_date, ps_time),
+                    mode=body.mode,
+                    status="scheduled",
+                )
+            )
+    else:
+        single_subject_id, single_level_id = (
+            _resolve_requested_subject_level(resolved_slot.id, body.subject_id, body.level_id, db)
+            if resolved_slot else (body.subject_id, body.level_id)
+        )
+        db.add(
+            TutoringSession(
+                booking_id=booking.id,
+                teacher_id=teacher_id,
+                student_id=student_id,
+                subject_id=single_subject_id,
+                level_id=single_level_id,
+                scheduled_at=dt.datetime.combine(booking_date, slot_time or dt.time(0, 0)),
+                mode=body.mode,
+                status="scheduled",
+            )
+        )
 
     db.commit()
     db.refresh(booking)

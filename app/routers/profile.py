@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
+from app.models.enums import StudentLessonFormat
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.services.storage import upload_file
@@ -115,8 +116,22 @@ class StudentFullProfileResponse(BaseModel):
     budget_max: Optional[int] = None
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
+    lesson_format: Optional[str] = None
+    languages: Optional[List[str]] = None
     # True when an active parent link exists — student cannot edit availability
     parent_defined_availability: bool = False
+
+
+class StudentProfileUpdateRequest(BaseModel):
+    """Partial update — only fields present are touched. Used by the profile
+    page (Disponibilités / Mes créneaux disponibles, format de leçon, wilaya,
+    langues parlées) as well as any future 'edit later' flow."""
+    wilaya: Optional[str] = None
+    online_only: Optional[bool] = None
+    available_days: Optional[List[int]] = None
+    available_slots: Optional[List[str]] = None
+    lesson_format: Optional[str] = None
+    languages: Optional[List[str]] = None
 
 
 @router.get("/student", response_model=StudentFullProfileResponse, tags=["Profile"])
@@ -197,8 +212,72 @@ async def get_student_profile(
         budget_max=sp.budget_max if sp else None,
         available_days=effective_days,
         available_slots=effective_slots,
+        lesson_format=sp.lesson_format if sp else None,
+        languages=sp.languages if sp else None,
         parent_defined_availability=parent_defined_availability,
     )
+
+
+@router.put("/student", response_model=StudentFullProfileResponse, tags=["Profile"])
+async def update_student_profile(
+    payload: StudentProfileUpdateRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Partial update of student-specific profile fields.
+
+    Backs the profile page's Disponibilités / Mes créneaux disponibles,
+    format de leçon, wilaya/en ligne seulement, and langues parlées sections —
+    the same fields collected at onboarding, now editable afterwards.
+
+    Availability (available_days/available_slots) is silently ignored when an
+    accepted parent link exists — the parent owns that data in this case, same
+    lock already enforced on the read side by GET /student.
+    """
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
+    if sp is None:
+        sp = StudentProfile(user_id=uid)
+
+    if payload.wilaya is not None:
+        profile.wilaya = payload.wilaya
+        profile.updated_at = datetime.utcnow()
+        db.add(profile)
+
+    if payload.online_only is not None:
+        sp.online_only = payload.online_only
+
+    parent_link = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.student_id == uid)
+        .where(ParentStudentLink.status == "accepted")
+    ).first()
+    if parent_link is None:
+        if payload.available_days is not None:
+            sp.available_days = payload.available_days
+        if payload.available_slots is not None:
+            sp.available_slots = payload.available_slots
+
+    if payload.lesson_format is not None:
+        valid_formats = {f.value for f in StudentLessonFormat}
+        if payload.lesson_format not in valid_formats:
+            raise HTTPException(
+                status_code=422,
+                detail=f"lesson_format invalide. Valeurs acceptées : {sorted(valid_formats)}",
+            )
+        sp.lesson_format = payload.lesson_format
+
+    if payload.languages is not None:
+        sp.languages = payload.languages
+
+    db.add(sp)
+    db.commit()
+
+    return await get_student_profile(current_user=current_user, db=db)
 
 
 @router.get("/", response_model=ProfileResponse)

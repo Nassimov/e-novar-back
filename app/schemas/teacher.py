@@ -21,6 +21,40 @@ class TeacherSearchParams(BaseModel):
     size: int = Field(default=20, ge=1, le=100)
 
 
+class DeliveryOption(BaseModel):
+    """One (mode, type) capability a teacher offers — see TeacherDeliveryOption."""
+    mode: str   # "online" | "at_student" | "at_home"
+    type: str   # "individual" | "group"
+
+
+class TeacherSubjectItem(BaseModel):
+    subject_id: UUID
+    subject_name: str
+    level_id: UUID
+    level_code: str   # round-trip key for updates — see TeacherSubjectUpdateItem
+    level_name: str   # display label only
+    price_single: int
+    price_pack5: int   # computed from price_single + platform discount config, never stored
+    price_pack10: int  # computed from price_single + platform discount config, never stored
+
+
+class TeacherSubjectUpdateItem(BaseModel):
+    """Name/code based (not UUIDs) — matches the onboarding contract, so the
+    frontend never needs to look up subject/level IDs; the backend upserts by
+    name via the same helpers onboarding uses."""
+    subject: str
+    level: str
+    price_single: int = Field(ge=0)
+
+
+class TeacherDiplomaItem(BaseModel):
+    id: UUID
+    name: str
+    file_url: Optional[str] = None
+    file_type: Optional[str] = None
+    verified: bool = False
+
+
 class TeacherListItem(BaseModel):
     id: UUID
     user_id: UUID
@@ -54,42 +88,61 @@ class TeacherDetailResponse(BaseModel):
     full_name: str
     avatar_url: Optional[str] = None
     bio: Optional[str] = None
-    subjects: List[str] = []
-    levels: List[str] = []
+    headline: Optional[str] = None
+    subjects: List[TeacherSubjectItem] = []
     price_per_session: int
-    modes: List[str] = []
+    delivery_options: List[DeliveryOption] = []
     rating: float
     reviews_count: int
     badge: Optional[str] = None
     wilaya: Optional[str] = None
+    teaching_wilaya: Optional[str] = None
+    teaching_wilayas: List[str] = []
+    teaching_nationwide: bool = False
+    languages: List[str] = []
     experience_years: int
+    success_rate: Optional[float] = None
+    students_count: int = 0
+    hours_taught: int = 0
     is_approved: bool
     is_verified: bool
-    diplomas: List[dict] = []
+    diplomas: List[TeacherDiplomaItem] = []
 
     model_config = {"from_attributes": True}
 
 
 class TeacherProfileUpdate(BaseModel):
-    subjects: Optional[List[str]] = None
-    levels: Optional[List[str]] = None
-    price_per_session: Optional[int] = None
-    modes: Optional[List[str]] = None
+    headline: Optional[str] = None
     bio: Optional[str] = None
     experience_years: Optional[int] = None
+    price_per_session: Optional[int] = None
+    teaching_wilaya: Optional[str] = None
+    teaching_wilayas: Optional[List[str]] = None
+    teaching_nationwide: Optional[bool] = None
+    languages: Optional[List[str]] = None
+    # Full-replace lists: when provided, they replace the teacher's entire
+    # current set. Omit the field entirely to leave it untouched.
+    delivery_options: Optional[List[DeliveryOption]] = None
+    subjects: Optional[List[TeacherSubjectUpdateItem]] = None
+
+
+class SlotSubjectLevel(BaseModel):
+    subject_id: UUID
+    level_id: UUID
 
 
 class SlotCreate(BaseModel):
     date: str                   # "YYYY-MM-DD"
     start_time: str             # "HH:MM"
     end_time: str               # "HH:MM"
-    type: str = "individual"    # "individual" | "group" | "both"
+    type: str = "individual"    # "individual" | "group"
     max_students: int = 1
-    mode: str = "online"        # "online" | "presentiel" | "both"
-    price: int = 0              # DZD — individual single session (or group session)
-    price_pack5: int = 0        # DZD — total for pack of 5 (individual only)
-    price_pack8: int = 0        # DZD — total for pack of 8/monthly (individual only)
+    mode: str = "online"        # "online" | "at_student" | "at_home"
+    price: int = 0              # DZD — single session price. Pack5/pack10 are never
+                                 # teacher-set; they're always computed from this price
+                                 # and the platform's admin-configured discounts.
     status: str = "open"        # "open" | "blocked" | "draft"
+    subject_levels: List[SlotSubjectLevel] = Field(min_length=1)
 
 
 class SlotUpdate(BaseModel):
@@ -100,9 +153,15 @@ class SlotUpdate(BaseModel):
     max_students: Optional[int] = None
     mode: Optional[str] = None
     price: Optional[int] = None
-    price_pack5: Optional[int] = None
-    price_pack8: Optional[int] = None
     status: Optional[str] = None
+    subject_levels: Optional[List[SlotSubjectLevel]] = None  # full-replace when provided
+
+
+class SlotSubjectLevelResponse(BaseModel):
+    subject_id: UUID
+    subject_name: str
+    level_id: UUID
+    level_name: str
 
 
 class SlotResponse(BaseModel):
@@ -114,10 +173,11 @@ class SlotResponse(BaseModel):
     max_students: int
     mode: str
     price: int
-    price_pack5: int = 0
-    price_pack8: int = 0
+    price_pack5: int = 0   # computed from `price` + platform discount config, never stored
+    price_pack10: int = 0  # computed from `price` + platform discount config, never stored
     status: str
     student_name: Optional[str] = None
+    subject_levels: List[SlotSubjectLevelResponse] = []
 
     model_config = {"from_attributes": True}
 

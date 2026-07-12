@@ -48,9 +48,12 @@ class BudgetTier(str, Enum):
 
 
 class TeachingMode(str, Enum):
+    """Delivery location. Maps to public.teaching_mode (which also retains
+    legacy values presentiel/hybrid/both for backward compatibility at the
+    DB level — never write those going forward)."""
     online = "online"
-    presentiel = "presentiel"
-    hybrid = "hybrid"
+    at_student = "at_student"
+    at_home = "at_home"  # "chez le professeur"
 
 
 class SessionType(str, Enum):
@@ -68,7 +71,17 @@ class SlotStatus(str, Enum):
 class BookingFormula(str, Enum):
     single = "single"
     pack5 = "pack5"
-    monthly = "monthly"
+    pack10 = "pack10"
+
+
+class StudentLessonFormat(str, Enum):
+    """Student's onboarding lesson-format preference (Spec B #2) — a flattened
+    combination of location+size, matched against a teacher's
+    TeacherDeliveryOption rows via app.services.matching."""
+    individual_at_teacher = "individual_at_teacher"
+    individual_at_student = "individual_at_student"
+    group = "group"
+    online = "online"
 
 
 class BookingStatus(str, Enum):

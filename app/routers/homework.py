@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.homework import Homework, HomeworkGrade, HomeworkStatus, HomeworkSubmission
+from app.models.profile import Profile
 from app.models.user import User
 from app.schemas.homework import (
     HomeworkCreate,
@@ -38,8 +39,7 @@ async def list_homework(
     db: Session = Depends(get_db),
 ):
     """List homework assignments for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -89,8 +89,7 @@ async def get_homework(
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user and hw.student_id != user.id and hw.teacher_id != user.id:
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied")
@@ -111,8 +110,7 @@ async def create_homework(
     db: Session = Depends(get_db),
 ):
     """Create a homework assignment (teacher only)."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    teacher = db.exec(stmt).first()
+    teacher = db.get(Profile, UUID(current_user["id"]))
     if teacher is None:
         raise HTTPException(status_code=404, detail="Teacher not found")
 
@@ -154,8 +152,7 @@ async def update_homework(
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None or hw.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -193,8 +190,7 @@ async def submit_homework(
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None or hw.student_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -229,8 +225,7 @@ async def grade_homework(
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None or hw.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 

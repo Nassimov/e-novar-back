@@ -74,6 +74,7 @@ class TutoringSession(SQLModel, table=True):
     mode: str = Field(default="online")                  # public.teaching_mode
     status: str = Field(default="scheduled")             # public.session_status
     room_url: Optional[str] = Field(default=None)
+    replay_url: Optional[str] = Field(default=None)
     summary: Optional[str] = Field(default=None)
     notes_teacher: Optional[str] = Field(default=None)
     # Cancellation fields (added in migration 012)

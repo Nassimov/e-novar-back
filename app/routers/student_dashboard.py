@@ -16,6 +16,7 @@ from app.models.homework import Homework
 from app.models.kp import KpBalance
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile, StudentProfile, TeacherProfile
+from app.services import recommendation
 
 router = APIRouter(tags=["Student"])
 
@@ -216,60 +217,35 @@ async def student_dashboard(
         ))
 
     # ── Recommended teachers ──────────────────────────────────────────────────────
-    budget_max = sp.budget_max if sp else None
+    # Ranked by best-overall-compatibility (subjects, goals, recurring availability,
+    # budget, lesson format, wilaya/online, spoken languages) via app.services.recommendation
+    # — shared scoring logic, not a re-implementation. A teacher is never excluded
+    # solely for lacking declared schedule slots; only quality/verification gate eligibility.
+    ranked = recommendation.rank_teachers(db, uid, limit=3) if sp else []
 
-    teacher_profs = db.exec(
-        select(TeacherProfile)
-        .where(TeacherProfile.status == "approved")
-        .where(TeacherProfile.verified == True)
-        .order_by(TeacherProfile.sponsored.desc(), TeacherProfile.rating_avg.desc(), TeacherProfile.students_count.desc())
-        .limit(10)
-    ).all()
-
-    t_profile_ids = [tp.user_id for tp in teacher_profs]
+    t_profile_ids = [tp.user_id for tp in ranked]
     teacher_prof_map: dict[UUID, Profile] = {}
     if t_profile_ids:
         tpps = db.exec(select(Profile).where(Profile.id.in_(t_profile_ids))).all()
         teacher_prof_map = {p.id: p for p in tpps}
+    min_price_map = recommendation.min_price_for_teachers(db, t_profile_ids)
 
     recommended: list[DashboardTeacher] = []
-    for tp in teacher_profs:
+    for tp in ranked:
         p = teacher_prof_map.get(tp.user_id)
         if not p:
-            continue
-        if budget_max and tp.price_per_session > budget_max:
             continue
         recommended.append(DashboardTeacher(
             id=str(tp.user_id),
             name=p.full_name or "Enseignant",
             avatar_url=p.avatar_url,
             headline=tp.headline,
-            price_per_session=tp.price_per_session,
+            price_per_session=min_price_map.get(tp.user_id) or tp.price_per_session,
             rating_avg=round(tp.rating_avg or 0.0, 1),
             kp_reward=tp.kp_reward,
             verified=tp.verified,
             sponsored=tp.sponsored,
         ))
-        if len(recommended) >= 3:
-            break
-
-    # Budget-filter fallback
-    if not recommended and teacher_profs:
-        for tp in teacher_profs[:3]:
-            p = teacher_prof_map.get(tp.user_id)
-            if not p:
-                continue
-            recommended.append(DashboardTeacher(
-                id=str(tp.user_id),
-                name=p.full_name or "Enseignant",
-                avatar_url=p.avatar_url,
-                headline=tp.headline,
-                price_per_session=tp.price_per_session,
-                rating_avg=round(tp.rating_avg or 0.0, 1),
-                kp_reward=tp.kp_reward,
-                verified=tp.verified,
-                sponsored=tp.sponsored,
-            ))
 
     first_name = profile.first_name or ""
     if not first_name and profile.full_name:

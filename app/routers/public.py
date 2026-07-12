@@ -15,8 +15,24 @@ from sqlmodel import Session, select
 from app.dependencies import get_db
 from app.models.kp import KpBalance
 from app.models.profile import Profile, TeacherProfile, StudentProfile, UserRole
+from app.services.pricing import get_platform_settings
 
 router = APIRouter()
+
+
+class PricingSettingsPublic(BaseModel):
+    pack5_discount_percent: int
+    pack10_discount_percent: int
+
+
+@router.get("/pricing", response_model=PricingSettingsPublic)
+async def get_public_pricing(db: Session = Depends(get_db)):
+    """Current pack discount percentages — used to preview pack prices pre-auth."""
+    settings = get_platform_settings(db)
+    return PricingSettingsPublic(
+        pack5_discount_percent=settings.pack5_discount_percent,
+        pack10_discount_percent=settings.pack10_discount_percent,
+    )
 
 
 # ─── Response schemas ─────────────────────────────────────────────────────────

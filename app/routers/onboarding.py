@@ -16,9 +16,11 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.catalog import TeacherDiploma, TeacherMode, TeacherSubjectPrice
+from app.models.catalog import TeacherDiploma, TeacherSubjectPrice
+from app.models.enums import StudentLessonFormat
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import ParentProfile, Profile, StudentProfile, TeacherProfile
+from app.schemas.teacher import DeliveryOption
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["onboarding"])
@@ -142,8 +144,9 @@ def _upsert_level(code: str, db: Session) -> str:
     return str(result[0])
 
 
-# Valid teaching_mode enum values (migration 008 added at_student and at_home)
-_VALID_MODES = {"online", "presentiel", "at_student", "at_home"}
+# Canonical teaching_mode values going forward (legacy presentiel/hybrid/both
+# remain in the Postgres enum for compatibility but are never written).
+_VALID_MODES = {"online", "at_student", "at_home"}
 
 
 def _insert_user_role(uid: UUID, db: Session) -> None:
@@ -235,7 +238,8 @@ class StudentOnboardingRequest(BaseModel):
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
     parent_code: Optional[str] = None
-    lesson_format: Optional[str] = None  # "individual" | "group" | "both"
+    lesson_format: Optional[str] = None  # StudentLessonFormat value
+    languages: Optional[List[str]] = None
 
 
 class OnboardingStatusResponse(BaseModel):
@@ -349,7 +353,15 @@ async def complete_student_onboarding(
     if payload.available_slots is not None:
         sp.available_slots = payload.available_slots
     if payload.lesson_format is not None:
+        valid_formats = {f.value for f in StudentLessonFormat}
+        if payload.lesson_format not in valid_formats:
+            raise HTTPException(
+                status_code=422,
+                detail=f"lesson_format invalide. Valeurs acceptées : {sorted(valid_formats)}",
+            )
         sp.lesson_format = payload.lesson_format
+    if payload.languages is not None:
+        sp.languages = payload.languages
 
     db.add(sp)
 
@@ -498,10 +510,10 @@ async def get_onboarding_status(
 class TeacherSubjectPayload(BaseModel):
     subject: str
     levels: List[str] = []
-    price_single: Optional[int] = None
-    price_pack5: Optional[int] = None
-    price_monthly: Optional[int] = None
-    lesson_format: str = "both"  # "individual" | "group" | "both"
+    price_single: Optional[int] = None  # pack5/pack10 are always computed from this, never teacher-set
+    # No per-subject format field: a teacher's delivery capability is a single
+    # global set (see `delivery_options` below), inherited automatically by
+    # every subject they teach — never re-declared per subject (Spec B #9).
 
 
 class TeacherDiplomaUpload(BaseModel):
@@ -519,7 +531,7 @@ class TeacherOnboardingRequest(BaseModel):
     wilaya: Optional[str] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
-    teaching_modes: Optional[List[str]] = None
+    delivery_options: Optional[List[DeliveryOption]] = None
     teaching_wilaya: Optional[str] = None
     teaching_wilayas: Optional[List[str]] = None
     teaching_nationwide: Optional[bool] = None
@@ -674,35 +686,41 @@ async def complete_teacher_onboarding(
         logger.error("Teacher onboarding profile commit failed for %s: %s", uid, exc)
         raise HTTPException(status_code=500, detail=f"Onboarding save failed: {exc}")
 
-    # ── 7. Teaching modes (delete + re-insert) ────────────────────────────────
+    # ── 7. Delivery options (delete + re-insert) ──────────────────────────────
+    # Explicit (mode, type) pairs from the client — no more guessing/cross-join.
+    # at_student is never paired with group (enforced by the DB CHECK too).
     try:
         db.execute(
-            text("DELETE FROM public.teacher_modes WHERE teacher_id = :tid"),
+            text("DELETE FROM public.teacher_delivery_options WHERE teacher_id = :tid"),
             {"tid": str(uid)},
         )
-        seen_modes: set = set()
-        for mode in (data.teaching_modes or []):
-            if mode not in _VALID_MODES:
+        seen: set = set()
+        for opt in (data.delivery_options or []):
+            if opt.mode not in _VALID_MODES or opt.type not in ("individual", "group"):
                 continue
-            if mode in seen_modes:
+            if opt.mode == "at_student" and opt.type == "group":
                 continue
-            seen_modes.add(mode)
+            key = (opt.mode, opt.type)
+            if key in seen:
+                continue
+            seen.add(key)
             db.execute(
                 text(
-                    "INSERT INTO public.teacher_modes (teacher_id, mode) "
-                    "VALUES (:tid, :mode) ON CONFLICT DO NOTHING"
+                    "INSERT INTO public.teacher_delivery_options (teacher_id, mode, type) "
+                    "VALUES (:tid, :mode, :type) ON CONFLICT DO NOTHING"
                 ),
-                {"tid": str(uid), "mode": mode},
+                {"tid": str(uid), "mode": opt.mode, "type": opt.type},
             )
         db.commit()
     except Exception as exc:
-        logger.warning("Teacher modes insert failed for %s: %s", uid, exc)
+        logger.warning("Teacher delivery options insert failed for %s: %s", uid, exc)
         db.rollback()
 
     # ── 8. Offerings: teacher × subject × level × pricing ────────────────────
     # One row per (subject, level) combination in teacher_subject_prices.
     # This replaces the old split teacher_subjects + teacher_levels tables and
     # preserves the exact "teacher teaches Physics to 1AS and 3AS" relationship.
+    # No per-subject format: delivery capability is the single global set above.
     try:
         db.execute(
             text("DELETE FROM public.teacher_subject_prices WHERE teacher_id = :tid"),
@@ -715,13 +733,10 @@ async def complete_teacher_onboarding(
                 db.execute(
                     text(
                         "INSERT INTO public.teacher_subject_prices "
-                        "(teacher_id, subject_id, level_id, price_single, price_pack5, price_monthly, lesson_format) "
-                        "VALUES (:tid, :sid, :lid, :ps, :pp, :pm, :lf) "
+                        "(teacher_id, subject_id, level_id, price_single) "
+                        "VALUES (:tid, :sid, :lid, :ps) "
                         "ON CONFLICT (teacher_id, subject_id, level_id) DO UPDATE SET "
                         "price_single = EXCLUDED.price_single, "
-                        "price_pack5  = EXCLUDED.price_pack5, "
-                        "price_monthly = EXCLUDED.price_monthly, "
-                        "lesson_format = EXCLUDED.lesson_format, "
                         "updated_at   = now()"
                     ),
                     {
@@ -729,9 +744,6 @@ async def complete_teacher_onboarding(
                         "sid": subj_id,
                         "lid": level_id,
                         "ps": entry.price_single or 0,
-                        "pp": entry.price_pack5 or 0,
-                        "pm": entry.price_monthly or 0,
-                        "lf": entry.lesson_format or "both",
                     },
                 )
         db.commit()
@@ -787,7 +799,7 @@ async def complete_teacher_onboarding(
     logger.info(
         "Teacher onboarding submitted: uid=%s modes=%s subjects=%s diplomas=%d",
         uid,
-        data.teaching_modes or [],
+        [(o.mode, o.type) for o in (data.delivery_options or [])],
         [s.subject for s in (data.subjects or [])],
         len(diploma_records),
     )

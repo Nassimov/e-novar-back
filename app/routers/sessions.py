@@ -6,22 +6,22 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
 from app.models.booking import Booking, TutoringSession
+from app.models.catalog import Level, Subject
 from app.models.parent_link import ParentStudentLink
-from app.models.profile import Profile
+from app.models.profile import Profile, TeacherProfile
 from app.models.session import Session as SessionModel, SessionStatus
-from app.models.user import User
 from app.schemas.session import (
     JoinSessionResponse,
     SessionListResponse,
-    SessionRateRequest,
     SessionResponse,
 )
+from app.services.pricing import PACK_SIZES
 
 
 class CancelSessionRequest(BaseModel):
@@ -36,6 +36,44 @@ def _compute_refund_pct(scheduled_at: datetime) -> int:
         return 50
     return 0
 
+
+def _to_response(db: Session, session: SessionModel) -> SessionResponse:
+    """Build a SessionResponse from a real TutoringSession row, resolving
+    subject/level names via a join since the model only stores IDs."""
+    subject_name = None
+    level_name = None
+    if session.subject_id:
+        subj = db.get(Subject, session.subject_id)
+        subject_name = subj.name if subj else None
+    if session.level_id:
+        lvl = db.get(Level, session.level_id)
+        level_name = lvl.label if lvl else None
+
+    return SessionResponse(
+        id=session.id,
+        booking_id=session.booking_id,
+        teacher_id=session.teacher_id,
+        student_id=session.student_id,
+        subject_id=session.subject_id,
+        subject_name=subject_name,
+        level_id=session.level_id,
+        level_name=level_name,
+        scheduled_at=session.scheduled_at,
+        started_at=session.started_at,
+        ended_at=session.ended_at,
+        duration_min=session.duration_min,
+        mode=session.mode,
+        status=session.status,
+        room_url=session.room_url,
+        replay_url=session.replay_url,
+        summary=session.summary,
+        notes_teacher=session.notes_teacher,
+        teacher_payout_amount=session.teacher_payout_amount,
+        no_show=session.no_show,
+        created_at=session.created_at,
+    )
+
+
 router = APIRouter(tags=["sessions"])
 
 
@@ -48,8 +86,7 @@ async def list_sessions(
     db: Session = Depends(get_db),
 ):
     """List sessions for the current user."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -65,13 +102,15 @@ async def list_sessions(
         except ValueError:
             pass
 
+    query = query.order_by(SessionModel.scheduled_at.desc())
+
     sessions = db.exec(query).all()
     total = len(sessions)
     offset = (page - 1) * size
     paginated = sessions[offset: offset + size]
 
     return SessionListResponse(
-        items=[SessionResponse.model_validate(s) for s in paginated],
+        items=[_to_response(db, s) for s in paginated],
         total=total,
         page=page,
         size=size,
@@ -90,13 +129,12 @@ async def get_session(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user and session.student_id != user.id and session.teacher_id != user.id:
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied")
 
-    return SessionResponse.model_validate(session)
+    return _to_response(db, session)
 
 
 @router.post("/{session_id}/cancel")
@@ -178,56 +216,59 @@ async def cancel_session(
     }
 
 
-@router.post("/{session_id}/rate", response_model=SessionResponse)
-async def rate_session(
+@router.post("/{session_id}/complete")
+async def complete_session(
     session_id: UUID,
-    payload: SessionRateRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Rate a completed session."""
-    from datetime import datetime
+    """Mark a session completed and credit the teacher's payout for that lesson.
+
+    Payout is per-lesson, not per-booking: a pack booking's amount is split
+    evenly across its PACK_SIZES[formula] sessions (see app.services.pricing),
+    and each session credits its own share only once it is individually
+    completed here. Re-completing an already-completed/cancelled session is
+    rejected (400) — this is the idempotency guard against double-crediting.
+    """
+    uid = UUID(current_user["id"])
+    role = current_user.get("role", "student")
 
     session = db.get(SessionModel, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status != SessionStatus.completed:
-        raise HTTPException(status_code=400, detail="Can only rate completed sessions")
+    if session.teacher_id != uid and role != "admin":
+        raise HTTPException(status_code=403, detail="Only the session's teacher can mark it completed")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
-    if user is None or session.student_id != user.id:
-        raise HTTPException(status_code=403, detail="Only the student can rate this session")
+    if session.status in ("completed", "cancelled"):
+        raise HTTPException(status_code=400, detail="Session is already completed or cancelled")
 
-    session.rating = payload.rating
-    session.feedback = payload.feedback
-    session.updated_at = datetime.utcnow()
+    booking = db.get(Booking, session.booking_id) if session.booking_id else None
+    if booking is None:
+        raise HTTPException(status_code=400, detail="Session has no associated booking")
+
+    pack_size = PACK_SIZES.get(booking.formula, 1)
+    payout = round(booking.amount / pack_size)
+
+    session.status = "completed"
+    session.ended_at = datetime.utcnow()
+    session.teacher_payout_amount = payout
     db.add(session)
 
-    # Update teacher's average rating
-    from app.models.teacher import TeacherProfile
-    from sqlalchemy import func
-
-    profile = db.exec(
-        select(TeacherProfile).where(TeacherProfile.user_id == session.teacher_id)
-    ).first()
-    if profile:
-        all_sessions = db.exec(
-            select(SessionModel).where(
-                SessionModel.teacher_id == session.teacher_id,
-                SessionModel.rating.is_not(None),
-            )
-        ).all()
-        ratings = [s.rating for s in all_sessions if s.rating is not None]
-        if ratings:
-            profile.rating = sum(ratings) / len(ratings)
-            profile.reviews_count = len(ratings)
-            db.add(profile)
+    teacher_profile = db.get(TeacherProfile, session.teacher_id)
+    if teacher_profile is not None:
+        teacher_profile.wallet_balance_dzd += payout
+        db.add(teacher_profile)
 
     db.commit()
     db.refresh(session)
-    return SessionResponse.model_validate(session)
+
+    return {
+        "id": str(session.id),
+        "status": session.status,
+        "teacher_payout_amount": payout,
+        "wallet_balance_dzd": teacher_profile.wallet_balance_dzd if teacher_profile else None,
+    }
 
 
 @router.get("/{session_id}/replay")
@@ -241,8 +282,7 @@ async def get_session_replay(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user and session.student_id != user.id and session.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -259,36 +299,36 @@ async def join_session(
     db: Session = Depends(get_db),
 ):
     """Get the video room details to join a live session."""
-    from datetime import datetime
-
     session = db.get(SessionModel, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user and session.student_id != user.id and session.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
     if session.status not in (SessionStatus.scheduled, SessionStatus.live):
         raise HTTPException(status_code=400, detail="Session is not joinable")
 
-    # Create or reuse video room
-    if not session.video_room_id:
-        session.video_room_id = str(uuid.uuid4())
+    # Create or reuse video room (real field is room_url, not video_room_id)
+    if not session.room_url:
+        room_id = str(uuid.uuid4())
+        session.room_url = f"https://meet.enovar.dz/{room_id}"
         session.status = SessionStatus.live
-        session.updated_at = datetime.utcnow()
+        if session.started_at is None:
+            session.started_at = datetime.utcnow()
         db.add(session)
         db.commit()
         db.refresh(session)
 
+    room_id = session.room_url.rsplit("/", 1)[-1]
     # Generate a join token (integrate with Daily.co / Jitsi / Whereby in production)
     join_token = str(uuid.uuid4())
-    join_url = f"https://meet.enovar.dz/{session.video_room_id}?token={join_token}"
+    join_url = f"{session.room_url}?token={join_token}"
 
     return JoinSessionResponse(
         session_id=session.id,
-        room_id=session.video_room_id,
+        room_id=room_id,
         join_url=join_url,
         token=join_token,
     )
@@ -305,31 +345,35 @@ async def get_session_summary(
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user and session.student_id != user.id and session.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    if session.ai_summary:
-        return {"summary": session.ai_summary, "generated": False}
+    if session.summary:
+        return {"summary": session.summary, "generated": False}
 
     # Generate summary on demand
     from app.services.ai import generate_session_summary
 
+    subject_name = None
+    if session.subject_id:
+        subj = db.get(Subject, session.subject_id)
+        subject_name = subj.name if subj else None
+    level_name = None
+    if session.level_id:
+        lvl = db.get(Level, session.level_id)
+        level_name = lvl.label if lvl else None
+
     session_data = {
-        "subject": session.subject,
-        "level": session.level,
-        "duration_minutes": session.duration_minutes,
-        "notes": session.notes,
-        "feedback": session.feedback,
-        "rating": session.rating,
+        "subject": subject_name,
+        "level": level_name,
+        "duration_minutes": session.duration_min,
+        "notes": session.notes_teacher,
         "scheduled_at": session.scheduled_at.isoformat(),
     }
     summary = generate_session_summary(session_data)
 
-    from datetime import datetime
-    session.ai_summary = summary
-    session.updated_at = datetime.utcnow()
+    session.summary = summary
     db.add(session)
     db.commit()
 

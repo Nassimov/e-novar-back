@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import math
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -10,22 +9,31 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.teacher import TeacherPayout, TeacherProfile, TeacherSlot
+from app.models.scheduling import TeacherSlotSubject
+from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
+from app.models.profile import Profile
 from app.models.user import User
 from app.models.review import Review
+from app.services.pricing import compute_pack_prices, get_platform_settings
 from app.schemas.teacher import (
+    DeliveryOption,
     DiplomaResponse,
     DzdWithdrawalRequest,
     EvaluationCreate,
     PayoutModeUpdate,
     SlotCreate,
     SlotResponse,
+    SlotSubjectLevel,
+    SlotSubjectLevelResponse,
     SlotUpdate,
     TeacherBookingItem,
     TeacherBookingStudentInfo,
     TeacherDetailResponse,
+    TeacherDiplomaItem,
     TeacherListItem,
     TeacherListResponse,
     TeacherProfileUpdate,
+    TeacherSubjectItem,
     WalletResponse,
     WithdrawalRequest,
     WithdrawalResponse,
@@ -33,102 +41,81 @@ from app.schemas.teacher import (
 
 router = APIRouter(tags=["teachers"])
 
+# NOTE: the bare `GET /` (search), `GET /{teacher_id}`, `GET /{teacher_id}/reviews`,
+# `GET /{teacher_id}/schedule` and `GET /{teacher_id}/availability` endpoints that used
+# to live in this file were dead code — confirmed via a frontend grep that every
+# teacher-search/detail call goes through `/api/student/teachers/*`
+# (app/routers/student_teachers.py) instead. They referenced non-existent model
+# fields (TeacherProfile.id/.is_approved, Profile.is_active) and would have thrown
+# on the first request had anything ever called them. Removed rather than fixed,
+# same treatment as the dead app/routers/bookings.py in Phase 2.
 
-def _profile_to_detail(profile: TeacherProfile, user: User) -> TeacherDetailResponse:
+
+def _delivery_options_for(teacher_id: UUID, db: Session) -> List[DeliveryOption]:
+    rows = db.exec(
+        select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id == teacher_id)
+    ).all()
+    return [DeliveryOption(mode=r.mode, type=r.type) for r in rows]
+
+
+def _subjects_for(teacher_id: UUID, db: Session, settings) -> List[TeacherSubjectItem]:
+    rows = db.exec(
+        select(TeacherSubjectPrice, Subject, Level)
+        .join(Subject, Subject.id == TeacherSubjectPrice.subject_id)
+        .join(Level, Level.id == TeacherSubjectPrice.level_id)
+        .where(TeacherSubjectPrice.teacher_id == teacher_id, TeacherSubjectPrice.active == True)
+    ).all()
+    items = []
+    for tsp, subj, lvl in rows:
+        packs = compute_pack_prices(tsp.price_single, settings)
+        items.append(TeacherSubjectItem(
+            subject_id=subj.id,
+            subject_name=subj.name,
+            level_id=lvl.id,
+            level_code=lvl.code,
+            level_name=lvl.label,
+            price_single=tsp.price_single,
+            price_pack5=packs["pack5"],
+            price_pack10=packs["pack10"],
+        ))
+    return items
+
+
+def _diplomas_for(teacher_id: UUID, db: Session) -> List[TeacherDiplomaItem]:
+    rows = db.exec(select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)).all()
+    return [
+        TeacherDiplomaItem(id=r.id, name=r.name, file_url=r.file_url, file_type=r.file_type, verified=r.verified)
+        for r in rows
+    ]
+
+
+def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> TeacherDetailResponse:
+    settings = get_platform_settings(db)
     return TeacherDetailResponse(
-        id=profile.id,
+        id=profile.user_id,
         user_id=profile.user_id,
-        full_name=user.full_name,
+        full_name=user.full_name or "",
         avatar_url=user.avatar_url,
-        bio=profile.bio,
-        subjects=json.loads(profile.subjects or "[]"),
-        levels=json.loads(profile.levels or "[]"),
+        bio=profile.bio_long,
+        headline=profile.headline,
+        subjects=_subjects_for(profile.user_id, db, settings),
         price_per_session=profile.price_per_session,
-        modes=json.loads(profile.modes or '["online"]'),
-        rating=profile.rating,
+        delivery_options=_delivery_options_for(profile.user_id, db),
+        rating=profile.rating_avg,
         reviews_count=profile.reviews_count,
         badge=profile.badge,
         wilaya=user.wilaya,
+        teaching_wilaya=profile.teaching_wilaya,
+        teaching_wilayas=profile.teaching_wilayas or [],
+        teaching_nationwide=profile.teaching_nationwide,
+        languages=profile.languages or [],
         experience_years=profile.experience_years,
-        is_approved=profile.is_approved,
-        is_verified=profile.is_verified,
-        diplomas=json.loads(profile.diplomas or "[]"),
-    )
-
-
-@router.get("/", response_model=TeacherListResponse)
-async def search_teachers(
-    query: Optional[str] = Query(None),
-    wilaya: Optional[str] = Query(None),
-    subject: Optional[str] = Query(None),
-    level: Optional[str] = Query(None),
-    price_min: Optional[int] = Query(None),
-    price_max: Optional[int] = Query(None),
-    min_rating: Optional[float] = Query(None),
-    mode: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
-    size: int = Query(20, ge=1, le=100),
-    db: Session = Depends(get_db),
-):
-    """Search and filter teachers."""
-    stmt = select(TeacherProfile, User).join(User, User.id == TeacherProfile.user_id).where(
-        TeacherProfile.is_approved == True,
-        User.is_active == True,
-    )
-
-    if price_min is not None:
-        stmt = stmt.where(TeacherProfile.price_per_session >= price_min)
-    if price_max is not None:
-        stmt = stmt.where(TeacherProfile.price_per_session <= price_max)
-    if min_rating is not None:
-        stmt = stmt.where(TeacherProfile.rating >= min_rating)
-    if wilaya:
-        stmt = stmt.where(User.wilaya == wilaya)
-
-    results = db.exec(stmt).all()
-
-    items = []
-    for profile, user in results:
-        subjects_list = json.loads(profile.subjects or "[]")
-        levels_list = json.loads(profile.levels or "[]")
-        modes_list = json.loads(profile.modes or '["online"]')
-
-        if subject and subject not in subjects_list:
-            continue
-        if level and level not in levels_list:
-            continue
-        if mode and mode not in modes_list:
-            continue
-        if query and query.lower() not in user.full_name.lower():
-            continue
-
-        items.append(TeacherListItem(
-            id=profile.id,
-            user_id=profile.user_id,
-            full_name=user.full_name,
-            avatar_url=user.avatar_url,
-            subjects=subjects_list,
-            levels=levels_list,
-            price_per_session=profile.price_per_session,
-            modes=modes_list,
-            rating=profile.rating,
-            reviews_count=profile.reviews_count,
-            badge=profile.badge,
-            wilaya=user.wilaya,
-            experience_years=profile.experience_years,
-            is_approved=profile.is_approved,
-        ))
-
-    total = len(items)
-    offset = (page - 1) * size
-    paginated = items[offset: offset + size]
-
-    return TeacherListResponse(
-        items=paginated,
-        total=total,
-        page=page,
-        size=size,
-        pages=math.ceil(total / size) if total else 0,
+        success_rate=profile.success_rate,
+        students_count=profile.students_count,
+        hours_taught=profile.hours_taught,
+        is_approved=(profile.status == "approved"),
+        is_verified=profile.verified,
+        diplomas=_diplomas_for(profile.user_id, db),
     )
 
 
@@ -138,8 +125,7 @@ async def get_my_teacher_profile(
     db: Session = Depends(get_db),
 ):
     """Get the logged-in teacher's profile."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -148,7 +134,11 @@ async def get_my_teacher_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    return _profile_to_detail(profile, user)
+    return _profile_to_detail(profile, user, db)
+
+
+_VALID_DELIVERY_MODES = {"online", "at_student", "at_home"}
+_VALID_DELIVERY_TYPES = {"individual", "group"}
 
 
 @router.put("/me", response_model=TeacherDetailResponse)
@@ -157,40 +147,93 @@ async def update_my_teacher_profile(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Update the logged-in teacher's profile."""
-    from datetime import datetime
-
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    """Update the logged-in teacher's profile. Every field is optional/partial —
+    only fields present in the request body are touched. `delivery_options` and
+    `subjects`, when provided, fully replace the teacher's current set."""
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    stmt2 = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-    profile = db.exec(stmt2).first()
+    profile = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == user.id)).first()
     if profile is None:
         profile = TeacherProfile(user_id=user.id)
 
-    if payload.subjects is not None:
-        profile.subjects = json.dumps(payload.subjects)
-    if payload.levels is not None:
-        profile.levels = json.dumps(payload.levels)
-    if payload.price_per_session is not None:
-        profile.price_per_session = payload.price_per_session
-    if payload.modes is not None:
-        profile.modes = json.dumps(payload.modes)
+    if payload.headline is not None:
+        profile.headline = payload.headline
     if payload.bio is not None:
-        profile.bio = payload.bio
+        profile.bio_long = payload.bio
     if payload.experience_years is not None:
         profile.experience_years = payload.experience_years
-    profile.updated_at = datetime.utcnow()
-
+    if payload.price_per_session is not None:
+        profile.price_per_session = payload.price_per_session
+    if payload.teaching_wilaya is not None:
+        profile.teaching_wilaya = payload.teaching_wilaya
+    if payload.teaching_wilayas is not None:
+        profile.teaching_wilayas = payload.teaching_wilayas
+    if payload.teaching_nationwide is not None:
+        profile.teaching_nationwide = payload.teaching_nationwide
+    if payload.languages is not None:
+        profile.languages = payload.languages
     db.add(profile)
     db.commit()
     db.refresh(profile)
-    return _profile_to_detail(profile, user)
+
+    # Delivery options: at-least-one rule + at_student-is-individual-only rule,
+    # enforced here as defense in depth alongside the DB CHECK constraint
+    # (migration 046) — see Spec B #8.
+    if payload.delivery_options is not None:
+        for opt in payload.delivery_options:
+            if opt.mode not in _VALID_DELIVERY_MODES or opt.type not in _VALID_DELIVERY_TYPES:
+                raise HTTPException(status_code=422, detail=f"Invalid delivery option: {opt.mode}/{opt.type}")
+            if opt.mode == "at_student" and opt.type == "group":
+                raise HTTPException(
+                    status_code=422,
+                    detail="Un cours 'chez l'élève' ne peut pas être en groupe (individuel uniquement).",
+                )
+        # De-duplicate before checking emptiness, so callers can't sneak past the
+        # at-least-one rule with repeated identical entries.
+        deduped = {(o.mode, o.type) for o in payload.delivery_options}
+        if not deduped:
+            raise HTTPException(
+                status_code=422,
+                detail="Au moins un mode d'enseignement doit être sélectionné.",
+            )
+        for row in db.exec(
+            select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id == user.id)
+        ).all():
+            db.delete(row)
+        db.commit()
+        for mode, type_ in deduped:
+            db.add(TeacherDeliveryOption(teacher_id=user.id, mode=mode, type=type_))
+        db.commit()
+
+    # Subjects: full replace against the caller-provided set only. Upsert by
+    # name/code (same helpers onboarding uses) so the frontend never needs to
+    # resolve subject/level UUIDs itself.
+    if payload.subjects is not None:
+        from app.routers.onboarding import _upsert_level, _upsert_subject
+
+        for row in db.exec(
+            select(TeacherSubjectPrice).where(TeacherSubjectPrice.teacher_id == user.id)
+        ).all():
+            db.delete(row)
+        db.commit()
+        for item in payload.subjects:
+            subj_id = _upsert_subject(item.subject, db)
+            level_id = _upsert_level(item.level, db)
+            db.add(TeacherSubjectPrice(
+                teacher_id=user.id,
+                subject_id=subj_id,
+                level_id=level_id,
+                price_single=item.price_single,
+            ))
+        db.commit()
+
+    db.refresh(profile)
+    return _profile_to_detail(profile, user, db)
 
 
-@router.post("/me/diplomas", status_code=status.HTTP_201_CREATED)
+@router.post("/me/diplomas", response_model=DiplomaResponse, status_code=status.HTTP_201_CREATED)
 async def upload_diploma(
     file: UploadFile,
     name: str = Query(...),
@@ -198,57 +241,42 @@ async def upload_diploma(
     db: Session = Depends(get_db),
 ):
     """Upload a diploma or certificate for the teacher."""
-    from datetime import datetime
-    import uuid
     from app.services.storage import upload_file
 
     contents = await file.read()
     url = upload_file(contents, file.filename or "diploma.pdf", file.content_type, folder="diplomas")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    stmt2 = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-    profile = db.exec(stmt2).first()
+    profile = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == user.id)).first()
     if profile is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    diplomas = json.loads(profile.diplomas or "[]")
-    diploma_id = str(uuid.uuid4())
-    diplomas.append({"id": diploma_id, "name": name, "url": url})
-    profile.diplomas = json.dumps(diplomas)
-    profile.updated_at = datetime.utcnow()
-    db.add(profile)
+    diploma = TeacherDiploma(teacher_id=user.id, name=name, file_url=url, file_type=file.content_type)
+    db.add(diploma)
     db.commit()
-    return {"id": diploma_id, "name": name, "url": url}
+    db.refresh(diploma)
+    return DiplomaResponse(id=str(diploma.id), name=diploma.name, url=diploma.file_url or "")
 
 
 @router.delete("/me/diplomas/{diploma_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_diploma(
-    diploma_id: str,
+    diploma_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
     """Remove a diploma from the teacher's profile."""
-    from datetime import datetime
-
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    stmt2 = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-    profile = db.exec(stmt2).first()
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    diploma = db.get(TeacherDiploma, diploma_id)
+    if diploma is None or diploma.teacher_id != user.id:
+        raise HTTPException(status_code=404, detail="Diploma not found")
 
-    diplomas = json.loads(profile.diplomas or "[]")
-    diplomas = [d for d in diplomas if d.get("id") != diploma_id]
-    profile.diplomas = json.dumps(diplomas)
-    profile.updated_at = datetime.utcnow()
-    db.add(profile)
+    db.delete(diploma)
     db.commit()
     return None
 
@@ -262,10 +290,7 @@ async def update_bank_card(
     db: Session = Depends(get_db),
 ):
     """Update the teacher's bank card / withdrawal info."""
-    from datetime import datetime
-
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -274,16 +299,127 @@ async def update_bank_card(
     if profile is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    profile.bank_iban = iban
+    profile.iban = iban
     profile.bank_holder = holder
     profile.bank_last4 = last4
-    profile.updated_at = datetime.utcnow()
     db.add(profile)
     db.commit()
     return {"message": "Bank card updated"}
 
 
-def _slot_to_response(s: TeacherSlot, student_name: Optional[str] = None) -> SlotResponse:
+def _slot_subject_levels_for(slot_id: UUID, db: Session) -> List[SlotSubjectLevelResponse]:
+    rows = db.exec(
+        select(TeacherSlotSubject, Subject, Level)
+        .join(Subject, Subject.id == TeacherSlotSubject.subject_id)
+        .join(Level, Level.id == TeacherSlotSubject.level_id)
+        .where(TeacherSlotSubject.slot_id == slot_id)
+    ).all()
+    return [
+        SlotSubjectLevelResponse(
+            subject_id=subj.id, subject_name=subj.name, level_id=lvl.id, level_name=lvl.label,
+        )
+        for _, subj, lvl in rows
+    ]
+
+
+def _validate_subject_levels(
+    teacher_id: UUID, subject_levels: List[SlotSubjectLevel], db: Session
+) -> None:
+    """Every (subject_id, level_id) combo must already be an active row in this
+    teacher's own subject catalog — a teacher can't offer a slot for something
+    they haven't configured in their profile."""
+    catalog = set(
+        db.exec(
+            select(TeacherSubjectPrice.subject_id, TeacherSubjectPrice.level_id).where(
+                TeacherSubjectPrice.teacher_id == teacher_id,
+                TeacherSubjectPrice.active == True,
+            )
+        ).all()
+    )
+    for combo in subject_levels:
+        if (combo.subject_id, combo.level_id) not in catalog:
+            subj = db.get(Subject, combo.subject_id)
+            lvl = db.get(Level, combo.level_id)
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Vous n'enseignez pas « {subj.name if subj else combo.subject_id} — "
+                    f"{lvl.label if lvl else combo.level_id} » dans votre profil. "
+                    "Ajoutez cette matière/niveau avant de créer un créneau pour elle."
+                ),
+            )
+
+
+def _validate_delivery_option(teacher_id: UUID, mode: str, type_: str, db: Session) -> None:
+    """The (mode, type) pair for a slot must be one the teacher has actually
+    declared in their profile — those are the ONLY values selectable here."""
+    if mode == "at_student" and type_ == "group":
+        raise HTTPException(
+            status_code=422,
+            detail="Les cours collectifs ne sont pas proposés chez l'élève (individuel uniquement).",
+        )
+    exists = db.exec(
+        select(TeacherDeliveryOption).where(
+            TeacherDeliveryOption.teacher_id == teacher_id,
+            TeacherDeliveryOption.mode == mode,
+            TeacherDeliveryOption.type == type_,
+        )
+    ).first()
+    if exists is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Vous n'avez pas déclaré la capacité « {mode} / {type_} » dans votre profil. "
+                "Modifiez vos préférences d'enseignement avant de créer ce créneau."
+            ),
+        )
+
+
+def _validate_capacity(type_: str, max_students: int) -> None:
+    if type_ == "individual" and max_students != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Un créneau individuel ne peut accueillir qu'un seul étudiant.",
+        )
+    if type_ == "group" and max_students < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="Un créneau collectif doit accepter au moins 2 étudiants.",
+        )
+
+
+def _check_overlap(
+    teacher_id: UUID,
+    slot_date,
+    start_time,
+    end_time,
+    db: Session,
+    exclude_slot_id: Optional[UUID] = None,
+) -> None:
+    existing = db.exec(
+        select(TeacherSlot).where(
+            TeacherSlot.teacher_id == teacher_id,
+            TeacherSlot.slot_date == slot_date,
+            TeacherSlot.status != "cancelled",
+        )
+    ).all()
+    for other in existing:
+        if exclude_slot_id and other.id == exclude_slot_id:
+            continue
+        if start_time < other.end_time and end_time > other.start_time:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Chevauchement avec un créneau existant "
+                    f"({str(other.start_time)[:5]}–{str(other.end_time)[:5]})."
+                ),
+            )
+
+
+def _slot_to_response(s: TeacherSlot, db: Session, student_name: Optional[str] = None) -> SlotResponse:
+    from app.services.pricing import compute_pack_prices, get_platform_settings
+
+    packs = compute_pack_prices(s.price, get_platform_settings(db))
     return SlotResponse(
         id=str(s.id),
         date=s.slot_date.isoformat(),
@@ -293,10 +429,11 @@ def _slot_to_response(s: TeacherSlot, student_name: Optional[str] = None) -> Slo
         max_students=s.max_students,
         mode=s.mode,
         price=s.price,
-        price_pack5=getattr(s, "price_pack5", 0) or 0,
-        price_pack8=getattr(s, "price_pack8", 0) or 0,
+        price_pack5=packs["pack5"],
+        price_pack10=packs["pack10"],
         status=s.status,
         student_name=student_name,
+        subject_levels=_slot_subject_levels_for(s.id, db),
     )
 
 
@@ -337,7 +474,7 @@ async def list_my_slots(
                 if prof:
                     student_name_map[b.slot_id] = prof.full_name or ""
 
-    return [_slot_to_response(s, student_name_map.get(s.id)) for s in slots]
+    return [_slot_to_response(s, db, student_name_map.get(s.id)) for s in slots]
 
 
 @router.post("/me/slots", response_model=SlotResponse, status_code=status.HTTP_201_CREATED)
@@ -363,6 +500,11 @@ async def create_slot(
     if end_time <= start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
+    _validate_capacity(payload.type, payload.max_students)
+    _validate_delivery_option(teacher_id, payload.mode, payload.type, db)
+    _validate_subject_levels(teacher_id, payload.subject_levels, db)
+    _check_overlap(teacher_id, slot_date, start_time, end_time, db)
+
     slot = TeacherSlot(
         teacher_id=teacher_id,
         slot_date=slot_date,
@@ -372,14 +514,17 @@ async def create_slot(
         max_students=payload.max_students,
         mode=payload.mode,
         price=payload.price,
-        price_pack5=payload.price_pack5 if payload.type != "group" else 0,
-        price_pack8=payload.price_pack8 if payload.type != "group" else 0,
         status=payload.status,
     )
     db.add(slot)
     db.commit()
     db.refresh(slot)
-    return _slot_to_response(slot)
+
+    for combo in payload.subject_levels:
+        db.add(TeacherSlotSubject(slot_id=slot.id, subject_id=combo.subject_id, level_id=combo.level_id))
+    db.commit()
+
+    return _slot_to_response(slot, db)
 
 
 @router.put("/me/slots/{slot_id}", response_model=SlotResponse)
@@ -412,17 +557,39 @@ async def update_slot(
         slot.mode = payload.mode
     if payload.price is not None:
         slot.price = payload.price
-    if payload.price_pack5 is not None:
-        slot.price_pack5 = payload.price_pack5 if slot.type != "group" else 0
-    if payload.price_pack8 is not None:
-        slot.price_pack8 = payload.price_pack8 if slot.type != "group" else 0
     if payload.status is not None:
         slot.status = payload.status
+
+    if slot.end_time <= slot.start_time:
+        raise HTTPException(status_code=422, detail="end_time must be after start_time")
+    _validate_capacity(slot.type, slot.max_students)
+    _validate_delivery_option(teacher_id, slot.mode, slot.type, db)
+    _check_overlap(teacher_id, slot.slot_date, slot.start_time, slot.end_time, db, exclude_slot_id=slot.id)
+
+    if payload.subject_levels is not None:
+        if len(payload.subject_levels) == 0:
+            raise HTTPException(
+                status_code=422,
+                detail="Un créneau doit accepter au moins une matière/niveau.",
+            )
+        _validate_subject_levels(teacher_id, payload.subject_levels, db)
 
     db.add(slot)
     db.commit()
     db.refresh(slot)
-    return _slot_to_response(slot)
+
+    if payload.subject_levels is not None:
+        existing = db.exec(
+            select(TeacherSlotSubject).where(TeacherSlotSubject.slot_id == slot.id)
+        ).all()
+        for row in existing:
+            db.delete(row)
+        db.commit()
+        for combo in payload.subject_levels:
+            db.add(TeacherSlotSubject(slot_id=slot.id, subject_id=combo.subject_id, level_id=combo.level_id))
+        db.commit()
+
+    return _slot_to_response(slot, db)
 
 
 @router.delete("/me/slots/{slot_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -454,8 +621,7 @@ async def get_my_students(
     """Get the list of students who have booked with this teacher."""
     from app.models.booking import Booking
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -585,9 +751,8 @@ async def accept_booking(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Accept a booking: capture Stripe payment and credit wallet."""
+    """Accept a booking: capture Stripe payment. Wallet crediting happens per-lesson, on session completion."""
     from app.models.booking import Booking
-    from app.models.profile import TeacherProfile as _TeacherProfile
     from app.services.stripe import capture_payment_intent, get_checkout_session
 
     teacher_id = UUID(current_user["id"])
@@ -625,22 +790,13 @@ async def accept_booking(
             slot.status = "booked"
             db.add(slot)
 
-    # Credit teacher wallet — per-session amount for packs, full amount for single
-    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id)).first()
-    if tp:
-        if booking.formula == "pack5":
-            amount_credited = round(booking.amount / 5)
-        elif booking.formula == "monthly":
-            amount_credited = round(booking.amount / 8)
-        else:
-            amount_credited = booking.amount
-        tp.wallet_balance_dzd += amount_credited
-        db.add(tp)
-    else:
-        amount_credited = booking.amount
-
+    # Wallet crediting no longer happens here. Payout is per-lesson, not
+    # per-booking: accepting a booking unlocks it for scheduling, but each
+    # lesson only credits the teacher's wallet when its own `TutoringSession`
+    # is marked completed via POST /sessions/{id}/complete (see
+    # app/routers/sessions.py) — Phase 2b of the implementation plan.
     db.commit()
-    return {"status": "confirmed", "amount_credited": amount_credited}
+    return {"status": "confirmed"}
 
 
 @router.post("/me/bookings/{booking_id}/refuse")
@@ -782,8 +938,7 @@ async def list_evaluations(
     db: Session = Depends(get_db),
 ):
     """List evaluations written by the teacher."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -809,8 +964,7 @@ async def create_evaluation(
     db: Session = Depends(get_db),
 ):
     """Create a student evaluation."""
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -840,8 +994,7 @@ async def update_evaluation(
     if review is None:
         raise HTTPException(status_code=404, detail="Evaluation not found")
 
-    stmt = select(User).where(User.supabase_id == current_user["id"])
-    user = db.exec(stmt).first()
+    user = db.get(Profile, UUID(current_user["id"]))
     if user is None or review.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -852,97 +1005,7 @@ async def update_evaluation(
     return {"message": "Evaluation updated"}
 
 
-@router.get("/{teacher_id}", response_model=TeacherDetailResponse)
-async def get_teacher(teacher_id: UUID, db: Session = Depends(get_db)):
-    """Get a teacher's public profile."""
-    stmt = select(TeacherProfile, User).join(User, User.id == TeacherProfile.user_id).where(
-        TeacherProfile.id == teacher_id
-    )
-    result = db.exec(stmt).first()
-    if result is None:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-    profile, user = result
-    return _profile_to_detail(profile, user)
-
-
-@router.get("/{teacher_id}/reviews")
-async def get_teacher_reviews(
-    teacher_id: UUID,
-    page: int = Query(1, ge=1),
-    size: int = Query(10, ge=1, le=50),
-    db: Session = Depends(get_db),
-):
-    """Get reviews for a teacher."""
-    stmt = select(TeacherProfile).where(TeacherProfile.id == teacher_id)
-    profile = db.exec(stmt).first()
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    reviews = db.exec(
-        select(Review).where(Review.teacher_id == profile.user_id)
-    ).all()
-    total = len(reviews)
-    offset = (page - 1) * size
-    paginated = reviews[offset: offset + size]
-
-    return {
-        "items": [
-            {
-                "id": str(r.id),
-                "rating": r.rating,
-                "comment": r.comment,
-                "created_at": r.created_at.isoformat(),
-            }
-            for r in paginated
-        ],
-        "total": total,
-        "page": page,
-        "size": size,
-    }
-
-
-@router.get("/{teacher_id}/schedule")
-async def get_teacher_schedule(teacher_id: UUID, db: Session = Depends(get_db)):
-    """Get the booked sessions for a teacher (public)."""
-    from app.models.booking import Booking
-
-    stmt = select(TeacherProfile).where(TeacherProfile.id == teacher_id)
-    profile = db.exec(stmt).first()
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    bookings = db.exec(
-        select(Booking).where(
-            Booking.teacher_id == profile.user_id,
-            Booking.status == "confirmed",
-        )
-    ).all()
-    return [
-        {
-            "date": b.booking_date.isoformat() if b.booking_date else None,
-            "slot_time": str(b.slot_time)[:5] if b.slot_time else None,
-            "duration_min": b.duration_min,
-        }
-        for b in bookings
-        if b.booking_date
-    ]
-
-
-@router.get("/{teacher_id}/availability")
-async def get_teacher_availability(teacher_id: UUID, db: Session = Depends(get_db)):
-    """Get the open slots for a teacher."""
-    import datetime as dt
-    stmt = select(TeacherProfile).where(TeacherProfile.user_id == teacher_id)
-    profile = db.exec(stmt).first()
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    today = dt.date.today()
-    slots = db.exec(
-        select(TeacherSlot).where(
-            TeacherSlot.teacher_id == teacher_id,
-            TeacherSlot.status == "open",
-            TeacherSlot.slot_date >= today,
-        )
-    ).all()
-    return [_slot_to_response(s) for s in slots]
+# `GET /{teacher_id}`, `/{teacher_id}/reviews`, `/{teacher_id}/schedule`,
+# `/{teacher_id}/availability` used to live here — removed as dead code (see
+# note near the top of this file). The equivalent, working, frontend-wired
+# functionality is in app/routers/student_teachers.py under /api/student/teachers/*.

@@ -4,26 +4,30 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class SessionResponse(BaseModel):
     id: UUID
     booking_id: Optional[UUID] = None
-    student_id: UUID
     teacher_id: UUID
-    subject: Optional[str] = None
-    level: Optional[str] = None
+    student_id: UUID
+    subject_id: Optional[UUID] = None
+    subject_name: Optional[str] = None
+    level_id: Optional[UUID] = None
+    level_name: Optional[str] = None
     scheduled_at: datetime
-    duration_minutes: int
+    started_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    duration_min: Optional[int] = None
     mode: str
     status: str
-    video_room_id: Optional[str] = None
+    room_url: Optional[str] = None
     replay_url: Optional[str] = None
-    rating: Optional[int] = None
-    feedback: Optional[str] = None
-    notes: Optional[str] = None
-    ai_summary: Optional[str] = None
+    summary: Optional[str] = None
+    notes_teacher: Optional[str] = None
+    teacher_payout_amount: int
+    no_show: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -35,11 +39,6 @@ class SessionListResponse(BaseModel):
     page: int
     size: int
     pages: int
-
-
-class SessionRateRequest(BaseModel):
-    rating: int = Field(ge=1, le=5)
-    feedback: Optional[str] = None
 
 
 class JoinSessionResponse(BaseModel):
