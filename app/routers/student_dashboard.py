@@ -63,6 +63,8 @@ class StudentDashboardResponse(BaseModel):
     kp_level: int
     streak_days: int
     sessions_today: int
+    sessions_completed_total: int
+    hours_completed_total: float
     next_session_at: Optional[str] = None
     upcoming_sessions: List[DashboardSession]
     homework: List[DashboardHomework]
@@ -168,6 +170,18 @@ async def student_dashboard(
     ).all()
     streak_days = _compute_streak_with_shield(recent_sessions, uid, db)
 
+    # ── Lifetime totals (for the profile page stats cards) ─────────────────────
+    completed_sessions = db.exec(
+        select(TutoringSession).where(
+            TutoringSession.student_id == uid,
+            TutoringSession.status == "completed",
+        )
+    ).all()
+    sessions_completed_total = len(completed_sessions)
+    hours_completed_total = round(
+        sum((s.duration_min or 0) for s in completed_sessions) / 60.0, 1
+    )
+
     # ── Teacher names for upcoming sessions ───────────────────────────────────────
     teacher_ids = list({s.teacher_id for s in upcoming_raw[:8]})
     teachers_map: dict[UUID, Profile] = {}
@@ -264,6 +278,8 @@ async def student_dashboard(
         kp_level=kp.level if kp else 1,
         streak_days=streak_days,
         sessions_today=sessions_today,
+        sessions_completed_total=sessions_completed_total,
+        hours_completed_total=hours_completed_total,
         next_session_at=next_session_at,
         upcoming_sessions=upcoming_sessions,
         homework=homework_list,

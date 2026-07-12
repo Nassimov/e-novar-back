@@ -4,14 +4,17 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.enums import StudentLessonFormat
 from app.models.parent_link import ParentStudentLink
+from app.models.payment import PaymentMethod
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.services.storage import upload_file
 
@@ -44,12 +47,51 @@ class ProfileUpdateRequest(BaseModel):
     avatar_url: Optional[str] = None
 
 
+_CARD_TYPES = {"cib", "edahabia", "visa"}
+_WALLET_TYPES = {"baridimob"}
+_PHONE_RE = re.compile(r"^0[5-7]\d{8}$")   # Algerian mobile: 05/06/07 + 8 digits
+
+
 class PaymentMethodCreate(BaseModel):
+    """Display/reference metadata only — never the full card number, CVV or
+    expiry (this platform never processes card payments directly).
+
+    - cib / edahabia / visa (bank card rails): `card_last4` required, exactly
+      4 digits — the last 4 digits of the card, never the full PAN.
+    - baridimob (Algérie Poste mobile wallet): identified by the registered
+      Algerian mobile number, not a card — `phone` required instead.
+    """
     type: str
     holder_name: str
     card_last4: Optional[str] = None
-    iban: Optional[str] = None
+    phone: Optional[str] = None
     bank_name: Optional[str] = None
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, v: str) -> str:
+        if v not in _CARD_TYPES | _WALLET_TYPES:
+            raise ValueError(f"type must be one of {sorted(_CARD_TYPES | _WALLET_TYPES)}")
+        return v
+
+    @field_validator("holder_name")
+    @classmethod
+    def _holder_name_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("holder_name is required")
+        return v.strip()
+
+    @model_validator(mode="after")
+    def _identifier_matches_type(self) -> "PaymentMethodCreate":
+        if self.type in _CARD_TYPES:
+            if not self.card_last4 or not re.fullmatch(r"\d{4}", self.card_last4):
+                raise ValueError("card_last4 must be exactly 4 digits for cib/edahabia/visa")
+            self.phone = None
+        else:  # baridimob
+            if not self.phone or not _PHONE_RE.fullmatch(self.phone):
+                raise ValueError("phone must be a valid Algerian mobile number (05/06/07 + 8 digits) for baridimob")
+            self.card_last4 = None
+        return self
 
 
 class PaymentMethodResponse(BaseModel):
@@ -57,6 +99,7 @@ class PaymentMethodResponse(BaseModel):
     type: str
     holder_name: str
     card_last4: Optional[str] = None
+    phone: Optional[str] = None
     bank_name: Optional[str] = None
     is_default: bool = False
 
@@ -436,12 +479,31 @@ async def update_notification_prefs(
     return {"message": "Notification preferences updated"}
 
 
+def _pm_to_response(pm: PaymentMethod) -> PaymentMethodResponse:
+    return PaymentMethodResponse(
+        id=str(pm.id),
+        type=pm.type,
+        holder_name=pm.holder_name,
+        card_last4=pm.last4,
+        phone=pm.phone,
+        bank_name=pm.bank_name,
+        is_default=pm.is_default,
+    )
+
+
 @router.get("/payment-methods", response_model=List[PaymentMethodResponse])
 async def list_payment_methods(
     current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """List saved payment methods (stub — full implementation in payments router)."""
-    return []
+    """List the current user's saved payment methods (default first)."""
+    uid = UUID(current_user["id"])
+    rows = db.exec(
+        select(PaymentMethod)
+        .where(PaymentMethod.user_id == uid)
+        .order_by(PaymentMethod.is_default.desc(), PaymentMethod.created_at.desc())
+    ).all()
+    return [_pm_to_response(pm) for pm in rows]
 
 
 @router.post(
@@ -452,23 +514,65 @@ async def list_payment_methods(
 async def add_payment_method(
     payload: PaymentMethodCreate,
     current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Add a payment method (stub)."""
-    import uuid as _uuid
-    return PaymentMethodResponse(
-        id=str(_uuid.uuid4()),
+    """Add a payment method. Pydantic validators on PaymentMethodCreate already
+    enforce the correct identifier per rail (4-digit last4 for card rails,
+    Algerian mobile number for baridimob)."""
+    uid = UUID(current_user["id"])
+
+    existing_count = db.exec(
+        select(PaymentMethod).where(PaymentMethod.user_id == uid)
+    ).all()
+    is_first = len(existing_count) == 0
+
+    pm = PaymentMethod(
+        user_id=uid,
         type=payload.type,
         holder_name=payload.holder_name,
-        card_last4=payload.card_last4,
+        last4=payload.card_last4,
+        phone=payload.phone,
         bank_name=payload.bank_name,
-        is_default=False,
+        is_default=is_first,   # first saved method becomes the default automatically
     )
+    db.add(pm)
+    db.commit()
+    db.refresh(pm)
+    return _pm_to_response(pm)
 
 
 @router.delete("/payment-methods/{method_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_payment_method(
     method_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    """Remove a saved payment method (stub)."""
+    """Remove a saved payment method. If it was the default, promote the
+    next-oldest remaining method (if any) so a default is never silently lost."""
+    uid = UUID(current_user["id"])
+    try:
+        pm_id = UUID(method_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+
+    pm = db.exec(
+        select(PaymentMethod).where(PaymentMethod.id == pm_id, PaymentMethod.user_id == uid)
+    ).first()
+    if pm is None:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+
+    was_default = pm.is_default
+    db.delete(pm)
+    db.commit()
+
+    if was_default:
+        next_pm = db.exec(
+            select(PaymentMethod)
+            .where(PaymentMethod.user_id == uid)
+            .order_by(PaymentMethod.created_at.desc())
+        ).first()
+        if next_pm is not None:
+            next_pm.is_default = True
+            db.add(next_pm)
+            db.commit()
     return None

@@ -100,6 +100,19 @@ def _slugify(text: str) -> str:
     return text.strip("_")
 
 
+def _make_teacher_slug(first_name: str, last_name: str, user_id: UUID) -> str:
+    """URL-safe teacher slug: prenom-nom-uuid8. Same convention as the
+    read-time fallback in app.routers.student_teachers._make_teacher_slug —
+    kept in sync so a slug generated here is never regenerated differently."""
+    def slugify(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
+        return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    fn = slugify(first_name) or "prof"
+    ln = slugify(last_name) or "enovar"
+    uid8 = str(user_id).replace("-", "")[:8]
+    return f"{fn}-{ln}-{uid8}"
+
+
 def _upsert_subject(name: str, db: Session) -> str:
     """Get or create a subject by name (case-insensitive). Returns subject UUID as str."""
     row = db.execute(
@@ -657,7 +670,10 @@ async def complete_teacher_onboarding(
     # ── 5. TeacherProfile ─────────────────────────────────────────────────────
     tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == uid)).first()
     if tp is None:
-        tp = TeacherProfile(user_id=uid)
+        tp = TeacherProfile(
+            user_id=uid,
+            slug=_make_teacher_slug(profile.first_name or "", profile.last_name or "", uid),
+        )
 
     tp.status = "pending"
     tp.headline = data.bio or ""

@@ -19,6 +19,11 @@ class PaymentMethod(SQLModel, table=True):
     """
     Mirrors public.payment_methods.
     Stores a saved payment instrument for a user (tokenized CIB, Edahabia, etc.)
+
+    Display/reference metadata only — never the full card number, CVV or
+    expiry (migration 056). Card rails (cib/edahabia/visa) carry `last4`;
+    the wallet rail (baridimob, identified by phone number, not a card)
+    carries `phone` instead.
     """
 
     __tablename__ = "payment_methods"
@@ -29,6 +34,9 @@ class PaymentMethod(SQLModel, table=True):
     label: Optional[str] = Field(default=None)
     last4: Optional[str] = Field(default=None)
     token: Optional[str] = Field(default=None)
+    holder_name: Optional[str] = Field(default=None)
+    phone: Optional[str] = Field(default=None)           # baridimob only
+    bank_name: Optional[str] = Field(default=None)
     is_default: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
