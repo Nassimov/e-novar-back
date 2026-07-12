@@ -396,11 +396,13 @@ def _check_overlap(
     db: Session,
     exclude_slot_id: Optional[UUID] = None,
 ) -> None:
+    # Slots are hard-deleted on cancellation (see delete_slot) — there is no
+    # "cancelled" value in the slot_status enum (open/booked/blocked/draft),
+    # so every remaining row for this date is relevant to overlap checking.
     existing = db.exec(
         select(TeacherSlot).where(
             TeacherSlot.teacher_id == teacher_id,
             TeacherSlot.slot_date == slot_date,
-            TeacherSlot.status != "cancelled",
         )
     ).all()
     for other in existing:
