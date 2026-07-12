@@ -170,7 +170,7 @@ async def student_teachers_search(
     language_list: list[str] = [l.strip().lower() for l in (language or "").split(",") if l.strip()]
 
     uid = UUID(current_user["id"])
-    student_lesson_format: Optional[str] = None
+    student_lesson_format: Optional[List[str]] = None
     try:
         sp_student = db.exec(select(StudentProfile).where(StudentProfile.user_id == uid)).first()
         if sp_student:

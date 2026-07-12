@@ -111,7 +111,10 @@ class StudentProfile(SQLModel, table=True):
         default=None,
         sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="{}"),
     )
-    lesson_format: Optional[str] = Field(default=None)  # StudentLessonFormat value
+    lesson_format: Optional[List[str]] = Field(
+        default=None,
+        sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="{}"),
+    )  # multi-select of StudentLessonFormat values
     languages: Optional[List[str]] = Field(
         default=None,
         sa_column=sa.Column(ARRAY(sa.Text), nullable=True, server_default="{}"),

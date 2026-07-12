@@ -231,14 +231,13 @@ class StudentOnboardingRequest(BaseModel):
     speciality: Optional[str] = None
     subjects_interested: Optional[List[str]] = None
     goals: Optional[List[str]] = None
-    online_only: Optional[bool] = None
     budget_tier: Optional[str] = None
     budget_min: Optional[int] = None
     budget_max: Optional[int] = None
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
     parent_code: Optional[str] = None
-    lesson_format: Optional[str] = None  # StudentLessonFormat value
+    lesson_format: Optional[List[str]] = None  # multi-select of StudentLessonFormat values
     languages: Optional[List[str]] = None
 
 
@@ -340,8 +339,6 @@ async def complete_student_onboarding(
         sp.subjects_interested = payload.subjects_interested
     if payload.goals is not None:
         sp.goals = payload.goals
-    if payload.online_only is not None:
-        sp.online_only = payload.online_only
     if payload.budget_tier:
         sp.budget_tier = payload.budget_tier
     if payload.budget_min is not None:
@@ -354,10 +351,11 @@ async def complete_student_onboarding(
         sp.available_slots = payload.available_slots
     if payload.lesson_format is not None:
         valid_formats = {f.value for f in StudentLessonFormat}
-        if payload.lesson_format not in valid_formats:
+        invalid = [v for v in payload.lesson_format if v not in valid_formats]
+        if invalid:
             raise HTTPException(
                 status_code=422,
-                detail=f"lesson_format invalide. Valeurs acceptées : {sorted(valid_formats)}",
+                detail=f"lesson_format invalide : {invalid}. Valeurs acceptées : {sorted(valid_formats)}",
             )
         sp.lesson_format = payload.lesson_format
     if payload.languages is not None:
@@ -934,8 +932,10 @@ async def complete_parent_onboarding(
     # ── 5b. Persist availability slots (non-fatal — isolated transaction) ──────
     # The table schema (from migration 002) stores ONE ROW per (parent_id, student_id)
     # with ARRAY columns: available_days int[], available_slots text[].
-    # Slots arrive as ["0:morning", "2:evening", …] — stored verbatim in available_slots;
-    # the unique day indices are extracted for available_days.
+    # Slots arrive as "day:hour" pairs (e.g. ["0:9", "2:18"]) — stored verbatim
+    # in available_slots; the unique day indices are extracted for available_days.
+    # (Generic split-on-":" parsing below works unchanged regardless of what
+    # follows the day index, so this format change needed no code change here.)
     for parent_id_str, student_id_str, slots in linked_pairs:
         if not slots:
             continue

@@ -30,53 +30,37 @@ _W_QUALITY = 2.0
 # eligibility, same as the general availability signal above.
 _W_SLOT_SUBJECT_MATCH = 1.5
 
-# Mirrors the 4 fixed availability blocks defined in
-# student.onboarding.availability.tsx (frontend) — keep these hour ranges in sync.
-_BLOCK_RANGES: Dict[str, Tuple[int, int]] = {
-    "morning": (8, 12),
-    "noon": (12, 14),
-    "afternoon": (14, 18),
-    "evening": (18, 22),
-}
-
-
 def _norm(s: str) -> str:
     return unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
 
 
-def _block_for_hour(hour: int) -> Optional[str]:
-    for block, (start, end) in _BLOCK_RANGES.items():
-        if start <= hour < end:
-            return block
-    return None
+def _parse_student_slot_keys(available_slots: Optional[List[str]]) -> Set[Tuple[int, int]]:
+    """Parse 'day:hour' composite strings (e.g. '6:14') into (day_index, hour) tuples.
 
-
-def _parse_student_slot_keys(available_slots: Optional[List[str]]) -> Set[Tuple[int, str]]:
-    """Parse 'day:block' composite strings into (day_index, block) tuples."""
-    keys: Set[Tuple[int, str]] = set()
+    day_index follows Python's date.weekday() convention (0=Monday..6=Sunday),
+    matching student.onboarding.availability.tsx's Lundi-first day columns and
+    TeacherSlot.slot_date.weekday() below — direct hour-to-hour comparison
+    against the teacher's actual slot start times, no block-mapping needed.
+    """
+    keys: Set[Tuple[int, int]] = set()
     for s in available_slots or []:
         try:
-            day_str, block = s.split(":", 1)
-            keys.add((int(day_str), block))
+            day_str, hour_str = s.split(":", 1)
+            keys.add((int(day_str), int(hour_str)))
         except (ValueError, AttributeError):
             continue
     return keys
 
 
-def _slot_keys_for_teacher(db: Session, teacher_id: UUID) -> Set[Tuple[int, str]]:
-    """Derive (day_of_week, block) keys from a teacher's own open TeacherSlot rows."""
+def _slot_keys_for_teacher(db: Session, teacher_id: UUID) -> Set[Tuple[int, int]]:
+    """Derive (day_of_week, hour) keys from a teacher's own open TeacherSlot rows."""
     slots = db.exec(
         select(TeacherSlot).where(
             TeacherSlot.teacher_id == teacher_id,
             TeacherSlot.status == "open",
         )
     ).all()
-    keys: Set[Tuple[int, str]] = set()
-    for slot in slots:
-        block = _block_for_hour(slot.start_time.hour)
-        if block:
-            keys.add((slot.slot_date.weekday(), block))
-    return keys
+    return {(slot.slot_date.weekday(), slot.start_time.hour) for slot in slots}
 
 
 def score_teacher(
@@ -87,8 +71,8 @@ def score_teacher(
     delivery_pairs: Set[Tuple[str, str]],
     teacher_min_price: Optional[int],
     student_subject_ids: Set[UUID],
-    student_slot_keys: Set[Tuple[int, str]],
-    teacher_slot_keys: Set[Tuple[int, str]],
+    student_slot_keys: Set[Tuple[int, int]],
+    teacher_slot_keys: Set[Tuple[int, int]],
     teacher_slot_subject_ids: Optional[Set[UUID]] = None,
 ) -> float:
     """
@@ -137,11 +121,17 @@ def score_teacher(
     if matching.lesson_format_compatible(delivery_pairs, student.lesson_format):
         score += _W_FORMAT
 
-    # Wilaya / online preference.
-    if student.online_only:
-        if any(mode == "online" for mode, _ in delivery_pairs):
-            score += _W_WILAYA
-    elif student.wilaya and matching.wilaya_compatible(teacher, teacher_base_profile, student.wilaya):
+    # Wilaya / online preference. lesson_format is a multi-select — a student
+    # can want both 'online' AND a location-based format at once, so these are
+    # independent OR'd signals, not the old mutually-exclusive online_only
+    # branch. Either one satisfied earns the (single, non-stacking) bonus.
+    online_ok = matching.wants_online(student.lesson_format) and any(
+        mode == "online" for mode, _ in delivery_pairs
+    )
+    wilaya_ok = bool(
+        student.wilaya and matching.wilaya_compatible(teacher, teacher_base_profile, student.wilaya)
+    )
+    if online_ok or wilaya_ok:
         score += _W_WILAYA
 
     # Spoken languages overlap.

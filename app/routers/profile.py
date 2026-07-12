@@ -116,7 +116,7 @@ class StudentFullProfileResponse(BaseModel):
     budget_max: Optional[int] = None
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
-    lesson_format: Optional[str] = None
+    lesson_format: Optional[List[str]] = None
     languages: Optional[List[str]] = None
     # True when an active parent link exists — student cannot edit availability
     parent_defined_availability: bool = False
@@ -125,12 +125,16 @@ class StudentFullProfileResponse(BaseModel):
 class StudentProfileUpdateRequest(BaseModel):
     """Partial update — only fields present are touched. Used by the profile
     page (Disponibilités / Mes créneaux disponibles, format de leçon, wilaya,
-    langues parlées) as well as any future 'edit later' flow."""
+    langues parlées) as well as any future 'edit later' flow.
+
+    online_only is intentionally NOT settable here anymore — "wants online"
+    is now derived from 'online' being present in lesson_format (a multi-select),
+    not a separate toggle. The underlying column/response field is kept for any
+    other reader, but this endpoint no longer writes it."""
     wilaya: Optional[str] = None
-    online_only: Optional[bool] = None
     available_days: Optional[List[int]] = None
     available_slots: Optional[List[str]] = None
-    lesson_format: Optional[str] = None
+    lesson_format: Optional[List[str]] = None
     languages: Optional[List[str]] = None
 
 
@@ -248,9 +252,6 @@ async def update_student_profile(
         profile.updated_at = datetime.utcnow()
         db.add(profile)
 
-    if payload.online_only is not None:
-        sp.online_only = payload.online_only
-
     parent_link = db.exec(
         select(ParentStudentLink)
         .where(ParentStudentLink.student_id == uid)
@@ -264,10 +265,11 @@ async def update_student_profile(
 
     if payload.lesson_format is not None:
         valid_formats = {f.value for f in StudentLessonFormat}
-        if payload.lesson_format not in valid_formats:
+        invalid = [v for v in payload.lesson_format if v not in valid_formats]
+        if invalid:
             raise HTTPException(
                 status_code=422,
-                detail=f"lesson_format invalide. Valeurs acceptées : {sorted(valid_formats)}",
+                detail=f"lesson_format invalide : {invalid}. Valeurs acceptées : {sorted(valid_formats)}",
             )
         sp.lesson_format = payload.lesson_format
 

@@ -63,17 +63,35 @@ def delivery_option_compatible(db: Session, teacher_id: UUID, mode: str, session
     return row is not None
 
 
+def _format_matches(student_lesson_format: str, pairs: set[tuple[str, str]]) -> bool:
+    if student_lesson_format == "individual_at_teacher":
+        return ("at_home", "individual") in pairs
+    if student_lesson_format == "individual_at_student":
+        return ("at_student", "individual") in pairs
+    if student_lesson_format == "group":
+        return any(t == "group" for _, t in pairs)
+    if student_lesson_format == "online":
+        return any(m == "online" for m, _ in pairs)
+    return True
+
+
 def lesson_format_compatible(
     delivery_pairs: Iterable[tuple[str, str]],
-    student_lesson_format: Optional[str],
+    student_lesson_format: Optional[Union[str, Iterable[str]]],
 ) -> bool:
     """
     Single source of truth for "does this teacher's declared (mode, type)
-    capability set satisfy this student's lesson-format preference" — used by
-    both search (student_teachers.py) and the recommendation engine, so the
+    capability set satisfy this student's lesson-format preference(s)" — used
+    by both search (student_teachers.py) and the recommendation engine, so the
     two can never drift apart.
 
-    Mirrors the mapping established across onboarding (app.models.enums.StudentLessonFormat):
+    student_lesson_format is a MULTI-select (list) of app.models.enums.StudentLessonFormat
+    values — a student can want several formats at once, so compatibility is
+    OR across the selection: a teacher matching ANY one of the student's
+    preferred formats is compatible. (A single string is still accepted for
+    backward compatibility with any caller not yet passing a list.)
+
+    Mapping:
       individual_at_teacher -> teacher offers (at_home, individual)
       individual_at_student -> teacher offers (at_student, individual)
       group                 -> teacher offers any (mode, group) pair
@@ -84,13 +102,23 @@ def lesson_format_compatible(
     if not student_lesson_format:
         return True
 
+    formats = [student_lesson_format] if isinstance(student_lesson_format, str) else list(student_lesson_format)
+    if not formats:
+        return True
+
     pairs = set(delivery_pairs)
-    if student_lesson_format == "individual_at_teacher":
-        return ("at_home", "individual") in pairs
-    if student_lesson_format == "individual_at_student":
-        return ("at_student", "individual") in pairs
-    if student_lesson_format == "group":
-        return any(t == "group" for _, t in pairs)
-    if student_lesson_format == "online":
-        return any(m == "online" for m, _ in pairs)
-    return True
+    return any(_format_matches(f, pairs) for f in formats)
+
+
+def wants_online(student_lesson_format: Optional[Union[str, Iterable[str]]]) -> bool:
+    """Is 'online' among the student's selected lesson formats?
+
+    This replaces the old standalone `online_only` boolean as the "does this
+    student want online lessons" signal — lesson_format is now a multi-select,
+    so a student can want online AND e.g. individual_at_student at once,
+    which is more expressive than the old exclusive toggle ever was.
+    """
+    if not student_lesson_format:
+        return False
+    formats = [student_lesson_format] if isinstance(student_lesson_format, str) else list(student_lesson_format)
+    return "online" in formats
