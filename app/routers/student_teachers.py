@@ -494,6 +494,7 @@ class TeacherPublicProfile(BaseModel):
     last_name: str
     full_name: str
     avatar_url: Optional[str] = None
+    active_sticker_url: Optional[str] = None
     bio: Optional[str] = None
     headline: Optional[str] = None
     wilaya: Optional[str] = None
@@ -588,6 +589,7 @@ async def get_teacher_profile(
         last_name=p.last_name or "",
         full_name=p.full_name or "",
         avatar_url=p.avatar_url,
+        active_sticker_url=p.active_sticker_url,
         bio=tp.bio_long or p.bio,
         headline=tp.headline,
         wilaya=tp.teaching_wilaya or p.wilaya,
@@ -933,7 +935,12 @@ async def book_teacher_slot(
     price_single = slot_price if slot_price > 0 else tp.price_per_session
 
     pack_prices = compute_pack_prices(price_single, get_platform_settings(db))
-    amount = pack_prices[body.formula]
+    # A group ("collective") session is always priced lower than an
+    # individual single session — the admin-configured group discount off
+    # price_single (see app.services.pricing) — regardless of `formula`,
+    # which stays "single" for a one-off group booking (packs are
+    # individual-only, see student.booking.session-type.tsx).
+    amount = pack_prices["group"] if resolved_session_type == "group" else pack_prices[body.formula]
 
     # A pack purchase must name exactly as many sessions as the pack contains.
     required_sessions = {"single": None, "pack5": 5, "pack10": 10}[body.formula]

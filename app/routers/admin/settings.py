@@ -18,6 +18,7 @@ def _serialize(s: PlatformSettings) -> dict:
     return {
         "pack5_discount_percent": s.pack5_discount_percent,
         "pack10_discount_percent": s.pack10_discount_percent,
+        "group_discount_percent": s.group_discount_percent,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 
@@ -42,6 +43,7 @@ async def update_pricing_settings(
         db.add(settings)
     settings.pack5_discount_percent = body.pack5_discount_percent
     settings.pack10_discount_percent = body.pack10_discount_percent
+    settings.group_discount_percent = body.group_discount_percent
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)

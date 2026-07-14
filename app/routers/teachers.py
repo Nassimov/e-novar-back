@@ -101,6 +101,7 @@ def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> T
         user_id=profile.user_id,
         full_name=user.full_name or "",
         avatar_url=user.avatar_url,
+        active_sticker_url=user.active_sticker_url,
         bio=profile.bio_long,
         headline=profile.headline,
         subjects=_subjects_for(profile.user_id, db, settings),
@@ -1244,3 +1245,133 @@ async def update_evaluation(
 # `/{teacher_id}/availability` used to live here — removed as dead code (see
 # note near the top of this file). The equivalent, working, frontend-wired
 # functionality is in app/routers/student_teachers.py under /api/student/teachers/*.
+
+
+@router.get("/me/students-overview")
+async def get_my_students_overview(
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Real per-student roster for the teacher 'Mes élèves' page (replaces the
+    old hardcoded STUDENTS mock on the frontend).
+
+    Groups every non-cancelled TutoringSession this teacher has had with each
+    student — mirroring the students_taught/repeat_students grouping pattern
+    from app/services/teacher_badge_engine.py. Per student we resolve:
+    - the most frequent subject/level across their sessions together,
+    - the completed session count,
+    - the next upcoming session (if any),
+    - a status ("active" if an upcoming session exists or the last completed
+      session was within 30 days, "inactive" if older, "pending" if the
+      student has only upcoming/no completed sessions yet),
+    - a progress score from this teacher's Evaluation records for that
+      student (score_global out of 20 -> percentage; 0 if none exist yet —
+      the evaluation flow is real but may not have been used yet, which is
+      the correct empty state rather than a fake number),
+    - a trend comparing the two most recent evaluation scores.
+    """
+    from collections import Counter
+    from datetime import datetime
+
+    from app.models.booking import TutoringSession
+    from app.models.evaluation import Evaluation
+
+    teacher_id = UUID(current_user["id"])
+    now = datetime.utcnow()
+
+    sessions = db.exec(
+        select(TutoringSession)
+        .where(
+            TutoringSession.teacher_id == teacher_id,
+            TutoringSession.status.in_(["completed", "scheduled", "waiting", "live"]),
+        )
+        .order_by(TutoringSession.scheduled_at.asc())
+    ).all()
+
+    if not sessions:
+        return []
+
+    student_ids = list({s.student_id for s in sessions})
+    students = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all()
+    student_map = {p.id: p for p in students}
+
+    subject_ids = list({s.subject_id for s in sessions if s.subject_id})
+    subjects = db.exec(select(Subject).where(Subject.id.in_(subject_ids))).all() if subject_ids else []
+    subject_map = {s.id: s for s in subjects}
+
+    level_ids = list({s.level_id for s in sessions if s.level_id})
+    levels = db.exec(select(Level).where(Level.id.in_(level_ids))).all() if level_ids else []
+    level_map = {lv.id: lv for lv in levels}
+
+    evaluations = db.exec(
+        select(Evaluation)
+        .where(
+            Evaluation.teacher_id == teacher_id,
+            Evaluation.student_id.in_(student_ids),  # type: ignore[attr-defined]
+        )
+        .order_by(Evaluation.created_at.asc())
+    ).all()
+    evals_by_student: Dict[UUID, List[Evaluation]] = {}
+    for e in evaluations:
+        evals_by_student.setdefault(e.student_id, []).append(e)
+
+    by_student: Dict[UUID, List[TutoringSession]] = {}
+    for s in sessions:
+        by_student.setdefault(s.student_id, []).append(s)
+
+    result: List[Dict[str, Any]] = []
+    for sid, s_sessions in by_student.items():
+        profile = student_map.get(sid)
+        if profile is None:
+            continue
+
+        completed = [s for s in s_sessions if s.status == "completed"]
+        upcoming = [
+            s for s in s_sessions
+            if s.status in ("scheduled", "waiting", "live") and s.scheduled_at >= now
+        ]
+
+        subj_counter = Counter(s.subject_id for s in s_sessions if s.subject_id)
+        top_subject_id = subj_counter.most_common(1)[0][0] if subj_counter else None
+        subject_name = subject_map[top_subject_id].name if top_subject_id in subject_map else "—"
+
+        lvl_counter = Counter(s.level_id for s in s_sessions if s.level_id)
+        top_level_id = lvl_counter.most_common(1)[0][0] if lvl_counter else None
+        level_label = level_map[top_level_id].label if top_level_id in level_map else "—"
+
+        next_session = upcoming[0] if upcoming else None  # pre-sorted asc by scheduled_at
+
+        if upcoming:
+            status_val = "active"
+        elif completed:
+            last_completed_at = max(s.scheduled_at for s in completed)
+            status_val = "active" if (now - last_completed_at).days <= 30 else "inactive"
+        else:
+            status_val = "pending"
+
+        s_evals = evals_by_student.get(sid, [])
+        scores = [e.score_global for e in s_evals if e.score_global is not None]
+        progress = round((sum(scores) / len(scores)) / 20 * 100) if scores else 0
+
+        trend = "flat"
+        if len(scores) >= 2:
+            if scores[-1] > scores[-2]:
+                trend = "up"
+            elif scores[-1] < scores[-2]:
+                trend = "down"
+
+        result.append({
+            "student_id": str(sid),
+            "full_name": profile.full_name or "—",
+            "avatar_url": profile.avatar_url,
+            "level": level_label,
+            "subject": subject_name,
+            "sessions": len(completed),
+            "progress": progress,
+            "next_session_at": next_session.scheduled_at.isoformat() if next_session else None,
+            "trend": trend,
+            "status": status_val,
+        })
+
+    result.sort(key=lambda r: r["full_name"])
+    return result

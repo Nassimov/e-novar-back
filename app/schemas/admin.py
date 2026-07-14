@@ -101,6 +101,10 @@ class WithdrawalProcessRequest(BaseModel):
 class PlatformPricingSettings(BaseModel):
     pack5_discount_percent: int = Field(ge=0, le=100)
     pack10_discount_percent: int = Field(ge=0, le=100)
+    # Strictly > 0 (not >= 0 like the packs): a group session must always be
+    # cheaper than a single one, by business rule — there is no "0% group
+    # discount" option.
+    group_discount_percent: int = Field(gt=0, le=100)
 
     @field_validator("pack10_discount_percent")
     @classmethod

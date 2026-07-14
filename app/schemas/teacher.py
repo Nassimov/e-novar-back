@@ -87,6 +87,7 @@ class TeacherDetailResponse(BaseModel):
     user_id: UUID
     full_name: str
     avatar_url: Optional[str] = None
+    active_sticker_url: Optional[str] = None
     bio: Optional[str] = None
     headline: Optional[str] = None
     subjects: List[TeacherSubjectItem] = []
