@@ -19,6 +19,7 @@ from app.models.scheduling import TeacherSlot, TeacherSlotSubject
 from app.schemas.teacher import SlotSubjectLevelResponse
 from app.services import matching
 from app.services.boost import is_boost_active
+from app.services.tenure import experience_years_from
 
 router = APIRouter(tags=["Student"])
 
@@ -599,7 +600,7 @@ async def get_teacher_profile(
         reviews_count=tp.reviews_count,
         verified=tp.verified,
         badge=tp.badge,
-        experience_years=tp.experience_years,
+        experience_years=experience_years_from(tp.created_at),
         success_rate=tp.success_rate,
         students_count=tp.students_count,
         hours_taught=tp.hours_taught,

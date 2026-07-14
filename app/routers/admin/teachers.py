@@ -16,6 +16,7 @@ from app.models.catalog import Level, Subject, TeacherDiploma, TeacherSubjectPri
 from app.models.kp import KpTransaction
 from app.models.notification import Notification
 from app.models.profile import Profile, TeacherProfile
+from app.services.tenure import experience_years_from
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Admin — Teachers"])
@@ -140,7 +141,7 @@ async def list_pending_teachers(
             "bio_long": tp.bio_long or p.bio,
             "cover_letter": tp.cover_letter,
             "cv_url": tp.cv_url,
-            "experience_years": tp.experience_years,
+            "experience_years": experience_years_from(tp.created_at),
             "price_per_session": tp.price_per_session,
             "teaching_nationwide": tp.teaching_nationwide,
             "subjects": subjects,
@@ -246,7 +247,7 @@ async def get_teacher_detail(
         "bio_long": tp.bio_long or p.bio,
         "cover_letter": tp.cover_letter,
         "cv_url": tp.cv_url,
-        "experience_years": tp.experience_years,
+        "experience_years": experience_years_from(tp.created_at),
         "price_per_session": tp.price_per_session,
         "teaching_nationwide": tp.teaching_nationwide,
         "subjects": subjects,

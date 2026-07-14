@@ -96,6 +96,7 @@ def _diplomas_for(teacher_id: UUID, db: Session) -> List[TeacherDiplomaItem]:
 def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> TeacherDetailResponse:
     settings = get_platform_settings(db)
     from app.services.boost import is_boost_active
+    from app.services.tenure import experience_years_from
     return TeacherDetailResponse(
         id=profile.user_id,
         user_id=profile.user_id,
@@ -115,7 +116,7 @@ def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> T
         teaching_wilayas=profile.teaching_wilayas or [],
         teaching_nationwide=profile.teaching_nationwide,
         languages=profile.languages or [],
-        experience_years=profile.experience_years,
+        experience_years=experience_years_from(profile.created_at),
         success_rate=profile.success_rate,
         students_count=profile.students_count,
         hours_taught=profile.hours_taught,
@@ -244,8 +245,6 @@ async def update_my_teacher_profile(
         profile.headline = payload.headline
     if payload.bio is not None:
         profile.bio_long = payload.bio
-    if payload.experience_years is not None:
-        profile.experience_years = payload.experience_years
     if payload.price_per_session is not None:
         profile.price_per_session = payload.price_per_session
     if payload.teaching_wilaya is not None:

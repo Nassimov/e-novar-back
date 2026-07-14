@@ -128,7 +128,9 @@ class BoostStatusResponse(BaseModel):
 class TeacherProfileUpdate(BaseModel):
     headline: Optional[str] = None
     bio: Optional[str] = None
-    experience_years: Optional[int] = None
+    # experience_years is never manually set — it's "years since registration
+    # on E-NOVAR", computed live from Profile.created_at (see
+    # app.services.tenure), never stored/edited.
     price_per_session: Optional[int] = None
     teaching_wilaya: Optional[str] = None
     teaching_wilayas: Optional[List[str]] = None

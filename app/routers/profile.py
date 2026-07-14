@@ -404,13 +404,14 @@ async def get_teacher_profile(
     tp = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == uid)).first()
     if tp is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
+    from app.services.tenure import experience_years_from
     return {
         "status": tp.status,
         "teaching_wilaya": tp.teaching_wilaya,
         "cv_url": tp.cv_url,
         "cover_letter": tp.cover_letter,
         "headline": tp.headline,
-        "experience_years": tp.experience_years,
+        "experience_years": experience_years_from(tp.created_at),
         "rating_avg": tp.rating_avg,
         "reviews_count": tp.reviews_count,
     }
