@@ -292,6 +292,7 @@ from app.routers.profile import router as profile_router
 from app.routers.onboarding import router as onboarding_router
 from app.routers.teachers import router as teachers_router
 from app.routers.payments import router as payments_router
+from app.routers.chargily_webhook import router as chargily_webhook_router
 from app.routers.sessions import router as sessions_router
 from app.routers.messages import router as messages_router
 from app.routers.notifications import router as notifications_router
@@ -318,6 +319,8 @@ from app.routers.student_practice import router as student_practice_router
 from app.routers.student_progress import router as student_progress_router
 from app.routers.student_badges import router as student_badges_router
 from app.routers.student_leaderboard import router as student_leaderboard_router
+from app.routers.teacher_leaderboard import router as teacher_leaderboard_router
+from app.routers.teacher_badges import router as teacher_badges_router
 from app.routers.admin.questions import router as admin_questions_router
 from app.routers.admin.auth import router as admin_auth_router
 from app.routers.admin.messages import router as admin_messages_router
@@ -334,7 +337,10 @@ app.include_router(auth_router,          prefix="/api/auth",           tags=["Au
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
 app.include_router(onboarding_router,    prefix="/api/onboarding",     tags=["Onboarding"])
 app.include_router(teachers_router,      prefix="/api/teachers",       tags=["Teachers"])
+app.include_router(teacher_leaderboard_router, prefix="/api/teachers", tags=["Teachers"])
+app.include_router(teacher_badges_router,      prefix="/api/teacher",  tags=["Teacher"])
 app.include_router(payments_router,      prefix="/api/payments",       tags=["Payments"])
+app.include_router(chargily_webhook_router, prefix="/api/payments",    tags=["Payments"])
 app.include_router(sessions_router,      prefix="/api/sessions",       tags=["Sessions"])
 app.include_router(homework_router,      prefix="/api/homework",       tags=["Homework"])
 app.include_router(messages_router,      prefix="/api/messages",       tags=["Messages"])

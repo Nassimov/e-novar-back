@@ -16,6 +16,8 @@ from app.models.user import User
 from app.models.review import Review
 from app.services.pricing import compute_pack_prices, get_platform_settings
 from app.schemas.teacher import (
+    BoostActivateRequest,
+    BoostStatusResponse,
     DeliveryOption,
     DiplomaResponse,
     DzdWithdrawalRequest,
@@ -32,6 +34,8 @@ from app.schemas.teacher import (
     TeacherDiplomaItem,
     TeacherListItem,
     TeacherListResponse,
+    TeacherPaymentItem,
+    TeacherPayoutInfoUpdate,
     TeacherProfileUpdate,
     TeacherSubjectItem,
     WalletResponse,
@@ -91,6 +95,7 @@ def _diplomas_for(teacher_id: UUID, db: Session) -> List[TeacherDiplomaItem]:
 
 def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> TeacherDetailResponse:
     settings = get_platform_settings(db)
+    from app.services.boost import is_boost_active
     return TeacherDetailResponse(
         id=profile.user_id,
         user_id=profile.user_id,
@@ -116,6 +121,8 @@ def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> T
         is_approved=(profile.status == "approved"),
         is_verified=profile.verified,
         diplomas=_diplomas_for(profile.user_id, db),
+        boost_active=is_boost_active(profile),
+        boost_expires_at=profile.boost_expires_at,
     )
 
 
@@ -134,11 +141,85 @@ async def get_my_teacher_profile(
     if profile is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
+    from app.services.boost import clear_expired
+    clear_expired(profile, db)
+
     return _profile_to_detail(profile, user, db)
+
+
+@router.get("/me/boost", response_model=BoostStatusResponse)
+async def get_my_boost_status(
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Current visibility-boost status + the fixed server-side plans/pricing."""
+    from app.services.boost import BOOST_PLANS, clear_expired, is_boost_active
+    from app.services.kp import get_or_create_kp_account
+
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    clear_expired(profile, db)
+    account = get_or_create_kp_account(uid, db)
+
+    return BoostStatusResponse(
+        active=is_boost_active(profile),
+        expires_at=profile.boost_expires_at,
+        plans=BOOST_PLANS,
+        balance=account.balance,
+    )
+
+
+@router.post("/me/boost", response_model=BoostStatusResponse)
+async def activate_my_boost(
+    payload: BoostActivateRequest,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Spend EP to activate (or extend) the teacher's visibility boost —
+    real EP debit + real promotion in student search/recommendation ranking
+    (see app.services.boost.is_boost_active, consumed by
+    app.services.recommendation and app.routers.student_teachers)."""
+    from app.services.boost import BOOST_PLANS, activate_boost, is_boost_active
+    from app.services.kp import get_or_create_kp_account
+
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    try:
+        profile = activate_boost(profile, payload.days, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    account = get_or_create_kp_account(uid, db)
+    return BoostStatusResponse(
+        active=is_boost_active(profile),
+        expires_at=profile.boost_expires_at,
+        plans=BOOST_PLANS,
+        balance=account.balance,
+    )
 
 
 _VALID_DELIVERY_MODES = {"online", "at_student", "at_home"}
 _VALID_DELIVERY_TYPES = {"individual", "group"}
+
+# Payment methods with no real-time gateway integration in this stack (see
+# app/routers/admin/bookings.py) — a booking on one of these rails can only
+# move out of "pending" via admin manual confirmation (approve/reject
+# manual payment), never via the teacher's own accept/refuse. This closes a
+# trust gap: without this guard a teacher could accept (and the student
+# would be told the booking is "confirmed") before anyone had verified the
+# cash/transfer payment was actually received.
+#
+# edahabia is NOT here: it's automated via Chargily Pay (real-time gateway,
+# see app/services/chargily.py + app/routers/chargily_webhook.py) — its own
+# gate is `booking.chargily_paid_at is not None`, checked directly in
+# accept_booking/refuse_booking below, not this admin-manual-approval path.
+_MANUAL_PAYMENT_METHODS = ("cash", "transfer")
 
 
 @router.put("/me", response_model=TeacherDetailResponse)
@@ -281,30 +362,53 @@ async def delete_diploma(
     return None
 
 
-@router.put("/me/bank-card")
-async def update_bank_card(
-    iban: str,
-    holder: str,
-    last4: Optional[str] = None,
+@router.put("/me/payout-info")
+async def update_payout_info(
+    payload: TeacherPayoutInfoUpdate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Update the teacher's bank card / withdrawal info."""
+    """Update where the teacher's earnings are sent — bank RIB/IBAN or the
+    BaridiMob mobile wallet (never a full card number). Same validation as
+    onboarding (app.services.payout), reused so both entry points can never
+    disagree. Used by the teacher profile page's payout-destination editor
+    and the wallet page's "Modifier" modal."""
+    from app.services.payout import validate_payout_fields
+
     user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    stmt2 = select(TeacherProfile).where(TeacherProfile.user_id == user.id)
-    profile = db.exec(stmt2).first()
+    profile = db.exec(select(TeacherProfile).where(TeacherProfile.user_id == user.id)).first()
     if profile is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    profile.iban = iban
-    profile.bank_holder = holder
-    profile.bank_last4 = last4
+    rail = validate_payout_fields(
+        payload.payout_rail, payload.iban, payload.bank_holder, payload.payout_phone, payload.bank_last4
+    )
+
+    profile.payout_rail = rail
+    if rail == "bank":
+        profile.iban = payload.iban.strip() if payload.iban else None
+        profile.bank_holder = payload.bank_holder.strip() if payload.bank_holder else None
+        profile.bank_last4 = payload.bank_last4.strip() if payload.bank_last4 else None
+        profile.payout_phone = None
+    else:
+        profile.payout_phone = payload.payout_phone.strip() if payload.payout_phone else None
+        profile.iban = None
+        profile.bank_holder = None
+        profile.bank_last4 = None
+
     db.add(profile)
     db.commit()
-    return {"message": "Bank card updated"}
+    db.refresh(profile)
+    return {
+        "payout_rail": profile.payout_rail,
+        "iban": profile.iban,
+        "bank_holder": profile.bank_holder,
+        "bank_last4": profile.bank_last4,
+        "payout_phone": profile.payout_phone,
+    }
 
 
 def _slot_subject_levels_for(slot_id: UUID, db: Session) -> List[SlotSubjectLevelResponse]:
@@ -351,20 +455,29 @@ def _validate_subject_levels(
 
 
 def _validate_delivery_option(teacher_id: UUID, mode: str, type_: str, db: Session) -> None:
-    """The (mode, type) pair for a slot must be one the teacher has actually
-    declared in their profile — those are the ONLY values selectable here."""
-    if mode == "at_student" and type_ == "group":
+    """The (mode, type) pair for a slot must be compatible with what the
+    teacher actually declared in their profile.
+
+    mode/type can each be "both" ("peu importe" — the teacher doesn't mind
+    which of their declared options applies; the student picks at booking
+    time). A "both" axis simply isn't filtered on below, so the check
+    becomes "the teacher has at least one declared option matching whatever
+    IS fixed" instead of requiring one exact row.
+
+    at_student is always individual-only — "both"/"group" are never valid
+    for it, full stop (never presented by the create-slot form, but
+    rejected here too as a safety net)."""
+    if mode == "at_student" and type_ in ("group", "both"):
         raise HTTPException(
             status_code=422,
             detail="Les cours collectifs ne sont pas proposés chez l'élève (individuel uniquement).",
         )
-    exists = db.exec(
-        select(TeacherDeliveryOption).where(
-            TeacherDeliveryOption.teacher_id == teacher_id,
-            TeacherDeliveryOption.mode == mode,
-            TeacherDeliveryOption.type == type_,
-        )
-    ).first()
+    query = select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id == teacher_id)
+    if mode != "both":
+        query = query.where(TeacherDeliveryOption.mode == mode)
+    if type_ != "both":
+        query = query.where(TeacherDeliveryOption.type == type_)
+    exists = db.exec(query).first()
     if exists is None:
         raise HTTPException(
             status_code=422,
@@ -376,15 +489,18 @@ def _validate_delivery_option(teacher_id: UUID, mode: str, type_: str, db: Sessi
 
 
 def _validate_capacity(type_: str, max_students: int) -> None:
+    """type_ "both" ("peu importe") must still support the group path (a
+    student may end up booking it as a group session), so it needs the same
+    capacity floor as "group"."""
     if type_ == "individual" and max_students != 1:
         raise HTTPException(
             status_code=422,
             detail="Un créneau individuel ne peut accueillir qu'un seul étudiant.",
         )
-    if type_ == "group" and max_students < 2:
+    if type_ in ("group", "both") and max_students < 2:
         raise HTTPException(
             status_code=422,
-            detail="Un créneau collectif doit accepter au moins 2 étudiants.",
+            detail="Un créneau collectif (ou « peu importe ») doit accepter au moins 2 étudiants.",
         )
 
 
@@ -672,7 +788,81 @@ async def get_wallet(
         iban=tp.iban if tp else None,
         bank_holder=tp.bank_holder if tp else None,
         bank_last4=tp.bank_last4 if tp else None,
+        payout_rail=tp.payout_rail if tp else "bank",
+        payout_phone=tp.payout_phone if tp else None,
     )
+
+
+@router.get("/me/payments", response_model=List[TeacherPaymentItem])
+async def list_my_payments(
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Real per-lesson payment list for the teacher wallet page (replaces the
+    old hardcoded ALL_TX list on the frontend).
+
+    - "received" (green / "Reçu"): the TutoringSession is completed — its
+      teacher_payout_amount has already been credited to wallet_balance_dzd
+      (see POST /sessions/{id}/complete).
+    - "pending" (orange / "En cours de réception"): the booking has been
+      accepted by the teacher (status=confirmed) but this specific session
+      hasn't completed yet — amount shown is the estimated per-lesson share.
+    - Sessions whose booking is still "pending" (not yet accepted) or
+      cancelled sessions are omitted entirely — nothing owed yet.
+    """
+    from app.models.booking import Booking, TutoringSession
+    from app.services.pricing import PACK_SIZES
+
+    uid = UUID(current_user["id"])
+    sessions = db.exec(
+        select(TutoringSession)
+        .where(TutoringSession.teacher_id == uid)
+        .order_by(TutoringSession.scheduled_at.desc())
+    ).all()
+    if not sessions:
+        return []
+
+    booking_ids = list({s.booking_id for s in sessions if s.booking_id})
+    bookings = db.exec(select(Booking).where(Booking.id.in_(booking_ids))).all() if booking_ids else []
+    booking_map = {b.id: b for b in bookings}
+
+    student_ids = list({s.student_id for s in sessions})
+    students = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all() if student_ids else []
+    student_map = {p.id: p for p in students}
+
+    subject_ids = list({s.subject_id for s in sessions if s.subject_id})
+    subjects = db.exec(select(Subject).where(Subject.id.in_(subject_ids))).all() if subject_ids else []
+    subject_map = {s.id: s for s in subjects}
+
+    items: List[TeacherPaymentItem] = []
+    for s in sessions:
+        booking = booking_map.get(s.booking_id) if s.booking_id else None
+        if booking is None or booking.status == "pending":
+            continue  # not yet accepted — nothing owed yet
+        if s.status == "completed":
+            payment_status = "received"
+            amount = s.teacher_payout_amount
+        elif s.status in ("cancelled",):
+            continue  # refund logic (if any) is handled on the session itself, not payout
+        elif booking.status == "confirmed":
+            payment_status = "pending"
+            amount = round(booking.amount / PACK_SIZES.get(booking.formula, 1))
+        else:
+            continue
+
+        student = student_map.get(s.student_id)
+        subj = subject_map.get(s.subject_id) if s.subject_id else None
+        items.append(TeacherPaymentItem(
+            session_id=s.id,
+            booking_id=s.booking_id,
+            student_name=(student.full_name if student else None) or "—",
+            subject_name=subj.name if subj else None,
+            scheduled_at=s.scheduled_at,
+            formula=booking.formula,
+            status=payment_status,
+            amount=amount,
+        ))
+    return items
 
 
 @router.patch("/me/payout-mode")
@@ -763,6 +953,19 @@ async def accept_booking(
         raise HTTPException(status_code=404, detail="Booking not found")
     if booking.status not in ("pending", "awaiting_teacher"):
         raise HTTPException(status_code=409, detail=f"Cannot accept a booking with status '{booking.status}'")
+    if booking.payment_method in _MANUAL_PAYMENT_METHODS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Ce mode de paiement (espèces / virement) doit d'abord être "
+                "confirmé par l'administration avant de pouvoir accepter la réservation."
+            ),
+        )
+    if booking.payment_method == "edahabia" and booking.chargily_paid_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="L'élève n'a pas encore finalisé son paiement Edahabia — impossible d'accepter pour l'instant.",
+        )
 
     # Retrieve PI ID if we only have the CS ID
     pi_id = booking.stripe_pi_id
@@ -817,6 +1020,14 @@ async def refuse_booking(
         raise HTTPException(status_code=404, detail="Booking not found")
     if booking.status not in ("pending", "awaiting_teacher"):
         raise HTTPException(status_code=409, detail=f"Cannot refuse a booking with status '{booking.status}'")
+    if booking.payment_method in _MANUAL_PAYMENT_METHODS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Ce mode de paiement (espèces / virement) est géré par "
+                "l'administration (approbation ou rejet du paiement) — pas par acceptation/refus direct."
+            ),
+        )
 
     # Retrieve PI ID if we only have the CS ID
     pi_id = booking.stripe_pi_id
@@ -835,6 +1046,28 @@ async def refuse_booking(
             cancel_payment_intent(pi_id)
         except Exception:
             pass  # If already cancelled or expired, proceed anyway
+
+    # Chargily (edahabia) has no refund API — if the student already paid,
+    # the money is already in the merchant account and can't be reversed
+    # programmatically. Flag every admin so a manual refund gets processed
+    # through the Chargily dashboard instead of silently vanishing.
+    if booking.payment_method == "edahabia" and booking.chargily_paid_at is not None:
+        from app.models.notification import Notification
+        from app.models.profile import UserRole
+
+        admin_roles = db.exec(select(UserRole).where(UserRole.role == "admin")).all()
+        for ar in admin_roles:
+            db.add(Notification(
+                user_id=ar.user_id,
+                type="system",
+                title="⚠️ Remboursement Edahabia manuel requis",
+                body=(
+                    f"Le professeur a refusé une réservation payée en Edahabia ({booking.amount} DA). "
+                    "Chargily ne permet pas le remboursement par API — traitez-le manuellement depuis "
+                    "le tableau de bord Chargily."
+                ),
+                data={"booking_id": str(booking.id)},
+            ))
 
     booking.status = "cancelled"
     db.add(booking)

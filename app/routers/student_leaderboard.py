@@ -275,7 +275,7 @@ def _compute_teacher_entries(
     active_tps = db.exec(
         select(TeacherProfile).where(
             TeacherProfile.user_id.in_(teacher_ids),  # type: ignore[attr-defined]
-            TeacherProfile.status == "active",
+            TeacherProfile.status == "approved",
         )
     ).all()
     active_ids = {tp.user_id for tp in active_tps}

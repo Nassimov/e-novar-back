@@ -17,6 +17,7 @@ from app.models.kp import KpBalance
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.services import recommendation
+from app.services.boost import is_boost_active
 
 router = APIRouter(tags=["Student"])
 
@@ -258,7 +259,7 @@ async def student_dashboard(
             rating_avg=round(tp.rating_avg or 0.0, 1),
             kp_reward=tp.kp_reward,
             verified=tp.verified,
-            sponsored=tp.sponsored,
+            sponsored=is_boost_active(tp),
         ))
 
     first_name = profile.first_name or ""

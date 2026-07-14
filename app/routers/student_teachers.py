@@ -18,6 +18,7 @@ from app.models.review import Review
 from app.models.scheduling import TeacherSlot, TeacherSlotSubject
 from app.schemas.teacher import SlotSubjectLevelResponse
 from app.services import matching
+from app.services.boost import is_boost_active
 
 router = APIRouter(tags=["Student"])
 
@@ -426,7 +427,7 @@ async def student_teachers_search(
 
     teacher_ids_sorted = sorted(
         teacher_ids,
-        key=lambda tid: (1 if tp_map[tid].sponsored else 0, rank_score(tid)),
+        key=lambda tid: (1 if is_boost_active(tp_map[tid]) else 0, rank_score(tid)),
         reverse=True,
     )
 
@@ -450,7 +451,7 @@ async def student_teachers_search(
             rating_avg=round(tp.rating_avg, 1),
             reviews_count=tp.reviews_count,
             verified=tp.verified,
-            sponsored=tp.sponsored,
+            sponsored=is_boost_active(tp),
             badge=tp.badge,
             kp_reward=tp.kp_reward,
             subjects=teacher_subjects.get(tid, []),
@@ -997,6 +998,32 @@ async def book_teacher_slot(
         except Exception:
             # Stripe not configured — proceed anyway, booking stays pending
             checkout_url = f"{base_url}/student/payment/process?status=success&booking_id={booking.id}"
+
+    elif body.payment_method == "edahabia":
+        # Create a Chargily Checkout — real Edahabia rail. Chargily charges
+        # immediately on completion (no auth/capture split); the webhook
+        # (app/routers/chargily_webhook.py) sets chargily_paid_at, which is
+        # what gates the teacher's accept_booking for this booking.
+        from app.services.chargily import create_checkout as chargily_create_checkout
+        base_url = settings.frontend_url or "http://localhost:5173"
+        api_base_url = settings.app_url or base_url
+        try:
+            checkout = chargily_create_checkout(
+                amount_dzd=amount,
+                booking_id=str(booking.id),
+                payment_method="edahabia",
+                success_url=f"{base_url}/student/payment/process?status=success&booking_id={booking.id}",
+                failure_url=f"{base_url}/student/payment?cancelled=1",
+                webhook_url=f"{api_base_url}/api/payments/chargily/webhook",
+                description=f"E-NOVAR — séance avec {teacher_id}",
+            )
+            booking.chargily_checkout_id = checkout["id"]
+            checkout_url = checkout["checkout_url"]
+        except Exception:
+            # Chargily not configured (no CHARGILY_SECRET_KEY yet) — proceed
+            # anyway, booking stays pending until an admin can confirm it
+            # manually the same way cash/transfer are handled.
+            checkout_url = None
 
     # For pack5/pack10: reserve all named slots
     if body.pack_sessions:

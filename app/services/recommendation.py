@@ -10,6 +10,7 @@ from app.models.catalog import Subject, TeacherDeliveryOption, TeacherSubjectPri
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.models.scheduling import TeacherSlot, TeacherSlotSubject
 from app.services import matching
+from app.services.boost import is_boost_active
 
 # ── Scoring weights ────────────────────────────────────────────────────────────
 # Not scientifically tuned — reasonable and monotonic in the right direction.
@@ -144,7 +145,7 @@ def score_teacher(
         score += _W_QUALITY * (teacher.rating_avg * min(teacher.reviews_count, 20) / 20)
     if teacher.verified:
         score += 0.5
-    if teacher.sponsored:
+    if is_boost_active(teacher):
         score += 0.5
 
     return score
@@ -230,7 +231,7 @@ def rank_teachers(db: Session, student_id: UUID, limit: int = 3) -> List[Teacher
         )
         scored.append((s, tp))
 
-    scored.sort(key=lambda pair: (1 if pair[1].sponsored else 0, pair[0]), reverse=True)
+    scored.sort(key=lambda pair: (1 if is_boost_active(pair[1]) else 0, pair[0]), reverse=True)
     return [tp for _, tp in scored[:limit]]
 
 

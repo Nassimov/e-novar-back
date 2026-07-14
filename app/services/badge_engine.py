@@ -229,11 +229,13 @@ def check_and_unlock_badges(
     ).all()
     already_unlocked: Set[str] = set(existing)
 
-    # All active badges with condition logic
+    # All active badges with condition logic (student-facing only — migration
+    # 058 added teacher-only trophies scoped out via `audience`).
     badges = db.exec(
         select(Badge).where(
             Badge.active == True,   # noqa: E712
             Badge.condition_type.isnot(None),
+            Badge.audience.in_(["student", "both"]),
         )
     ).all()
 

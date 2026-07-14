@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
 
+    # ── Chargily Pay (Edahabia/CIB via a real Algeria-native gateway) ──────────
+    # One secret key doubles as the API bearer token AND the webhook HMAC key —
+    # no separate webhook secret, unlike Stripe. Base URL differs by mode (the
+    # "test" segment is part of the path, not just the key prefix); default is
+    # Chargily's test/sandbox endpoint — override with the live URL in
+    # production once the account is verified for Live Mode.
+    chargily_secret_key: str = ""
+    chargily_base_url: str = "https://pay.chargily.net/test/api/v2"
+
     # ── OneSignal (push + email) ──────────────────────────────────────────────
     onesignal_app_id: str = ""
     onesignal_rest_api_key: str = ""

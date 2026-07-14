@@ -135,6 +135,7 @@ class TeacherProfile(SQLModel, table=True):
     verified: bool = Field(default=False)
     badge: Optional[str] = Field(default=None)            # public.teacher_badge
     sponsored: bool = Field(default=False)
+    boost_expires_at: Optional[datetime] = Field(default=None)  # see app/services/boost.py
     success_rate: Optional[float] = Field(default=None)
     students_count: int = Field(default=0)
     hours_taught: int = Field(default=0)
@@ -144,6 +145,8 @@ class TeacherProfile(SQLModel, table=True):
     iban: Optional[str] = Field(default=None)
     bank_holder: Optional[str] = Field(default=None)
     bank_last4: Optional[str] = Field(default=None)
+    payout_rail: str = Field(default="bank")               # "bank" (IBAN/RIB) | "baridimob" (mobile wallet)
+    payout_phone: Optional[str] = Field(default=None)      # baridimob only — Algerian mobile number
     slug: Optional[str] = Field(
         default=None,
         sa_column=sa.Column(sa.Text, unique=True, nullable=True),

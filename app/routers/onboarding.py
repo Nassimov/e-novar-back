@@ -552,6 +552,14 @@ class TeacherOnboardingRequest(BaseModel):
     # Pre-uploaded file URLs (uploaded via /teacher/upload-document)
     cv_url: Optional[str] = None
     diploma_uploads: Optional[List[TeacherDiplomaUpload]] = None
+    # Payout destination — required to complete onboarding (see app/services/payout.py).
+    # rail="bank": iban + bank_holder (bank_last4 optional, display-only, never a full PAN).
+    # rail="baridimob": payout_phone (Algerian mobile number registered to the wallet).
+    payout_rail: Optional[str] = None
+    iban: Optional[str] = None
+    bank_holder: Optional[str] = None
+    bank_last4: Optional[str] = None
+    payout_phone: Optional[str] = None
 
 
 # ─────────────────────────── teacher upload-document ─────────────────────────
@@ -625,6 +633,12 @@ async def complete_teacher_onboarding(
     data = payload
     uid = UUID(current_user["id"])
 
+    # ── 0. Payout destination — required before onboarding can complete ──────
+    from app.services.payout import validate_payout_fields
+    payout_rail = validate_payout_fields(
+        data.payout_rail, data.iban, data.bank_holder, data.payout_phone, data.bank_last4
+    )
+
     # ── 1. Resolve avatar ─────────────────────────────────────────────────────
     avatar_url = data.avatar_url
     if avatar_url and avatar_url.startswith("data:"):
@@ -690,6 +704,20 @@ async def complete_teacher_onboarding(
         tp.cv_url = cv_url
     if data.cover_letter is not None:
         tp.cover_letter = data.cover_letter
+
+    # Payout destination — full-replace so the two rails never mix (matches
+    # the DB CHECK constraint in migration 059).
+    tp.payout_rail = payout_rail
+    if payout_rail == "bank":
+        tp.iban = data.iban.strip() if data.iban else None
+        tp.bank_holder = data.bank_holder.strip() if data.bank_holder else None
+        tp.bank_last4 = data.bank_last4.strip() if data.bank_last4 else None
+        tp.payout_phone = None
+    else:
+        tp.payout_phone = data.payout_phone.strip() if data.payout_phone else None
+        tp.iban = None
+        tp.bank_holder = None
+        tp.bank_last4 = None
     db.add(tp)
 
     # ── 6. Main commit (profile + teacher_profile) ────────────────────────────

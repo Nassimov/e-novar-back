@@ -107,8 +107,21 @@ class TeacherDetailResponse(BaseModel):
     is_approved: bool
     is_verified: bool
     diplomas: List[TeacherDiplomaItem] = []
+    boost_active: bool = False
+    boost_expires_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
+
+
+class BoostActivateRequest(BaseModel):
+    days: int
+
+
+class BoostStatusResponse(BaseModel):
+    active: bool
+    expires_at: Optional[datetime] = None
+    plans: dict[int, int]  # days -> EP cost
+    balance: int
 
 
 class TeacherProfileUpdate(BaseModel):
@@ -211,10 +224,36 @@ class WalletResponse(BaseModel):
     iban: Optional[str] = None
     bank_holder: Optional[str] = None
     bank_last4: Optional[str] = None
+    payout_rail: str = "bank"           # "bank" | "baridimob"
+    payout_phone: Optional[str] = None  # baridimob only
 
 
 class PayoutModeUpdate(BaseModel):
     payout_mode: str  # "platform" | "direct"
+
+
+class TeacherPayoutInfoUpdate(BaseModel):
+    """Body for PUT /me/payout-info — where a teacher's earnings are sent.
+    rail="bank": iban + bank_holder required (bank_last4 optional, display-only).
+    rail="baridimob": payout_phone required (Algerian mobile number)."""
+    payout_rail: str = "bank"
+    iban: Optional[str] = None
+    bank_holder: Optional[str] = None
+    bank_last4: Optional[str] = None
+    payout_phone: Optional[str] = None
+
+
+class TeacherPaymentItem(BaseModel):
+    """One per-lesson payment row for the teacher wallet page — real data,
+    replaces the old hardcoded ALL_TX list on the frontend."""
+    session_id: UUID
+    booking_id: Optional[UUID] = None
+    student_name: str
+    subject_name: Optional[str] = None
+    scheduled_at: datetime
+    formula: str
+    status: str  # "received" (session completed, amount already credited) | "pending" (booking accepted, session not completed yet)
+    amount: int  # DZD — this lesson's share
 
 
 class DzdWithdrawalRequest(BaseModel):

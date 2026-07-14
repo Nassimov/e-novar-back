@@ -12,7 +12,9 @@ class Badge(SQLModel, table=True):
     """
     Mirrors public.badges.
     Text PK (slug-like, e.g. 'first-lesson', 'streak-7').
-    Static catalogue seeded by migration 025_badge_catalog.sql.
+    Static catalogue seeded by migration 025_badge_catalog.sql (student badges)
+    and 058_teacher_trophies.sql (teacher trophies). `audience` scopes each
+    row to student | teacher | both.
     """
 
     __tablename__ = "badges"
@@ -32,6 +34,9 @@ class Badge(SQLModel, table=True):
     ep_reward: int = Field(default=50)
     sort_order: int = Field(default=0)
     active: bool = Field(default=True)
+
+    # migration 058 — scopes a badge to student / teacher / both audiences
+    audience: str = Field(default="student")
 
 
 class UserBadge(SQLModel, table=True):

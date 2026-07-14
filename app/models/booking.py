@@ -46,6 +46,8 @@ class Booking(SQLModel, table=True):
     payment_id: Optional[UUID] = Field(default=None)
     stripe_cs_id: Optional[str] = Field(default=None)     # Stripe Checkout Session ID
     stripe_pi_id: Optional[str] = Field(default=None)     # Stripe PaymentIntent ID
+    chargily_checkout_id: Optional[str] = Field(default=None)  # Chargily Checkout ID (edahabia)
+    chargily_paid_at: Optional[datetime] = Field(default=None)  # set by webhook on checkout.paid
     payment_method: Optional[str] = Field(default=None)   # cib | edahabia | transfer | cash
     subject: Optional[str] = Field(default=None)          # student-chosen subject
     comment: Optional[str] = Field(default=None)          # student note / objective
