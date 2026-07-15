@@ -294,6 +294,7 @@ from app.routers.teachers import router as teachers_router
 from app.routers.payments import router as payments_router
 from app.routers.chargily_webhook import router as chargily_webhook_router
 from app.routers.sessions import router as sessions_router
+from app.routers.session_validation import router as session_validation_router
 from app.routers.messages import router as messages_router
 from app.routers.notifications import router as notifications_router
 from app.routers.kp import router as kp_router
@@ -306,6 +307,7 @@ from app.routers.catalogs import router as catalogs_router
 from app.routers.parent import router as parent_router
 from app.routers.files import router as files_router
 from app.routers.admin.users import router as admin_users_router
+from app.routers.admin.admin_accounts import router as admin_accounts_router
 from app.routers.admin.teachers import router as admin_teachers_router
 from app.routers.admin.reviews import router as admin_reviews_router
 from app.routers.admin.challenges import router as admin_challenges_router
@@ -329,6 +331,7 @@ from app.routers.admin.store import router as admin_store_router
 from app.routers.admin.referrals import router as admin_referrals_router
 from app.routers.admin.bookings import router as admin_bookings_router
 from app.routers.admin.settings import router as admin_settings_router
+from app.routers.admin.session_validation import router as admin_session_validation_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
 
@@ -342,6 +345,7 @@ app.include_router(teacher_badges_router,      prefix="/api/teacher",  tags=["Te
 app.include_router(payments_router,      prefix="/api/payments",       tags=["Payments"])
 app.include_router(chargily_webhook_router, prefix="/api/payments",    tags=["Payments"])
 app.include_router(sessions_router,      prefix="/api/sessions",       tags=["Sessions"])
+app.include_router(session_validation_router, prefix="/api/sessions",  tags=["Session Validation"])
 app.include_router(homework_router,      prefix="/api/homework",       tags=["Homework"])
 app.include_router(messages_router,      prefix="/api/messages",       tags=["Messages"])
 app.include_router(notifications_router, prefix="/api/notifications",  tags=["Notifications"])
@@ -364,6 +368,7 @@ app.include_router(student_leaderboard_router, prefix="/api/student",    tags=["
 
 app.include_router(admin_auth_router,       prefix="/api/admin/auth",       tags=["Admin — Auth"])
 app.include_router(admin_users_router,      prefix="/api/admin/users",      tags=["Admin — Users"])
+app.include_router(admin_accounts_router,   prefix="/api/admin/accounts",   tags=["Admin — Accounts"])
 app.include_router(admin_teachers_router,   prefix="/api/admin/teachers",   tags=["Admin — Teachers"])
 app.include_router(admin_reviews_router,    prefix="/api/admin/reviews",    tags=["Admin — Reviews"])
 app.include_router(admin_challenges_router, prefix="/api/admin/challenges", tags=["Admin — Challenges"])
@@ -375,6 +380,7 @@ app.include_router(admin_messages_router,   prefix="/api/admin/messages",   tags
 app.include_router(admin_referrals_router,  prefix="/api/admin/referrals",  tags=["Admin — Referrals"])
 app.include_router(admin_bookings_router,   prefix="/api/admin/bookings",   tags=["Admin — Bookings"])
 app.include_router(admin_settings_router,   prefix="/api/admin/settings",   tags=["Admin — Settings"])
+app.include_router(admin_session_validation_router, prefix="/api/admin/session-validations", tags=["Admin — Session Validation"])
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 

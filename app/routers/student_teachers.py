@@ -1055,6 +1055,7 @@ async def book_teacher_slot(
     # Materialize one TutoringSession row per lesson in the booking — this is
     # what /sessions/{id}/complete later credits payout against, one lesson
     # at a time, even for packs (see PACK_SIZES in app.services.pricing).
+    created_sessions: List[TutoringSession] = []
     if body.pack_sessions:
         for ps in body.pack_sessions:
             ps_subject_id = None
@@ -1074,35 +1075,50 @@ async def book_teacher_slot(
                 ps_date = dt.date.fromisoformat(ps.date)
             except ValueError:
                 ps_date = booking_date
-            db.add(
-                TutoringSession(
-                    booking_id=booking.id,
-                    teacher_id=teacher_id,
-                    student_id=student_id,
-                    subject_id=ps_subject_id,
-                    level_id=ps_level_id,
-                    scheduled_at=dt.datetime.combine(ps_date, ps_time),
-                    mode=body.mode,
-                    status="scheduled",
-                )
+            ps_session = TutoringSession(
+                booking_id=booking.id,
+                teacher_id=teacher_id,
+                student_id=student_id,
+                subject_id=ps_subject_id,
+                level_id=ps_level_id,
+                scheduled_at=dt.datetime.combine(ps_date, ps_time),
+                mode=body.mode,
+                status="scheduled",
             )
+            db.add(ps_session)
+            created_sessions.append(ps_session)
     else:
         single_subject_id, single_level_id = (
             _resolve_requested_subject_level(resolved_slot.id, body.subject_id, body.level_id, db)
             if resolved_slot else (body.subject_id, body.level_id)
         )
-        db.add(
-            TutoringSession(
-                booking_id=booking.id,
-                teacher_id=teacher_id,
-                student_id=student_id,
-                subject_id=single_subject_id,
-                level_id=single_level_id,
-                scheduled_at=dt.datetime.combine(booking_date, slot_time or dt.time(0, 0)),
-                mode=body.mode,
-                status="scheduled",
-            )
+        single_session = TutoringSession(
+            booking_id=booking.id,
+            teacher_id=teacher_id,
+            student_id=student_id,
+            subject_id=single_subject_id,
+            level_id=single_level_id,
+            scheduled_at=dt.datetime.combine(booking_date, slot_time or dt.time(0, 0)),
+            mode=body.mode,
+            status="scheduled",
         )
+        db.add(single_session)
+        created_sessions.append(single_session)
+
+    # One SessionValidation row per TutoringSession (1:1) — this is what
+    # backs the whole proof-of-attendance/trust-score workflow (see
+    # app/services/session_validation.py). Flush first so each session has
+    # its generated id.
+    db.flush()
+    from app.models.session_validation import SessionValidation
+    for s in created_sessions:
+        db.add(SessionValidation(
+            session_id=s.id,
+            booking_id=booking.id,
+            student_id=student_id,
+            teacher_id=teacher_id,
+            status="scheduled",
+        ))
 
     db.commit()
     db.refresh(booking)

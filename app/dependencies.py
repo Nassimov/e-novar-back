@@ -103,11 +103,18 @@ def get_current_profile(
 
 async def get_admin_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """
     Validate a custom admin JWT (issued by POST /api/admin/auth/step2).
     Checks both the JWT signature/expiry AND the JTI presence in Redis
     so that logout immediately revokes the session.
+
+    For admin_accounts-backed sessions (invited admins, not the env-var
+    bootstrap super admin), also re-checks the account's live status on
+    every request — a suspension/deletion must take effect immediately,
+    not just block the next login, even though the JWT itself might still
+    be within its (short) validity window.
     """
     from app.config import get_settings as _get_settings
 
@@ -128,8 +135,51 @@ async def get_admin_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    admin_id = claims.get("admin_id")
+    if admin_id:
+        from app.models.admin_account import AdminAccount
+
+        account = db.get(AdminAccount, UUID(admin_id))
+        if account is None or account.status != "active":
+            get_redis_client().delete(f"admin:session:{jti}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Admin account suspended or removed",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     cfg = _get_settings()
-    return {"id": None, "email": cfg.admin_email, "role": "admin", "claims": claims}
+    return {
+        # "id" is ALWAYS None — deliberately unchanged from before multi-admin
+        # support existed. Admins (bootstrap or invited via admin_accounts)
+        # are never rows in `profiles`, so this must never be written into a
+        # `foreign_key="profiles.id")` column (moderated_by, reviewed_by,
+        # deleted_by, etc. across the codebase all guard on
+        # `current_user.get("id")` and rely on it being falsy for admins).
+        "id": None,
+        # Real admin_accounts.id (None for the env-var bootstrap admin) —
+        # only for code that specifically tracks admin_accounts actions
+        # (see app/routers/admin/admin_accounts.py, AdminAccountAuditLog).
+        # Never assign this into a profiles.id foreign key.
+        "admin_account_id": claims.get("admin_id"),
+        "email": claims.get("email") or cfg.admin_email,
+        "role": claims.get("role") or "admin",
+        "claims": claims,
+    }
+
+
+def require_super_admin(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+) -> Dict[str, Any]:
+    """Dependency for endpoints restricted to the super admin (PDG) — either
+    the original env-var bootstrap admin or an admin_accounts row with
+    role='super_admin'."""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Réservé au super administrateur",
+        )
+    return current_user
 
 
 def require_role(*roles: str):

@@ -132,6 +132,23 @@ class AnalyticsResponse(BaseModel):
     recent_imports:     int
 
 
+class CatalogSubjectOut(BaseModel):
+    id:   str
+    name: str
+    slug: str
+
+
+class CatalogLevelOut(BaseModel):
+    id:    str
+    label: str
+    code:  str
+
+
+class CatalogResponse(BaseModel):
+    subjects: List[CatalogSubjectOut]
+    levels:   List[CatalogLevelOut]
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _resolve_catalogs(db: Session) -> tuple[dict[UUID, str], dict[UUID, str]]:
@@ -372,6 +389,20 @@ async def list_import_batches(
         "total": total,
         "page": page,
     }
+
+
+@router.get("/catalog", response_model=CatalogResponse)
+async def get_question_catalog(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Real Subject/Level catalog rows for the question-bank filters & form dropdowns."""
+    subjects = db.exec(select(Subject).order_by(Subject.name)).all()
+    levels   = db.exec(select(Level).order_by(Level.position)).all()
+    return CatalogResponse(
+        subjects=[CatalogSubjectOut(id=str(s.id), name=s.name, slug=s.slug) for s in subjects],
+        levels=[CatalogLevelOut(id=str(l.id), label=l.label, code=l.code) for l in levels],
+    )
 
 
 @router.get("/{question_id}", response_model=QuestionOut)

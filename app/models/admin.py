@@ -24,6 +24,22 @@ class PlatformSettings(SQLModel, table=True):
     pack5_discount_percent: int = Field(default=10)
     pack10_discount_percent: int = Field(default=15)
     group_discount_percent: int = Field(default=20)
+
+    # Session validation trust score (see app/services/session_validation.py)
+    # — weights need not sum to 100, the engine normalizes by whatever total
+    # is actually configured. Never hardcode these values elsewhere.
+    trust_weight_student_validation: int = Field(default=40)
+    trust_weight_teacher_confirmation: int = Field(default=20)
+    trust_weight_session_completed: int = Field(default=10)
+    trust_weight_online_duration: int = Field(default=20)
+    trust_weight_gps_proximity: int = Field(default=10)
+    trust_weight_clean_history: int = Field(default=10)
+    trust_auto_approve_threshold: int = Field(default=80)
+    trust_manual_review_threshold: int = Field(default=50)
+    token_visible_minutes_before: int = Field(default=30)
+    student_validation_window_hours: int = Field(default=24)
+    gps_proximity_threshold_meters: int = Field(default=500)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

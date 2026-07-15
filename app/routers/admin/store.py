@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.dependencies import get_admin_user, get_db
@@ -145,8 +146,33 @@ async def list_items(
     offset = (page - 1) * size
     page_items = items[offset: offset + size]
 
+    # Redemption analytics: total claims and pending claims per item, so admins
+    # can spot popular items and items awaiting fulfilment at a glance.
+    page_item_ids = [it.id for it in page_items]
+    claims_count: Dict[str, int] = {}
+    pending_count: Dict[str, int] = {}
+    if page_item_ids:
+        for iid, cnt in db.exec(
+            select(RewardClaim.item_id, func.count(RewardClaim.id))
+            .where(RewardClaim.item_id.in_(page_item_ids))
+            .group_by(RewardClaim.item_id)
+        ).all():
+            claims_count[iid] = cnt
+        for iid, cnt in db.exec(
+            select(RewardClaim.item_id, func.count(RewardClaim.id))
+            .where(RewardClaim.item_id.in_(page_item_ids), RewardClaim.status == "pending")
+            .group_by(RewardClaim.item_id)
+        ).all():
+            pending_count[iid] = cnt
+
+    def _row(it: StoreItem) -> Dict[str, Any]:
+        d = _item_to_dict(it)
+        d["claims_count"] = claims_count.get(it.id, 0)
+        d["pending_claims_count"] = pending_count.get(it.id, 0)
+        return d
+
     return {
-        "items": [_item_to_dict(it) for it in page_items],
+        "items": [_row(it) for it in page_items],
         "total": total,
         "page": page,
         "size": size,
@@ -303,23 +329,31 @@ async def list_claims(
         for it in db.exec(select(StoreItem).where(StoreItem.id.in_(item_ids))).all():
             items_map[it.id] = it
 
+    def _claim_row(c: RewardClaim) -> Dict[str, Any]:
+        user = users_map.get(c.user_id)
+        item = items_map.get(c.item_id)
+        info = c.shipping_info if isinstance(c.shipping_info, dict) else {}
+        return {
+            "id": str(c.id),
+            "user_id": str(c.user_id),
+            "user_name": user.full_name if user else "—",
+            "user_email": user.email if user else None,
+            "user_phone": user.phone if user else None,
+            "item_id": c.item_id,
+            "item_name": item.name if item else c.item_id,
+            "item_category": item.category if item else None,
+            "item_icon": item.icon if item else None,
+            "item_effect_type": item.effect_type if item else None,
+            "item_effect_config": item.effect_config if item else None,
+            "cost": c.cost,
+            "status": c.status,
+            "note": info.get("admin_note"),
+            "claimed_at": c.claimed_at.isoformat(),
+            "processed_at": c.processed_at.isoformat() if c.processed_at else None,
+        }
+
     return {
-        "items": [
-            {
-                "id": str(c.id),
-                "user_id": str(c.user_id),
-                "user_name": users_map[c.user_id].full_name if c.user_id in users_map else "—",
-                "item_id": c.item_id,
-                "item_name": items_map[c.item_id].name if c.item_id in items_map else c.item_id,
-                "item_category": items_map[c.item_id].category if c.item_id in items_map else None,
-                "item_icon": items_map[c.item_id].icon if c.item_id in items_map else None,
-                "cost": c.cost,
-                "status": c.status,
-                "claimed_at": c.claimed_at.isoformat(),
-                "processed_at": c.processed_at.isoformat() if c.processed_at else None,
-            }
-            for c in page_claims
-        ],
+        "items": [_claim_row(c) for c in page_claims],
         "total": total,
         "page": page,
         "size": size,
@@ -357,12 +391,24 @@ async def process_claim(
     status_map = {"approve": "approved", "deliver": "delivered", "cancel": "cancelled"}
     claim.status = status_map[payload.action]
     claim.processed_at = datetime.now(timezone.utc)
+
+    if payload.note and payload.note.strip():
+        existing_info = claim.shipping_info if isinstance(claim.shipping_info, dict) else {}
+        claim.shipping_info = {
+            **existing_info,
+            "admin_note": payload.note.strip(),
+            "admin_note_action": payload.action,
+            "admin_note_at": claim.processed_at.isoformat(),
+        }
+
     db.add(claim)
     db.commit()
     db.refresh(claim)
 
+    info = claim.shipping_info if isinstance(claim.shipping_info, dict) else {}
     return {
         "id": str(claim.id),
         "status": claim.status,
+        "note": info.get("admin_note"),
         "processed_at": claim.processed_at.isoformat(),
     }

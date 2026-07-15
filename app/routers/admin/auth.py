@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import json
 import secrets
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import bcrypt as _bcrypt
 
-from fastapi import APIRouter, Body, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
+from sqlmodel import Session, select
 
 from app.config import get_settings
 from app.core.redis import get_redis_client
 from app.core.security import create_admin_jwt, decode_admin_jwt
+from app.dependencies import get_db
+from app.models.admin_account import AdminAccount
 
 router = APIRouter(tags=["Admin — Auth"])
 settings = get_settings()
@@ -79,38 +83,62 @@ class Step2Request(BaseModel):
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/step1", summary="Admin login — step 1: email + password")
-async def admin_step1(payload: Step1Request, request: Request) -> Dict[str, Any]:
+async def admin_step1(
+    payload: Step1Request,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     """
-    Validate admin email and bcrypt password.
+    Validate admin email + password — either the original env-var bootstrap
+    super admin, or an active row in admin_accounts (invited by another
+    admin, see app/services/admin_accounts.py).
     On success, returns a short-lived `challenge_token` required for step 2.
-    The challenge token expires in 5 minutes and is stored exclusively in Redis.
+    The challenge token expires in 5 minutes and is stored exclusively in Redis,
+    tagged with which identity it belongs to so step 2 checks the right TOTP secret.
     """
     ip = _ip(request)
     _guard_brute_force(ip)
 
+    email = payload.email.strip().lower()
+
     # Both checks run to prevent enumeration (don't short-circuit on email mismatch)
-    email_ok = payload.email.strip().lower() == settings.admin_email.strip().lower()
-    hash_ok = bool(settings.admin_password_hash) and _verify_password(
+    bootstrap_email_ok = email == settings.admin_email.strip().lower()
+    bootstrap_hash_ok = bool(settings.admin_password_hash) and _verify_password(
         payload.password, settings.admin_password_hash
     )
+    is_bootstrap = bootstrap_email_ok and bootstrap_hash_ok
 
-    if not email_ok or not hash_ok:
+    account: Optional[AdminAccount] = None
+    if not is_bootstrap:
+        candidate = db.exec(
+            select(AdminAccount).where(AdminAccount.email == email, AdminAccount.status == "active")
+        ).first()
+        if candidate and candidate.password_hash and _verify_password(payload.password, candidate.password_hash):
+            account = candidate
+
+    if not is_bootstrap and account is None:
         _record_failure(ip)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     _clear_failures(ip)
 
     challenge = secrets.token_urlsafe(48)
-    get_redis_client().setex(f"admin:challenge:{challenge}", _CHALLENGE_TTL, "1")
+    identity = (
+        {"kind": "bootstrap"}
+        if is_bootstrap
+        else {"kind": "account", "account_id": str(account.id)}
+    )
+    get_redis_client().setex(f"admin:challenge:{challenge}", _CHALLENGE_TTL, json.dumps(identity))
 
     return {"challenge_token": challenge}
 
 
 @router.post("/step2", summary="Admin login — step 2: TOTP verification")
-async def admin_step2(payload: Step2Request, request: Request) -> Dict[str, Any]:
+async def admin_step2(
+    payload: Step2Request,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
     """
     Validate the TOTP code and the challenge token from step 1.
     On success, returns a signed admin JWT.  The challenge token is consumed
@@ -124,22 +152,37 @@ async def admin_step2(payload: Step2Request, request: Request) -> Dict[str, Any]
     redis = get_redis_client()
     challenge_key = f"admin:challenge:{payload.challenge_token}"
 
-    # Validate challenge token
-    if not redis.get(challenge_key):
+    raw_identity = redis.get(challenge_key)
+    if not raw_identity:
         _record_failure(ip)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired challenge token",
         )
+    identity = json.loads(raw_identity)
 
-    # Validate TOTP
-    if not settings.admin_2fa_secret:
+    admin_id: Optional[str] = None
+    admin_email = settings.admin_email
+    admin_role = "super_admin"
+    totp_secret = settings.admin_2fa_secret
+
+    if identity.get("kind") == "account":
+        account = db.get(AdminAccount, uuid.UUID(identity["account_id"]))
+        if account is None or account.status != "active":
+            _record_failure(ip)
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account no longer active")
+        admin_id = str(account.id)
+        admin_email = account.email
+        admin_role = account.role
+        totp_secret = account.totp_secret
+
+    if not totp_secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="2FA is not configured on this server",
+            detail="2FA is not configured for this account",
         )
 
-    totp = pyotp.TOTP(settings.admin_2fa_secret)
+    totp = pyotp.TOTP(totp_secret)
     if not totp.verify(payload.totp_code.strip(), valid_window=1):
         _record_failure(ip)
         # Do NOT delete the challenge on TOTP failure so admin can retry once
@@ -152,16 +195,23 @@ async def admin_step2(payload: Step2Request, request: Request) -> Dict[str, Any]
     redis.delete(challenge_key)
     _clear_failures(ip)
 
+    if identity.get("kind") == "account":
+        from datetime import datetime
+        account.last_login_at = datetime.utcnow()
+        db.add(account)
+        db.commit()
+
     # Issue admin session JWT
     jti = str(uuid.uuid4())
     expire_seconds = settings.admin_jwt_expire_minutes * 60
     redis.setex(f"admin:session:{jti}", expire_seconds, "1")
 
-    token = create_admin_jwt(jti)
+    token = create_admin_jwt(jti, admin_id=admin_id, email=admin_email, role=admin_role)
     return {
         "access_token": token,
         "token_type": "bearer",
-        "email": settings.admin_email,
+        "email": admin_email,
+        "role": admin_role,
         "expires_in": expire_seconds,
     }
 

@@ -48,13 +48,27 @@ def _admin_jwt_secret() -> str:
     return settings.admin_jwt_secret or settings.secret_key
 
 
-def create_admin_jwt(jti: str) -> str:
-    """Issue a signed admin session JWT containing the session JTI."""
+def create_admin_jwt(
+    jti: str,
+    admin_id: Optional[str] = None,
+    email: Optional[str] = None,
+    role: str = "admin",
+) -> str:
+    """Issue a signed admin session JWT containing the session JTI.
+
+    `admin_id=None` identifies the original env-var bootstrap super-admin
+    (see app/routers/admin/auth.py) — it has no row in admin_accounts.
+    Any other admin passes their real `admin_accounts.id` here (see
+    app/services/admin_accounts.py), so get_admin_user can tell admins
+    apart and enforce super_admin-only actions.
+    """
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=settings.admin_jwt_expire_minutes)
     payload: Dict[str, Any] = {
-        "sub": "admin",
-        "role": "admin",
+        "sub": admin_id or "admin",
+        "admin_id": admin_id,
+        "email": email,
+        "role": role,
         "type": "admin_session",
         "jti": jti,
         "iat": now,

@@ -222,7 +222,18 @@ async def complete_session(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Mark a session completed and credit the teacher's payout for that lesson.
+    """Low-level payout primitive — admin-only. Credits the teacher's payout
+    for that one lesson.
+
+    This used to let a teacher unilaterally mark their own session completed
+    and instantly credit their own wallet — zero proof of attendance. That
+    self-service path is gone: the real, student-attested completion flow now
+    lives in app/routers/session_validation.py (token-based validation +
+    trust score), which calls app.services.session_validation.
+    credit_session_payout — the same underlying credit logic — once a session
+    is legitimately validated or an admin approves it. This endpoint remains
+    only as the admin override primitive (also used directly by
+    admin/bookings.py's simulate_completion test tool).
 
     Payout is per-lesson, not per-booking: a pack booking's amount is split
     evenly across its PACK_SIZES[formula] sessions (see app.services.pricing),
@@ -230,15 +241,14 @@ async def complete_session(
     completed here. Re-completing an already-completed/cancelled session is
     rejected (400) — this is the idempotency guard against double-crediting.
     """
-    uid = UUID(current_user["id"])
     role = current_user.get("role", "student")
 
     session = db.get(SessionModel, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.teacher_id != uid and role != "admin":
-        raise HTTPException(status_code=403, detail="Only the session's teacher can mark it completed")
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Only an admin can force-complete a session")
 
     if session.status in ("completed", "cancelled"):
         raise HTTPException(status_code=400, detail="Session is already completed or cancelled")
