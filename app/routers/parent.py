@@ -240,6 +240,96 @@ async def list_children(
     return {"children": children}
 
 
+class LinkChildRequest(BaseModel):
+    student_code: str
+
+
+@router.post("/children/link")
+async def link_child(
+    payload: LinkChildRequest,
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    """Link an additional child post-onboarding — same lookup/creation logic
+    as the parent-onboarding batch link in app/routers/onboarding.py (by
+    StudentProfile.student_code), just usable one child at a time afterwards."""
+    uid = UUID(current_user["id"])
+    code = payload.student_code.strip().upper()
+
+    sp = db.exec(select(StudentProfile).where(StudentProfile.student_code == code)).first()
+    if sp is None:
+        raise HTTPException(status_code=404, detail="Aucun élève trouvé avec ce code.")
+
+    existing = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.parent_id == uid)
+        .where(ParentStudentLink.student_id == sp.user_id)
+    ).first()
+    if existing and existing.status == "accepted":
+        raise HTTPException(status_code=409, detail="Cet enfant est déjà lié à votre compte.")
+
+    now = datetime.utcnow()
+    if existing:
+        existing.status = "accepted"
+        existing.accepted_at = now
+        db.add(existing)
+    else:
+        db.add(ParentStudentLink(parent_id=uid, student_id=sp.user_id, status="accepted", accepted_at=now))
+
+    student_profile = db.exec(select(Profile).where(Profile.id == sp.user_id)).first()
+    parent_profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+
+    from app.models.notification import Notification
+    db.add(Notification(
+        user_id=sp.user_id,
+        type="system",
+        title="👨‍👩‍👧 Compte parent lié",
+        body=f"{(parent_profile.full_name if parent_profile else None) or 'Un parent'} suit désormais votre compte E-NOVAR.",
+        data={"parent_id": str(uid)},
+    ))
+
+    db.commit()
+
+    return {
+        "student_id": str(sp.user_id),
+        "student_code": sp.student_code,
+        "name": (student_profile.full_name if student_profile else None) or "Enfant",
+        "avatar_url": student_profile.avatar_url if student_profile else None,
+    }
+
+
+@router.post("/children/{student_id}/unlink")
+async def unlink_child(
+    student_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(current_user["id"])
+    link = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.parent_id == uid)
+        .where(ParentStudentLink.student_id == student_id)
+        .where(ParentStudentLink.status == "accepted")
+    ).first()
+    if link is None:
+        raise HTTPException(status_code=404, detail="Liaison introuvable")
+
+    link.status = "revoked"
+    db.add(link)
+
+    from app.models.notification import Notification
+    db.add(Notification(
+        user_id=student_id,
+        type="system",
+        title="🔗 Liaison retirée",
+        body="Votre parent s'est dissocié de votre compte. Vous gérez maintenant votre espace en autonomie.",
+        data={"parent_id": str(uid)},
+    ))
+
+    db.commit()
+    return {"status": "revoked"}
+
+
 # ── Child sessions ────────────────────────────────────────────────────────────
 
 @router.get("/children/{child_id}/sessions")
@@ -504,13 +594,105 @@ async def get_child_kp_transactions(
     }
 
 
-# ── Parent payments (kept for backward compat) ────────────────────────────────
+# ── Redeem a store item on behalf of a linked child ──────────────────────────
+# The child's own KP account is debited and credited with whatever the store
+# item grants — same underlying app.services.store.redeem_item used by
+# POST /api/store/items/{item_id}/redeem, just targeting child_id instead of
+# the caller's own id (verified as an accepted link first).
 
-@router.get("/payments")
-async def get_parent_payments(
-    page: int = 1,
-    size: int = 20,
+@router.post("/children/{child_id}/store/redeem", status_code=status.HTTP_201_CREATED)
+async def redeem_store_item_for_child(
+    child_id: UUID,
+    item_id: str = Body(..., embed=True),
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
 ):
-    return {"items": [], "total": 0, "page": page, "size": size, "pages": 0}
+    uid = UUID(current_user["id"])
+    _verify_child_link(uid, child_id, db)
+
+    from app.services.store import redeem_item
+
+    try:
+        claim, entitlement, account, msg = redeem_item(child_id, item_id, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "message": msg,
+        "claim": {
+            "id": str(claim.id),
+            "item_id": claim.item_id,
+            "cost": claim.cost,
+            "status": claim.status,
+            "claimed_at": claim.claimed_at.isoformat(),
+        },
+        "new_balance": account.balance,
+    }
+
+
+# ── Parent payments ────────────────────────────────────────────────────────────
+# A parent never has bookings of their own — the sessions/bookings they pay
+# for always belong to one of their linked children (Booking.student_id).
+# This lists every such booking as one "operation", newest first.
+
+@router.get("/payments")
+async def get_parent_payments(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    month: Optional[str] = Query(None, description="Filter to a single month, format YYYY-MM"),
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(current_user["id"])
+    child_ids = [
+        link.student_id
+        for link in db.exec(
+            select(ParentStudentLink)
+            .where(ParentStudentLink.parent_id == uid)
+            .where(ParentStudentLink.status == "accepted")
+        ).all()
+    ]
+    if not child_ids:
+        return {"items": [], "total": 0, "page": page, "size": size, "pages": 0}
+
+    bookings = db.exec(
+        select(Booking)
+        .where(Booking.student_id.in_(child_ids))
+        .order_by(Booking.created_at.desc())
+    ).all()
+
+    if month:
+        bookings = [b for b in bookings if b.created_at.strftime("%Y-%m") == month]
+
+    total = len(bookings)
+    offset = (page - 1) * size
+    page_bookings = bookings[offset: offset + size]
+
+    child_map = {p.id: p for p in db.exec(select(Profile).where(Profile.id.in_(child_ids))).all()}
+    teacher_ids = list({b.teacher_id for b in page_bookings})
+    teacher_map = {p.id: p for p in db.exec(select(Profile).where(Profile.id.in_(teacher_ids))).all()} if teacher_ids else {}
+
+    return {
+        "items": [
+            {
+                "id": str(b.id),
+                "child_id": str(b.student_id),
+                "child_name": (child_map.get(b.student_id).full_name if child_map.get(b.student_id) else None) or "Enfant",
+                "teacher_id": str(b.teacher_id),
+                "teacher_name": (teacher_map.get(b.teacher_id).full_name if teacher_map.get(b.teacher_id) else None) or "Enseignant",
+                "formula": b.formula,
+                "mode": b.mode,
+                "amount": b.amount,
+                "payment_method": b.payment_method,
+                "status": b.status,
+                "date": b.booking_date.isoformat() if b.booking_date else None,
+                "subject": b.subject,
+                "created_at": b.created_at.isoformat(),
+            }
+            for b in page_bookings
+        ],
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": math.ceil(total / size) if total else 0,
+    }

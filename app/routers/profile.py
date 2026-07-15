@@ -15,7 +15,7 @@ from app.dependencies import get_current_user, get_db, require_role
 from app.models.enums import StudentLessonFormat
 from app.models.parent_link import ParentStudentLink
 from app.models.payment import PaymentMethod
-from app.models.profile import Profile, StudentProfile, TeacherProfile
+from app.models.profile import ParentProfile, Profile, StudentProfile, TeacherProfile
 from app.services.storage import upload_file
 
 router = APIRouter(tags=["profile"])
@@ -163,6 +163,9 @@ class StudentFullProfileResponse(BaseModel):
     languages: Optional[List[str]] = None
     # True when an active parent link exists — student cannot edit availability
     parent_defined_availability: bool = False
+    parent_id: Optional[str] = None
+    parent_name: Optional[str] = None
+    parent_avatar_url: Optional[str] = None
 
 
 class StudentProfileUpdateRequest(BaseModel):
@@ -210,8 +213,10 @@ async def get_student_profile(
     parent_defined_availability = False
     effective_days: Optional[List[int]] = sp.available_days if sp else None
     effective_slots: Optional[List[str]] = sp.available_slots if sp else None
+    parent_profile: Optional[Profile] = None
 
     if parent_link:
+        parent_profile = db.exec(select(Profile).where(Profile.id == parent_link.parent_id)).first()
         # Fetch all parents' availability arrays for this student and union them.
         # Table schema (migration 002): one row per (parent_id, student_id),
         # columns available_days int[] and available_slots text[].
@@ -262,6 +267,9 @@ async def get_student_profile(
         lesson_format=sp.lesson_format if sp else None,
         languages=sp.languages if sp else None,
         parent_defined_availability=parent_defined_availability,
+        parent_id=str(parent_link.parent_id) if parent_link else None,
+        parent_name=parent_profile.full_name if parent_profile else None,
+        parent_avatar_url=parent_profile.avatar_url if parent_profile else None,
     )
 
 
@@ -323,6 +331,162 @@ async def update_student_profile(
     db.commit()
 
     return await get_student_profile(current_user=current_user, db=db)
+
+
+@router.post("/student/parent-link/unlink", response_model=StudentFullProfileResponse, tags=["Profile"])
+async def student_unlink_parent(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Student self-service unlink — revokes the accepted parent link, if any.
+    Mirrors the parent-initiated unlink in app/routers/parent.py; either side
+    can end the link."""
+    uid = UUID(current_user["id"])
+    parent_link = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.student_id == uid)
+        .where(ParentStudentLink.status == "accepted")
+    ).first()
+    if parent_link is None:
+        raise HTTPException(status_code=404, detail="Aucune liaison parent active")
+
+    parent_link.status = "revoked"
+    db.add(parent_link)
+
+    from app.models.notification import Notification
+    db.add(Notification(
+        user_id=parent_link.parent_id,
+        type="system",
+        title="🔗 Liaison retirée",
+        body="Votre enfant s'est dissocié de votre espace parent.",
+        data={"student_id": str(uid)},
+    ))
+
+    db.commit()
+    return await get_student_profile(current_user=current_user, db=db)
+
+
+class ParentChildLinkedResponse(BaseModel):
+    student_id: str
+    student_code: Optional[str] = None
+    name: str
+    avatar_url: Optional[str] = None
+    slots: Optional[List[str]] = None
+
+
+class ParentFullProfileResponse(BaseModel):
+    id: str
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+    wilaya: Optional[str] = None
+    parent_code: Optional[str] = None
+    budget_tier: Optional[str] = None
+    budget_min: Optional[int] = None
+    budget_max: Optional[int] = None
+    children: List[ParentChildLinkedResponse] = []
+
+
+class ParentProfileUpdateRequest(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    wilaya: Optional[str] = None
+    budget_tier: Optional[str] = None
+    budget_min: Optional[int] = None
+    budget_max: Optional[int] = None
+
+
+@router.get("/parent", response_model=ParentFullProfileResponse, tags=["Profile"])
+async def get_parent_profile(
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    """Full parent profile + linked children — backs the parent profile page's
+    best-effort hydrate (this endpoint previously didn't exist at all, so that
+    hydrate silently 404'd on every load)."""
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    pp = db.exec(select(ParentProfile).where(ParentProfile.user_id == uid)).first()
+
+    links = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.parent_id == uid)
+        .where(ParentStudentLink.status == "accepted")
+    ).all()
+    children: List[ParentChildLinkedResponse] = []
+    for link in links:
+        child_profile = db.exec(select(Profile).where(Profile.id == link.student_id)).first()
+        child_sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == link.student_id)).first()
+        if child_profile is None:
+            continue
+        children.append(ParentChildLinkedResponse(
+            student_id=str(link.student_id),
+            student_code=child_sp.student_code if child_sp else None,
+            name=child_profile.full_name or child_profile.first_name or "Enfant",
+            avatar_url=child_profile.avatar_url,
+            slots=child_sp.available_slots if child_sp else None,
+        ))
+
+    return ParentFullProfileResponse(
+        id=str(profile.id),
+        email=profile.email or "",
+        first_name=profile.first_name,
+        last_name=profile.last_name,
+        full_name=profile.full_name,
+        phone=profile.phone,
+        avatar_url=profile.avatar_url,
+        wilaya=profile.wilaya,
+        parent_code=pp.parent_code if pp else None,
+        budget_tier=pp.budget_tier if pp else None,
+        budget_min=pp.budget_min if pp else None,
+        budget_max=pp.budget_max if pp else None,
+        children=children,
+    )
+
+
+@router.put("/parent", response_model=ParentFullProfileResponse, tags=["Profile"])
+async def update_parent_profile(
+    payload: ParentProfileUpdateRequest,
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    """Persist parent identity + budget-preference edits — the profile page's
+    'Enregistrer' buttons previously only wrote to local browser storage."""
+    uid = UUID(current_user["id"])
+    profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    pp = db.exec(select(ParentProfile).where(ParentProfile.user_id == uid)).first()
+    if pp is None:
+        pp = ParentProfile(user_id=uid)
+
+    if payload.first_name is not None:
+        profile.first_name = payload.first_name
+    if payload.last_name is not None:
+        profile.last_name = payload.last_name
+    if payload.phone is not None:
+        profile.phone = payload.phone
+    if payload.wilaya is not None:
+        profile.wilaya = payload.wilaya
+    profile.updated_at = datetime.utcnow()
+    db.add(profile)
+
+    if payload.budget_tier is not None:
+        pp.budget_tier = payload.budget_tier
+    if payload.budget_min is not None:
+        pp.budget_min = payload.budget_min
+    if payload.budget_max is not None:
+        pp.budget_max = payload.budget_max
+    db.add(pp)
+
+    db.commit()
+    return await get_parent_profile(current_user=current_user, db=db)
 
 
 @router.get("/", response_model=ProfileResponse)

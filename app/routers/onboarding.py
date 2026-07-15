@@ -462,6 +462,64 @@ async def find_parent_by_code(
     return {"parent_id": str(parent_prof.user_id), "name": name}
 
 
+class LinkParentRequest(BaseModel):
+    parent_code: str
+
+
+@router.post("/student/link-parent")
+async def link_parent_post_onboarding(
+    payload: LinkParentRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Student-initiated link, post-onboarding — same lookup/creation logic as
+    the onboarding-time parent_code path (student/complete), just usable
+    afterwards. Mirrors app/routers/parent.py's link_child (parent-initiated
+    direction) — either side can start the link."""
+    uid = UUID(current_user["id"])
+    code = payload.parent_code.strip().upper()
+
+    parent_prof = db.exec(select(ParentProfile).where(ParentProfile.parent_code == code)).first()
+    if parent_prof is None:
+        raise HTTPException(status_code=404, detail="Aucun parent trouvé avec ce code.")
+
+    existing = db.exec(
+        select(ParentStudentLink)
+        .where(ParentStudentLink.parent_id == parent_prof.user_id)
+        .where(ParentStudentLink.student_id == uid)
+    ).first()
+    if existing and existing.status == "accepted":
+        raise HTTPException(status_code=409, detail="Vous êtes déjà lié à ce parent.")
+
+    now = datetime.utcnow()
+    if existing:
+        existing.status = "accepted"
+        existing.accepted_at = now
+        db.add(existing)
+    else:
+        db.add(ParentStudentLink(parent_id=parent_prof.user_id, student_id=uid, status="accepted", accepted_at=now))
+
+    student_profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    parent_profile = db.exec(select(Profile).where(Profile.id == parent_prof.user_id)).first()
+
+    from app.models.notification import Notification
+    db.add(Notification(
+        user_id=parent_prof.user_id,
+        type="system",
+        title="👨‍👩‍👧 Enfant lié",
+        body=f"{(student_profile.full_name if student_profile else None) or 'Votre enfant'} a lié son compte au vôtre.",
+        data={"student_id": str(uid)},
+    ))
+
+    db.commit()
+
+    return {
+        "parent_id": str(parent_prof.user_id),
+        "parent_name": (parent_profile.full_name if parent_profile else None) or "Parent",
+        "parent_avatar_url": parent_profile.avatar_url if parent_profile else None,
+    }
+
+
 # ─────────────────────────── find student by code ────────────────────────────
 
 @router.get("/parent/find-student/{code}")
