@@ -150,8 +150,11 @@ async def reject_validation(
     admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Admin rejects — no payment, session stays unpaid. Does not touch the
-    coarse sessions.status (still whatever it was, e.g. 'scheduled')."""
+    """Admin rejects — the session is invalidated (didn't count as
+    delivered): the teacher doesn't get paid AND the student is refunded —
+    the platform never keeps money for a lesson it just ruled didn't
+    happen/doesn't qualify. Does not touch the coarse sessions.status (still
+    whatever it was, e.g. 'scheduled')."""
     sv = _get_sv(db, validation_id)
     if sv.status in ("approved", "rejected"):
         raise HTTPException(status_code=409, detail=f"Already decided ('{sv.status}')")
@@ -169,15 +172,39 @@ async def reject_validation(
     sv.admin_review_note = body.note
     sv.admin_reviewed_at = datetime.utcnow()
     db.add(sv)
+    db.commit()
+
+    refund_result = {"refunded": False, "requires_manual_action": False}
+    if sv.booking_id:
+        from app.services.pricing import PACK_SIZES
+        from app.services.refunds import refund_amount_for_booking
+
+        booking = db.get(Booking, sv.booking_id)
+        if booking is not None:
+            refund_amount = round(booking.amount / PACK_SIZES.get(booking.formula, 1))
+            if refund_amount > 0:
+                refund_result = refund_amount_for_booking(
+                    db, booking, refund_amount,
+                    note=f"Séance rejetée après vérification administrative." + (f" Motif : {body.note}" if body.note else ""),
+                )
+            session_row = db.get(TutoringSession, sv.session_id)
+            if session_row is not None:
+                session_row.refund_percentage = 100
+                session_row.refund_amount = refund_amount
+                session_row.teacher_payout_amount = 0
+                db.add(session_row)
+                db.commit()
 
     from app.services.session_validation import _notify
     _notify(db, sv.teacher_id, "❌ Séance rejetée",
             f"Votre séance a été rejetée après vérification administrative." + (f" Motif : {body.note}" if body.note else ""))
+    _notify(db, sv.student_id, "Séance rejetée — remboursement",
+            "Ta séance a été invalidée après vérification administrative. "
+            + ("Tu as été remboursé·e." if refund_result["refunded"] else "Ton remboursement est en cours de traitement."))
 
     log_audit(db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=admin_id,
-              actor_ip=None, action="admin_rejected", metadata={"note": body.note})
-    db.commit()
-    return {"status": sv.status}
+              actor_ip=None, action="admin_rejected", metadata={"note": body.note, "refunded": refund_result["refunded"]})
+    return {"status": sv.status, "refunded": refund_result["refunded"], "refund_requires_manual_action": refund_result["requires_manual_action"]}
 
 
 @router.post("/{validation_id}/regenerate-token")

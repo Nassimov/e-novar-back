@@ -29,6 +29,7 @@ def _serialize_booking_policy(s: PlatformSettings) -> dict:
         "booking_refusal_block_threshold": s.booking_refusal_block_threshold,
         "booking_no_response_suspension_days": s.booking_no_response_suspension_days,
         "booking_no_response_reset_days": s.booking_no_response_reset_days,
+        "online_no_show_grace_minutes": s.online_no_show_grace_minutes,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 
@@ -82,6 +83,7 @@ async def update_booking_policy_settings(
     settings.booking_refusal_block_threshold = body.booking_refusal_block_threshold
     settings.booking_no_response_suspension_days = body.booking_no_response_suspension_days
     settings.booking_no_response_reset_days = body.booking_no_response_reset_days
+    settings.online_no_show_grace_minutes = body.online_no_show_grace_minutes
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)

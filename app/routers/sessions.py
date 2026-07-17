@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -26,9 +26,21 @@ from app.services.pricing import PACK_SIZES
 
 class CancelSessionRequest(BaseModel):
     reason: Optional[str] = None
+    # Admin-only override for who's actually at fault (see cancel_session) —
+    # student/teacher self-cancellations always derive this from who's
+    # calling, never from client input, so it can't be gamed.
+    at_fault: Optional[str] = None  # "teacher" | "student"
 
 
-def _compute_refund_pct(scheduled_at: datetime) -> int:
+def _compute_refund_pct(scheduled_at: datetime, at_fault: str) -> int:
+    """
+    at_fault="teacher" → always 100%: it's never the student's cost to bear
+    when the teacher is the one cancelling a confirmed booking, however
+    close to the session time.
+    at_fault="student" → the time-based courtesy tiers (voluntary cancel).
+    """
+    if at_fault == "teacher":
+        return 100
     hours = (scheduled_at - datetime.utcnow()).total_seconds() / 3600
     if hours > 24:
         return 100
@@ -184,14 +196,29 @@ async def cancel_session(
         raise HTTPException(status_code=400, detail="Cannot cancel a completed or already cancelled session")
 
     now_utc = datetime.utcnow()
-    refund_pct = _compute_refund_pct(session.scheduled_at)
 
-    # Compute amounts from booking
+    # Who's actually at fault decides the refund policy — never the student's
+    # cost to bear when the teacher backs out of an accepted lesson. Only an
+    # admin (rare, manual) may override via payload.at_fault; a student or
+    # teacher self-cancelling always gets their own role, never client input.
+    if role == "teacher" and is_teacher_owner:
+        at_fault = "teacher"
+    elif role == "admin" and payload and payload.at_fault in ("teacher", "student"):
+        at_fault = payload.at_fault
+    else:
+        at_fault = "student"
+
+    refund_pct = _compute_refund_pct(session.scheduled_at, at_fault)
+
+    # Compute this lesson's fair share of the booking (a pack shares ONE
+    # Booking row across all its lessons — never refund/payout the whole
+    # pack's price for a single cancelled lesson).
     amount = 0
+    booking: Optional[Booking] = None
     if session.booking_id:
         booking = db.get(Booking, session.booking_id)
         if booking:
-            amount = booking.amount
+            amount = round(booking.amount / PACK_SIZES.get(booking.formula, 1))
 
     refund_amount = int(amount * refund_pct / 100)
     teacher_payout = amount - refund_amount
@@ -207,12 +234,73 @@ async def cancel_session(
     db.commit()
     db.refresh(session)
 
+    refund_result = {"refunded": False, "requires_manual_action": False, "method": None}
+    if booking is not None and refund_amount > 0:
+        from app.services.refunds import refund_amount_for_booking
+        refund_result = refund_amount_for_booking(
+            db, booking, refund_amount,
+            note=f"Séance annulée par {'le professeur' if at_fault == 'teacher' else 'l’élève'} ({refund_pct}% remboursé).",
+        )
+
+    # A teacher backing out of an ALREADY-ACCEPTED, paid lesson is exactly as
+    # disruptive as never responding in the first place — same escalating
+    # strike/suspension counter (see app/workers/booking_tasks.py), just a
+    # distinct reason string for admin visibility. Only counts once the
+    # booking had actually been accepted (booking.status == "confirmed") —
+    # cancelling before that point is what refuse_booking (with its own
+    # strike) is for.
+    if at_fault == "teacher" and booking is not None and booking.status == "confirmed":
+        from app.services.booking_safety import apply_cancellation_side_effects
+        apply_cancellation_side_effects(db, booking, reason="teacher_refused")
+
+        from app.config import get_settings as _get_settings
+        from app.models.admin import PlatformSettings
+        from app.models.profile import UserRole
+
+        settings_row = db.get(PlatformSettings, True)
+        suspension_days_list = (
+            settings_row.booking_no_response_suspension_days
+            if settings_row and settings_row.booking_no_response_suspension_days else [2, 5, 10]
+        )
+        reset_days = settings_row.booking_no_response_reset_days if settings_row else 60
+
+        tp = db.get(TeacherProfile, session.teacher_id)
+        if tp is not None:
+            if tp.last_no_response_at is None or (now_utc - tp.last_no_response_at).days > reset_days:
+                tp.no_response_strikes = 0
+            tp.no_response_strikes += 1
+            tp.last_no_response_at = now_utc
+            idx = min(tp.no_response_strikes - 1, len(suspension_days_list) - 1)
+            days = suspension_days_list[idx]
+            tp.status = "suspended"
+            tp.suspended_until = now_utc + timedelta(days=days)
+            tp.suspension_reason = f"teacher_cancelled_confirmed (récidive n°{tp.no_response_strikes})"
+            db.add(tp)
+            db.commit()
+
+            from app.services import notification as _notif
+            _notif.persist(
+                db, user_id=session.teacher_id, type="teacher_suspended",
+                title="⚠️ Compte suspendu — séance annulée",
+                body=f"Tu as annulé une séance déjà confirmée. Ton compte est suspendu {days} jour(s) (récidive n°{tp.no_response_strikes}).",
+                data={"session_id": str(session.id), "days": days},
+            )
+            for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
+                _notif.persist(
+                    db, user_id=ar.user_id, type="teacher_cancelled_confirmed_admin_alert",
+                    title="Professeur — séance confirmée annulée",
+                    body=f"Une séance déjà confirmée a été annulée par le professeur (récidive n°{tp.no_response_strikes}) — suspendu {days} jour(s).",
+                    data={"session_id": str(session.id), "teacher_id": str(session.teacher_id)},
+                )
+
     return {
         "id": str(session.id),
         "status": session.status,
         "refund_percentage": refund_pct,
         "refund_amount": refund_amount,
         "teacher_payout_amount": teacher_payout,
+        "refunded": refund_result["refunded"],
+        "refund_requires_manual_action": refund_result["requires_manual_action"],
     }
 
 

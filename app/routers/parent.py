@@ -438,13 +438,19 @@ async def parent_cancel_session(
         raise HTTPException(status_code=400, detail="Cannot cancel a completed or already cancelled session")
 
     now_utc = datetime.utcnow()
-    refund_pct = _compute_refund_pct(session.scheduled_at)
+    # A parent cancelling on their child's behalf is always the "student
+    # side" — the courtesy time-based tiers apply (teacher-fault cancellation
+    # goes through sessions.py's own cancel_session, called by the teacher).
+    refund_pct = _compute_refund_pct(session.scheduled_at, "student")
+
+    from app.services.pricing import PACK_SIZES
 
     amount = 0
+    booking: Optional[Booking] = None
     if session.booking_id:
         booking = db.get(Booking, session.booking_id)
         if booking:
-            amount = booking.amount
+            amount = round(booking.amount / PACK_SIZES.get(booking.formula, 1))
 
     refund_amount = int(amount * refund_pct / 100)
     teacher_payout = amount - refund_amount
@@ -459,12 +465,22 @@ async def parent_cancel_session(
     db.add(session)
     db.commit()
 
+    refund_result = {"refunded": False, "requires_manual_action": False}
+    if booking is not None and refund_amount > 0:
+        from app.services.refunds import refund_amount_for_booking
+        refund_result = refund_amount_for_booking(
+            db, booking, refund_amount,
+            note=f"Séance annulée par le parent ({refund_pct}% remboursé).",
+        )
+
     return {
         "id": str(session.id),
         "status": "cancelled",
         "refund_percentage": refund_pct,
         "refund_amount": refund_amount,
         "teacher_payout_amount": teacher_payout,
+        "refunded": refund_result["refunded"],
+        "refund_requires_manual_action": refund_result["requires_manual_action"],
     }
 
 

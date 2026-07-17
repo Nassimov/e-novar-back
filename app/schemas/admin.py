@@ -123,6 +123,7 @@ class BookingPolicySettings(BaseModel):
     booking_refusal_block_threshold: int = Field(ge=1, le=10)
     booking_no_response_suspension_days: List[int] = Field(min_length=1, max_length=10)
     booking_no_response_reset_days: int = Field(ge=1, le=365)
+    online_no_show_grace_minutes: int = Field(ge=1, le=120)
 
     @field_validator("booking_no_response_suspension_days")
     @classmethod

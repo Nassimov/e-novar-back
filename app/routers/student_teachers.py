@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field as PydanticField
 from sqlalchemy import func as sa_func, update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
@@ -1242,7 +1243,17 @@ async def book_teacher_slot(
             status="scheduled",
         ))
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Last-resort DB-level backstop (uq_bookings_active_student_slot,
+        # see docs/migrations/067) — the row-lock claim above should already
+        # catch this, this only fires if that ever gets bypassed.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Vous avez déjà une réservation en attente ou confirmée pour cette date et cette heure avec ce professeur.",
+        )
     db.refresh(booking)
 
     return {

@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+"""
+Single entry point for actually moving money back to a student — every
+cancellation/no-show path (voluntary student cancellation, teacher
+cancelling a confirmed booking, admin rejecting a disputed session, the
+no-response auto-cancel job) must go through refund_amount_for_booking()
+instead of only computing a number and stopping there.
+
+Payment method behavior:
+  cib (Stripe)     — manual capture. If the booking never got captured
+                     (still "pending"), there's nothing to refund — the
+                     hold is simply released (handled by the caller via
+                     cancel_payment_intent, e.g. refuse_booking / the
+                     no-response job). Once captured (booking reached
+                     "confirmed"), a real refund is issued via the Stripe
+                     Refund API for the requested amount.
+  edahabia         — Chargily charges immediately, no refund API exists.
+                     Every refund request here is flagged to all admins for
+                     manual processing through the Chargily dashboard —
+                     never silently dropped.
+  cash / transfer   — money never touched the platform's payment gateway;
+                     nothing to call. Admin is notified to handle it
+                     manually (return cash / reverse the transfer).
+"""
+
+import logging
+from typing import Optional
+
+from sqlmodel import Session, select
+
+from app.models.booking import Booking
+from app.models.profile import UserRole
+from app.services import notification as notif
+from app.services.pricing import PACK_SIZES
+
+logger = logging.getLogger(__name__)
+
+
+def per_lesson_amount(booking: Booking) -> int:
+    """A pack (pack5/pack10) shares ONE Booking row across all its lessons —
+    refunding/crediting a single lesson must use its fair share, never the
+    whole pack's price."""
+    return round(booking.amount / PACK_SIZES.get(booking.formula, 1))
+
+
+def refund_amount_for_booking(db: Session, booking: Booking, amount_dzd: int, *, note: str) -> dict:
+    """
+    Attempt to actually refund `amount_dzd` (DZD, same "1 unit = 1 Stripe
+    cent" convention used at checkout — see app.services.stripe
+    .create_checkout_session) to the student for this booking.
+
+    Returns {"refunded": bool, "requires_manual_action": bool, "method": str}.
+    Never raises — a failed/impossible refund is reported back for the
+    caller to notify admins, not swallowed silently.
+    """
+    if amount_dzd <= 0:
+        return {"refunded": False, "requires_manual_action": False, "method": booking.payment_method or "unknown"}
+
+    method = booking.payment_method or "unknown"
+
+    if method == "cib":
+        if booking.stripe_pi_id:
+            try:
+                from app.services.stripe import create_refund
+                create_refund(booking.stripe_pi_id, amount_cents=amount_dzd)
+                logger.info("Stripe refund issued: booking_id=%s amount=%d note=%s", booking.id, amount_dzd, note)
+                return {"refunded": True, "requires_manual_action": False, "method": "cib"}
+            except Exception as exc:
+                logger.error("Stripe refund FAILED: booking_id=%s amount=%d error=%s", booking.id, amount_dzd, exc)
+                _flag_admins_manual_refund(db, booking, amount_dzd, f"Le remboursement Stripe automatique a échoué ({exc}). {note}")
+                return {"refunded": False, "requires_manual_action": True, "method": "cib"}
+        # Never captured (still just an authorization) — nothing was ever
+        # charged, so there's nothing to refund; the hold itself is
+        # released by the caller (cancel_payment_intent).
+        return {"refunded": False, "requires_manual_action": False, "method": "cib"}
+
+    if method == "edahabia":
+        _flag_admins_manual_refund(db, booking, amount_dzd, f"Paiement Edahabia — Chargily n'a pas d'API de remboursement. {note}")
+        return {"refunded": False, "requires_manual_action": True, "method": "edahabia"}
+
+    if method in ("cash", "transfer"):
+        _flag_admins_manual_refund(db, booking, amount_dzd, f"Paiement {method} — aucune passerelle à rembourser automatiquement. {note}")
+        return {"refunded": False, "requires_manual_action": True, "method": method}
+
+    return {"refunded": False, "requires_manual_action": False, "method": method}
+
+
+def _flag_admins_manual_refund(db: Session, booking: Booking, amount_dzd: int, reason: str) -> None:
+    admin_roles = db.exec(select(UserRole).where(UserRole.role == "admin")).all()
+    for ar in admin_roles:
+        notif.persist(
+            db, user_id=ar.user_id, type="system",
+            title="⚠️ Remboursement manuel requis",
+            body=f"Remboursement de {amount_dzd} DA requis pour la réservation {booking.id}. {reason}",
+            data={"booking_id": str(booking.id), "amount": amount_dzd},
+        )

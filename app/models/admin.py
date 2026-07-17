@@ -58,6 +58,13 @@ class PlatformSettings(SQLModel, table=True):
     )
     booking_no_response_reset_days: int = Field(default=60)
 
+    # Online-session no-show detection (see app/workers/booking_tasks.py's
+    # task_detect_online_teacher_no_show). If the teacher hasn't joined the
+    # LiveKit room within this many minutes of the scheduled start, the
+    # session is marked no_show, the student is refunded 100%, and the
+    # teacher gets a strike via the same escalating suspension counter above.
+    online_no_show_grace_minutes: int = Field(default=20)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

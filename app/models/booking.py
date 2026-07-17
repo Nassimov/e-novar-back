@@ -111,6 +111,11 @@ class TutoringSession(SQLModel, table=True):
     refund_amount: int = Field(default=0)
     teacher_payout_amount: int = Field(default=0)
     no_show: bool = Field(default=False)
+    # Per-participant join timestamps for online sessions — see
+    # app/routers/classroom.py::get_classroom_room and
+    # app/workers/booking_tasks.py's online no-show detector.
+    teacher_joined_at: Optional[datetime] = Field(default=None)
+    student_joined_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

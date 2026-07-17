@@ -180,12 +180,27 @@ async def get_classroom_room(
         lvl = db.get(Level, session.level_id)
         level_name = lvl.label if lvl else None
 
+    now_join = datetime.utcnow()
+    # Per-participant join timestamps — status="live"/started_at (above)
+    # only ever record "SOMEONE joined", not who specifically. This is what
+    # app/workers/booking_tasks.py's online no-show detector needs to tell a
+    # genuine teacher no-show apart from a student who never showed up (or
+    # simply hasn't yet, this early in the join window).
+    join_targets = group_sessions if slot_id else [session]
+    for s in join_targets:
+        if uid == s.teacher_id and s.teacher_joined_at is None:
+            s.teacher_joined_at = now_join
+            db.add(s)
+        if uid == s.student_id and s.student_joined_at is None:
+            s.student_joined_at = now_join
+            db.add(s)
+
     if session.status == "scheduled":
         session.status = "live"
         if session.started_at is None:
-            session.started_at = datetime.utcnow()
+            session.started_at = now_join
         db.add(session)
-        db.commit()
+    db.commit()
 
     from app.config import get_settings as _get_settings
     return RoomResponse(

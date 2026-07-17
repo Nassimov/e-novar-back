@@ -59,5 +59,11 @@ celery_app.conf.update(
             "task": "app.workers.booking_tasks.task_reinstate_expired_teacher_suspensions",
             "schedule": crontab(minute="*/15"),
         },
+        # Every 5 min — online sessions have a short grace window (default
+        # 20 min), so this needs tighter polling than the other two.
+        "online-teacher-no-show-detection": {
+            "task": "app.workers.booking_tasks.task_detect_online_teacher_no_show",
+            "schedule": crontab(minute="*/5"),
+        },
     },
 )
