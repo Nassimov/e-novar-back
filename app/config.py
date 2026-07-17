@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     chargily_secret_key: str = ""
     chargily_base_url: str = "https://pay.chargily.net/test/api/v2"
 
+    # ── LiveKit (video classroom — WebRTC rooms + access tokens) ──────────────
+    # Every join requires a fresh, short-lived, per-user JWT access token
+    # (grants are scoped per-room, per-identity, server-signed) — never a raw
+    # room name/URL. See app/services/livekit_video.py.
+    livekit_url: str = ""       # wss://<project>.livekit.cloud (or self-hosted wss://)
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+
     # ── OneSignal (push + email) ──────────────────────────────────────────────
     onesignal_app_id: str = ""
     onesignal_rest_api_key: str = ""

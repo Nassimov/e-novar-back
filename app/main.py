@@ -295,6 +295,7 @@ from app.routers.payments import router as payments_router
 from app.routers.chargily_webhook import router as chargily_webhook_router
 from app.routers.sessions import router as sessions_router
 from app.routers.session_validation import router as session_validation_router
+from app.routers.classroom import router as classroom_router
 from app.routers.messages import router as messages_router
 from app.routers.notifications import router as notifications_router
 from app.routers.kp import router as kp_router
@@ -346,6 +347,7 @@ app.include_router(payments_router,      prefix="/api/payments",       tags=["Pa
 app.include_router(chargily_webhook_router, prefix="/api/payments",    tags=["Payments"])
 app.include_router(sessions_router,      prefix="/api/sessions",       tags=["Sessions"])
 app.include_router(session_validation_router, prefix="/api/sessions",  tags=["Session Validation"])
+app.include_router(classroom_router,     prefix="/api/classroom",     tags=["Classroom"])
 app.include_router(homework_router,      prefix="/api/homework",       tags=["Homework"])
 app.include_router(messages_router,      prefix="/api/messages",       tags=["Messages"])
 app.include_router(notifications_router, prefix="/api/notifications",  tags=["Notifications"])
@@ -496,6 +498,12 @@ class ConnectionManager:
 message_manager = ConnectionManager()
 notification_manager = ConnectionManager()
 
+# Reuses the generic queue-based delivery manager from the chat system, but
+# keyed by classroom room_key (not user_id) — every participant connected to
+# the same room shares one broadcast "channel".
+from app.core.connections import ChatConnectionManager as _ChatConnectionManager  # noqa: E402
+classroom_connections = _ChatConnectionManager()
+
 
 async def _resolve_ws_user(token: str) -> tuple[str, str]:
     """Return (user_id, email) from a WS token, or raise ValueError on auth failure.
@@ -642,6 +650,124 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
             "last_seen_at": last_seen_at,
         }))
         logger.info("WS /messages disconnected: user=%s", user_id)
+
+
+@app.websocket("/ws/classroom/{session_id}")
+async def websocket_classroom(websocket: WebSocket, session_id: str, token: str = ""):
+    """Live classroom channel — whiteboard strokes, screen-share annotation,
+    hand-raise, and REST-triggered chapter/quiz/file events (published by
+    app/routers/classroom.py via app.core.classroom_ws). Connect with
+    `?token=<jwt>`. Group lessons: every student has their own session_id
+    but all resolve to the same broadcast room (see
+    app.services.livekit_video.room_key_for_session)."""
+    import asyncio
+    from uuid import UUID as _UUID
+
+    from app.core.classroom_ws import classroom_channel
+    from app.database import get_session as _get_db_session
+    from app.models.booking import TutoringSession
+    from app.services import livekit_video as _lk_video
+
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /classroom rejected: %s", exc)
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    try:
+        with next(_get_db_session()) as _db:
+            session = _db.get(TutoringSession, _UUID(session_id))
+            if session is None:
+                await websocket.close(code=4004, reason="Session not found")
+                return
+            if not _lk_video.is_session_participant(_db, session, _UUID(user_id)):
+                await websocket.close(code=4003, reason="Forbidden")
+                return
+            room_key = _lk_video.room_key_for_session(_db, session)
+    except Exception:
+        logger.exception("WS /classroom setup failed session_id=%s", session_id)
+        await websocket.close(code=1011, reason="Server error")
+        return
+
+    await websocket.accept()
+    send_queue = classroom_connections.register(room_key)
+    stop_evt = asyncio.Event()
+
+    async def _sender():
+        while True:
+            data = await send_queue.get()
+            if data is None:
+                break
+            try:
+                await websocket.send_json(data)
+            except Exception:
+                break
+
+    async def _redis_subscriber():
+        import redis.asyncio as aioredis
+
+        url = get_settings().redis_url
+        while not stop_evt.is_set():
+            r = None
+            try:
+                r = aioredis.Redis.from_url(url, decode_responses=True)
+                ps = r.pubsub()
+                await ps.subscribe(classroom_channel(room_key))
+                while not stop_evt.is_set():
+                    raw = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if raw is None:
+                        continue
+                    if raw.get("type") == "message":
+                        try:
+                            await send_queue.put(json.loads(raw["data"]))
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("classroom redis subscriber error room=%s: %s — reconnecting", room_key, exc)
+                await asyncio.sleep(2.0)
+            finally:
+                if r:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
+
+    sender_task = asyncio.create_task(_sender())
+    sub_task = asyncio.create_task(_redis_subscriber())
+
+    from app.core.classroom_ws import publish_classroom_event
+    publish_classroom_event(room_key, {"type": "participant_joined", "user_id": user_id})
+    logger.info("WS /classroom connected: user=%s room=%s", user_id, room_key)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                mtype = msg.get("type")
+                if mtype == "ping":
+                    send_queue.put_nowait({"type": "pong"})
+                elif mtype in (
+                    "whiteboard_stroke", "whiteboard_clear",
+                    "annotation_stroke", "annotation_clear",
+                    "hand_raise",
+                ):
+                    msg["from"] = user_id
+                    publish_classroom_event(room_key, msg)
+            except json.JSONDecodeError:
+                send_queue.put_nowait({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        stop_evt.set()
+        sub_task.cancel()
+        classroom_connections.unregister(room_key, send_queue)
+        sender_task.cancel()
+        publish_classroom_event(room_key, {"type": "participant_left", "user_id": user_id})
+        logger.info("WS /classroom disconnected: user=%s room=%s", user_id, room_key)
 
 
 async def _chat_redis_subscriber(user_id: str, send_queue: "asyncio.Queue", stop: "asyncio.Event"):

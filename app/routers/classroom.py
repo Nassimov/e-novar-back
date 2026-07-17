@@ -1,0 +1,686 @@
+"""Online classroom — real video room (LiveKit), chapters, files, live
+quizzes, and in-call chat provisioning. See app/services/livekit_video.py
+for the video security model.
+
+Individual vs group: a session's `Booking.session_type` decides which. For
+group lessons, every enrolled student has their OWN Booking+TutoringSession
+row (see app/routers/student_teachers.py) but they must all land in the
+SAME LiveKit room — so the room key is derived from the shared
+`Booking.slot_id` for group sessions, and from the session's own id for
+individual ones. Same logic for the shared group chat conversation.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+from uuid import UUID, uuid4
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel
+from sqlmodel import Session, select
+
+from app.core.classroom_ws import publish_classroom_event
+from app.dependencies import get_current_user, get_db
+from app.models.booking import Booking, TutoringSession
+from app.models.catalog import Level, Subject
+from app.models.classroom import SessionChapter, SessionFile, SessionQuiz, SessionQuizAnswer
+from app.models.conversation import ChatMessage, Conversation, ConversationParticipant
+from app.models.enums import KpSource
+from app.models.profile import Profile
+from app.models.scheduling import TeacherSlot
+from app.services import livekit_video as lk_video
+from app.services.kp import award_kp
+from app.services.pricing import get_platform_settings
+from app.services.storage import upload_file
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["Classroom"])
+
+QUIZ_CORRECT_ANSWER_EP = 10
+
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+
+def _load_session(db: Session, session_id: UUID) -> TutoringSession:
+    session = db.get(TutoringSession, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+def _authorize(session: TutoringSession, current_user: Dict[str, Any]) -> UUID:
+    uid = UUID(current_user["id"])
+    role = current_user.get("role", "student")
+    if uid != session.student_id and uid != session.teacher_id and role != "admin":
+        raise HTTPException(status_code=403, detail="Access denied")
+    return uid
+
+
+def _group_slot_id(db: Session, session: TutoringSession) -> Optional[UUID]:
+    return lk_video.group_slot_id(db, session)
+
+
+def _group_sessions(db: Session, slot_id: UUID) -> List[TutoringSession]:
+    return lk_video.group_sessions(db, slot_id)
+
+
+def _display_name(profile: Optional[Profile]) -> str:
+    return (profile.full_name if profile else None) or "Utilisateur"
+
+
+# ─── Video room ─────────────────────────────────────────────────────────────
+
+class RoomParticipant(BaseModel):
+    user_id: str
+    name: str
+    avatar_url: Optional[str] = None
+    role: str  # 'teacher' | 'student'
+
+
+class RoomResponse(BaseModel):
+    livekit_url: str
+    room_name: str
+    token: str
+    is_owner: bool
+    session_type: str
+    mode: str
+    scheduled_at: str
+    scheduled_end_at: str
+    duration_min: int
+    subject_name: Optional[str] = None
+    level_name: Optional[str] = None
+    can_join: bool
+    join_opens_at: str
+    participants: List[RoomParticipant]
+
+
+@router.get("/{session_id}/room", response_model=RoomResponse)
+async def get_classroom_room(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    role = current_user.get("role", "student")
+
+    if session.mode != "online":
+        raise HTTPException(status_code=400, detail="Cette séance n'est pas une séance en ligne.")
+    if session.status in ("cancelled", "no_show"):
+        raise HTTPException(status_code=409, detail=f"Séance en statut '{session.status}' — impossible de rejoindre.")
+
+    settings = get_platform_settings(db)
+    duration = session.duration_min or 90
+    scheduled_end = session.scheduled_at + timedelta(minutes=duration)
+    join_opens_at = session.scheduled_at - timedelta(minutes=settings.token_visible_minutes_before)
+    now = datetime.utcnow()
+    grace_end = scheduled_end + timedelta(minutes=45)
+
+    can_join = join_opens_at <= now <= grace_end
+    if not can_join:
+        return RoomResponse(
+            livekit_url="", room_name="", token="", is_owner=False,
+            session_type="group" if _group_slot_id(db, session) else "individual",
+            mode=session.mode,
+            scheduled_at=session.scheduled_at.isoformat(),
+            scheduled_end_at=scheduled_end.isoformat(),
+            duration_min=duration,
+            can_join=False,
+            join_opens_at=join_opens_at.isoformat(),
+            participants=[],
+        )
+
+    booking = db.get(Booking, session.booking_id) if session.booking_id else None
+    slot_id = _group_slot_id(db, session)
+
+    room_key = lk_video.room_key_for_session(db, session)
+    if slot_id:
+        group_sessions = _group_sessions(db, slot_id)
+        slot = db.get(TeacherSlot, slot_id)
+        max_participants = max(2, (slot.max_students if slot else len(group_sessions)) + 1)
+        student_ids = list({s.student_id for s in group_sessions})
+        session_type = "group"
+    else:
+        max_participants = 2
+        student_ids = [session.student_id]
+        session_type = "individual"
+
+    room = await lk_video.get_or_create_room(
+        session_id=room_key, scheduled_end_at=scheduled_end, max_participants=max_participants,
+    )
+
+    is_owner = uid == session.teacher_id or role == "admin"
+    my_profile = db.exec(select(Profile).where(Profile.id == uid)).first()
+    token = lk_video.create_access_token(
+        room_name=room["name"], user_id=str(uid), user_name=_display_name(my_profile),
+        is_owner=is_owner, scheduled_end_at=scheduled_end,
+    )
+
+    teacher_profile = db.exec(select(Profile).where(Profile.id == session.teacher_id)).first()
+    student_profiles = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all()
+    profile_map = {p.id: p for p in student_profiles}
+
+    participants = [RoomParticipant(
+        user_id=str(session.teacher_id), name=_display_name(teacher_profile),
+        avatar_url=teacher_profile.avatar_url if teacher_profile else None, role="teacher",
+    )]
+    for sid in student_ids:
+        p = profile_map.get(sid)
+        participants.append(RoomParticipant(
+            user_id=str(sid), name=_display_name(p), avatar_url=p.avatar_url if p else None, role="student",
+        ))
+
+    subject_name = None
+    if session.subject_id:
+        subj = db.get(Subject, session.subject_id)
+        subject_name = subj.name if subj else None
+    level_name = None
+    if session.level_id:
+        lvl = db.get(Level, session.level_id)
+        level_name = lvl.label if lvl else None
+
+    if session.status == "scheduled":
+        session.status = "live"
+        if session.started_at is None:
+            session.started_at = datetime.utcnow()
+        db.add(session)
+        db.commit()
+
+    from app.config import get_settings as _get_settings
+    return RoomResponse(
+        livekit_url=_get_settings().livekit_url, room_name=room["name"], token=token, is_owner=is_owner,
+        session_type=session_type, mode=session.mode, scheduled_at=session.scheduled_at.isoformat(),
+        scheduled_end_at=scheduled_end.isoformat(), duration_min=duration,
+        subject_name=subject_name, level_name=level_name, can_join=True,
+        join_opens_at=join_opens_at.isoformat(), participants=participants,
+    )
+
+
+@router.post("/{session_id}/dev-simulate-start")
+async def dev_simulate_session_start(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    🧪 TEMPORARY TEST TOOL — NOT a real feature, remove after QA.
+
+    Moves this session's `scheduled_at` to right now, so the REAL join-window
+    gate in get_classroom_room() naturally opens — lets both the student and
+    the teacher test the waiting-room → live-call flow without waiting for
+    the actual scheduled time. This does not bypass any security/authorization
+    check: the room/token endpoint still runs its normal participant check and
+    its normal timing logic, just against a (deliberately) adjusted clock
+    target. Either the session's student or its teacher can call this.
+    """
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+
+    if session.status in ("cancelled", "no_show", "completed"):
+        raise HTTPException(status_code=409, detail=f"Séance en statut '{session.status}' — impossible à simuler.")
+
+    session.scheduled_at = datetime.utcnow()
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    logger.info("🧪 [TEST] Simulated session start: session_id=%s", session_id)
+    return {"status": "ok", "scheduled_at": session.scheduled_at.isoformat()}
+
+
+# ─── Group-lesson sibling sessions (read-only) ──────────────────────────────
+# For a group lesson, every enrolled student has their OWN TutoringSession
+# row (see module docstring), so the proof-of-attendance / trust-score flow
+# (app/routers/session_validation.py) — which is keyed one-row-per-student —
+# needs a way to go from ANY one of those sibling session ids to the full
+# list, so the teacher can confirm each student's attendance individually
+# right after a group lesson ends. Reuses the exact same group-resolution
+# helpers as the video room endpoint above — no new logic invented here.
+
+class GroupSessionSibling(BaseModel):
+    session_id: str
+    student_id: str
+    student_name: str
+    student_avatar: Optional[str] = None
+
+
+class GroupSessionsResponse(BaseModel):
+    session_type: str  # "individual" | "group"
+    sessions: List[GroupSessionSibling]
+
+
+@router.get("/{session_id}/group-sessions", response_model=GroupSessionsResponse)
+async def get_group_sessions(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Given one TutoringSession id, resolve the sibling session ids for the
+    same group lesson (one per enrolled student). For an individual session,
+    returns just that one session. Teacher (or admin) only."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Réservé à l'enseignant de la séance")
+
+    slot_id = _group_slot_id(db, session)
+    if not slot_id:
+        student = db.exec(select(Profile).where(Profile.id == session.student_id)).first()
+        return GroupSessionsResponse(session_type="individual", sessions=[
+            GroupSessionSibling(
+                session_id=str(session.id),
+                student_id=str(session.student_id),
+                student_name=_display_name(student),
+                student_avatar=student.avatar_url if student else None,
+            ),
+        ])
+
+    sibling_sessions = _group_sessions(db, slot_id)
+    students = db.exec(
+        select(Profile).where(Profile.id.in_({s.student_id for s in sibling_sessions}))
+    ).all()
+    profile_map = {p.id: p for p in students}
+    siblings = sorted(
+        (
+            GroupSessionSibling(
+                session_id=str(s.id),
+                student_id=str(s.student_id),
+                student_name=_display_name(profile_map.get(s.student_id)),
+                student_avatar=(profile_map.get(s.student_id).avatar_url if profile_map.get(s.student_id) else None),
+            )
+            for s in sibling_sessions
+        ),
+        key=lambda item: item.student_name,
+    )
+    return GroupSessionsResponse(session_type="group", sessions=siblings)
+
+
+# ─── In-call chat provisioning ──────────────────────────────────────────────
+
+@router.get("/{session_id}/chat")
+async def get_classroom_chat(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Find-or-create the real conversation for this lesson's participants —
+    messages sent here are the SAME persisted messages visible afterward in
+    the normal inbox (see app/routers/messages.py), not a throwaway
+    in-call-only chat."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+
+    slot_id = _group_slot_id(db, session)
+    if slot_id:
+        member_ids = sorted({str(session.teacher_id)} | {str(s.student_id) for s in _group_sessions(db, slot_id)})
+        conv_type = "group"
+    else:
+        member_ids = sorted({str(session.teacher_id), str(session.student_id)})
+        conv_type = "direct"
+
+    # Find an existing conversation whose participant set matches exactly.
+    candidate_convs: Dict[UUID, set] = {}
+    rows = db.exec(
+        select(ConversationParticipant).where(ConversationParticipant.user_id == uid)
+    ).all()
+    for r in rows:
+        members = {
+            str(p.user_id) for p in db.exec(
+                select(ConversationParticipant).where(ConversationParticipant.conv_id == r.conv_id)
+            ).all()
+        }
+        if members == set(member_ids):
+            conv = db.get(Conversation, r.conv_id)
+            if conv and conv.type == conv_type:
+                # Unhide for me if I'd previously hidden it
+                my_part = db.exec(
+                    select(ConversationParticipant)
+                    .where(ConversationParticipant.conv_id == r.conv_id, ConversationParticipant.user_id == uid)
+                ).first()
+                if my_part and my_part.hidden_at is not None:
+                    my_part.hidden_at = None
+                    db.add(my_part)
+                    db.commit()
+                return {"conversation_id": str(r.conv_id)}
+
+    conv = Conversation(id=uuid4(), type=conv_type)
+    db.add(conv)
+    db.flush()
+    for member_id in member_ids:
+        db.add(ConversationParticipant(conv_id=conv.id, user_id=UUID(member_id), role="member"))
+    db.commit()
+    return {"conversation_id": str(conv.id)}
+
+
+# ─── Chapters / agenda ───────────────────────────────────────────────────────
+
+class ChapterIn(BaseModel):
+    title: str
+    duration_min: int = 10
+
+
+class ChapterOut(BaseModel):
+    id: str
+    title: str
+    duration_min: int
+    position: int
+    status: str
+    started_at: Optional[str] = None
+
+
+def _chapter_out(c: SessionChapter) -> ChapterOut:
+    return ChapterOut(
+        id=str(c.id), title=c.title, duration_min=c.duration_min, position=c.position,
+        status=c.status, started_at=c.started_at.isoformat() if c.started_at else None,
+    )
+
+
+@router.get("/{session_id}/chapters", response_model=List[ChapterOut])
+async def list_chapters(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+    chapters = db.exec(
+        select(SessionChapter).where(SessionChapter.session_id == session_id).order_by(SessionChapter.position)
+    ).all()
+    return [_chapter_out(c) for c in chapters]
+
+
+@router.post("/{session_id}/chapters", response_model=ChapterOut, status_code=201)
+async def create_chapter(
+    session_id: UUID,
+    payload: ChapterIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut gérer le programme de la séance")
+
+    count = len(db.exec(select(SessionChapter).where(SessionChapter.session_id == session_id)).all())
+    chapter = SessionChapter(session_id=session_id, title=payload.title, duration_min=payload.duration_min, position=count)
+    db.add(chapter)
+    db.commit()
+    db.refresh(chapter)
+    out = _chapter_out(chapter)
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {"type": "chapter_created", "chapter": out.model_dump()})
+    return out
+
+
+@router.delete("/{session_id}/chapters/{chapter_id}", status_code=204)
+async def delete_chapter(
+    session_id: UUID,
+    chapter_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut gérer le programme de la séance")
+    chapter = db.get(SessionChapter, chapter_id)
+    if chapter is None or chapter.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    db.delete(chapter)
+    db.commit()
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {"type": "chapter_deleted", "chapter_id": str(chapter_id)})
+    return None
+
+
+@router.post("/{session_id}/chapters/{chapter_id}/advance", response_model=ChapterOut)
+async def advance_chapter(
+    session_id: UUID,
+    chapter_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut avancer le programme de la séance")
+
+    target = db.get(SessionChapter, chapter_id)
+    if target is None or target.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+
+    all_chapters = db.exec(select(SessionChapter).where(SessionChapter.session_id == session_id)).all()
+    now = datetime.utcnow()
+    for c in all_chapters:
+        if c.id == target.id:
+            c.status = "active"
+            c.started_at = now
+        elif c.status == "active":
+            c.status = "done"
+        db.add(c)
+    db.commit()
+    db.refresh(target)
+    out = _chapter_out(target)
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {"type": "chapter_advanced", "chapter": out.model_dump()})
+    return out
+
+
+# ─── Files ──────────────────────────────────────────────────────────────────
+
+class FileOut(BaseModel):
+    id: str
+    name: str
+    url: str
+    mime: Optional[str] = None
+    size_bytes: Optional[int] = None
+    uploaded_by: str
+    created_at: str
+
+
+def _file_out(f: SessionFile) -> FileOut:
+    return FileOut(
+        id=str(f.id), name=f.name, url=f.url, mime=f.mime, size_bytes=f.size_bytes,
+        uploaded_by=str(f.uploaded_by), created_at=f.created_at.isoformat(),
+    )
+
+
+@router.get("/{session_id}/files", response_model=List[FileOut])
+async def list_session_files(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+    files = db.exec(
+        select(SessionFile).where(SessionFile.session_id == session_id).order_by(SessionFile.created_at.desc())
+    ).all()
+    return [_file_out(f) for f in files]
+
+
+@router.post("/{session_id}/files", response_model=FileOut, status_code=201)
+async def upload_session_file(
+    session_id: UUID,
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut ajouter des fichiers à la séance")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Fichier vide")
+    url = upload_file(raw, file.filename or "fichier", file.content_type, folder=f"session-files/{session_id}")
+
+    record = SessionFile(
+        session_id=session_id, uploaded_by=uid, name=file.filename or "fichier",
+        url=url, mime=file.content_type, size_bytes=len(raw),
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    out = _file_out(record)
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {"type": "file_added", "file": out.model_dump()})
+    return out
+
+
+@router.delete("/{session_id}/files/{file_id}", status_code=204)
+async def delete_session_file(
+    session_id: UUID,
+    file_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut retirer un fichier")
+    record = db.get(SessionFile, file_id)
+    if record is None or record.session_id != session_id:
+        raise HTTPException(status_code=404, detail="File not found")
+    db.delete(record)
+    db.commit()
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {"type": "file_removed", "file_id": str(file_id)})
+    return None
+
+
+# ─── Live quizzes ────────────────────────────────────────────────────────────
+
+class QuizIn(BaseModel):
+    question: str
+    choices: List[str]
+    correct_index: int
+
+
+class QuizAnswerIn(BaseModel):
+    choice_index: int
+
+
+class QuizOut(BaseModel):
+    id: str
+    question: str
+    choices: List[str]
+    created_at: str
+    my_answer: Optional[int] = None
+    my_correct: Optional[bool] = None
+    correct_index: Optional[int] = None  # only revealed to the teacher, or after answering
+    answers_count: Optional[int] = None
+    correct_count: Optional[int] = None
+
+
+@router.post("/{session_id}/quizzes", response_model=QuizOut, status_code=201)
+async def create_quiz(
+    session_id: UUID,
+    payload: QuizIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut envoyer un quiz")
+    if len(payload.choices) < 2 or not (0 <= payload.correct_index < len(payload.choices)):
+        raise HTTPException(status_code=400, detail="Quiz invalide")
+
+    quiz = SessionQuiz(
+        session_id=session_id, created_by=uid, question=payload.question,
+        choices=payload.choices, correct_index=payload.correct_index,
+    )
+    db.add(quiz)
+    db.commit()
+    db.refresh(quiz)
+
+    # Broadcast a STUDENT-SAFE payload — never leak correct_index to the room.
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {
+        "type": "quiz_dispatched",
+        "quiz": {"id": str(quiz.id), "question": quiz.question, "choices": quiz.choices,
+                 "created_at": quiz.created_at.isoformat()},
+    })
+    return QuizOut(
+        id=str(quiz.id), question=quiz.question, choices=quiz.choices,
+        created_at=quiz.created_at.isoformat(), correct_index=quiz.correct_index,
+        answers_count=0, correct_count=0,
+    )
+
+
+@router.get("/{session_id}/quizzes", response_model=List[QuizOut])
+async def list_quizzes(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    is_teacher = uid == session.teacher_id or current_user.get("role") == "admin"
+
+    quizzes = db.exec(
+        select(SessionQuiz).where(SessionQuiz.session_id == session_id).order_by(SessionQuiz.created_at)
+    ).all()
+    out: List[QuizOut] = []
+    for q in quizzes:
+        all_answers = db.exec(select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id == q.id)).all()
+        my_answer = next((a for a in all_answers if a.student_id == uid), None)
+        out.append(QuizOut(
+            id=str(q.id), question=q.question, choices=q.choices, created_at=q.created_at.isoformat(),
+            my_answer=my_answer.choice_index if my_answer else None,
+            my_correct=my_answer.is_correct if my_answer else None,
+            correct_index=q.correct_index if (is_teacher or my_answer) else None,
+            answers_count=len(all_answers) if is_teacher else None,
+            correct_count=sum(1 for a in all_answers if a.is_correct) if is_teacher else None,
+        ))
+    return out
+
+
+@router.post("/{session_id}/quizzes/{quiz_id}/answer", response_model=QuizOut)
+async def answer_quiz(
+    session_id: UUID,
+    quiz_id: UUID,
+    payload: QuizAnswerIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid == session.teacher_id:
+        raise HTTPException(status_code=403, detail="L'enseignant ne répond pas à son propre quiz")
+
+    quiz = db.get(SessionQuiz, quiz_id)
+    if quiz is None or quiz.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    existing = db.exec(
+        select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id == quiz_id, SessionQuizAnswer.student_id == uid)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Vous avez déjà répondu à ce quiz")
+    choice_index = payload.choice_index
+    if not (0 <= choice_index < len(quiz.choices)):
+        raise HTTPException(status_code=400, detail="Réponse invalide")
+
+    is_correct = choice_index == quiz.correct_index
+    answer = SessionQuizAnswer(quiz_id=quiz_id, student_id=uid, choice_index=choice_index, is_correct=is_correct)
+    db.add(answer)
+    db.commit()
+
+    if is_correct:
+        try:
+            award_kp(uid, QUIZ_CORRECT_ANSWER_EP, KpSource.quiz, "Bonne réponse — quiz en séance", db)
+        except Exception:
+            logger.exception("award_kp failed for quiz answer uid=%s quiz=%s", uid, quiz_id)
+
+    all_answers = db.exec(select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id == quiz_id)).all()
+    answers_count = len(all_answers)
+    correct_count = sum(1 for a in all_answers if a.is_correct)
+
+    # Teacher-only tally update (never broadcasts correct_index to students).
+    publish_classroom_event(lk_video.room_key_for_session(db, session), {
+        "type": "quiz_tally_update",
+        "quiz_id": str(quiz_id), "answers_count": answers_count, "correct_count": correct_count,
+    })
+
+    return QuizOut(
+        id=str(quiz.id), question=quiz.question, choices=quiz.choices, created_at=quiz.created_at.isoformat(),
+        my_answer=choice_index, my_correct=is_correct, correct_index=quiz.correct_index,
+        answers_count=answers_count, correct_count=correct_count,
+    )

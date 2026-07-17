@@ -308,7 +308,13 @@ async def join_session(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Get the video room details to join a live session."""
+    """Legacy/superseded — the real online-classroom join flow is now
+    GET /api/classroom/{session_id}/room (app/routers/classroom.py), backed
+    by real LiveKit rooms + short-lived signed tokens (app/services/
+    livekit_video.py). This endpoint's `room_url`/`join_token` were always
+    placeholders (a fake meet.enovar.dz URL + a random UUID, never a real
+    signed credential) and nothing in the frontend calls it anymore — kept
+    only for backward compatibility, do not build new features on it."""
     session = db.get(SessionModel, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
