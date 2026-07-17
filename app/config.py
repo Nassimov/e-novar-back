@@ -17,6 +17,7 @@ import os
 from functools import lru_cache
 from typing import List
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -86,6 +87,14 @@ class Settings(BaseSettings):
     app_env: str = "production"     # set to "production" in Railway Variables
     app_url: str = ""               # your Railway domain, e.g. https://xxx.up.railway.app
     frontend_url: str = ""          # your Vercel/frontend domain
+
+    @field_validator("app_url", "frontend_url")
+    @classmethod
+    def _strip_trailing_slash(cls, v: str) -> str:
+        # Every call site does f"{settings.frontend_url}/some/path" — a trailing
+        # slash in the env var (easy to paste by mistake) silently produces a
+        # double slash in every redirect URL and email link built from it.
+        return v.rstrip("/")
 
     # ── Admin (privileged account — credentials stored in Railway env vars only) ─
     # ADMIN_EMAIL=admin@e-novar.com
