@@ -75,6 +75,7 @@ def score_teacher(
     student_slot_keys: Set[Tuple[int, int]],
     teacher_slot_keys: Set[Tuple[int, int]],
     teacher_slot_subject_ids: Optional[Set[UUID]] = None,
+    student_wilaya: Optional[str] = None,
 ) -> float:
     """
     Best-overall-compatibility score for ranking (not filtering) a teacher
@@ -130,7 +131,7 @@ def score_teacher(
         mode == "online" for mode, _ in delivery_pairs
     )
     wilaya_ok = bool(
-        student.wilaya and matching.wilaya_compatible(teacher, teacher_base_profile, student.wilaya)
+        student_wilaya and matching.wilaya_compatible(teacher, teacher_base_profile, student_wilaya)
     )
     if online_ok or wilaya_ok:
         score += _W_WILAYA
@@ -162,6 +163,9 @@ def rank_teachers(db: Session, student_id: UUID, limit: int = 3) -> List[Teacher
     student = db.get(StudentProfile, student_id)
     if student is None:
         return []
+    # wilaya lives on the base Profile, not StudentProfile — fetch it separately.
+    student_base_profile = db.get(Profile, student_id)
+    student_wilaya = student_base_profile.wilaya if student_base_profile else None
 
     candidates = db.exec(select(TeacherProfile).where(TeacherProfile.status == "approved")).all()
     if not candidates:
@@ -228,6 +232,7 @@ def rank_teachers(db: Session, student_id: UUID, limit: int = 3) -> List[Teacher
             student_slot_keys=student_slot_keys,
             teacher_slot_keys=teacher_slot_keys,
             teacher_slot_subject_ids=teacher_slot_subject_ids.get(tp.user_id),
+            student_wilaya=student_wilaya,
         )
         scored.append((s, tp))
 

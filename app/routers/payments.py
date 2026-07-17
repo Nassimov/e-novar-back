@@ -148,7 +148,7 @@ async def list_invoices(
         raise HTTPException(status_code=404, detail="User not found")
 
     payments = db.exec(
-        select(Payment).where(Payment.user_id == user.id, Payment.status == PaymentStatus.completed)
+        select(Payment).where(Payment.user_id == user.id, Payment.status == PaymentStatus.succeeded)
     ).all()
     total = len(payments)
     offset = (page - 1) * size
@@ -225,7 +225,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
                 select(Payment).where(Payment.stripe_payment_intent_id == payment_intent_id)
             ).first()
             if payment:
-                payment.status = PaymentStatus.completed
+                payment.status = PaymentStatus.succeeded
                 payment.updated_at = datetime.utcnow()
                 db.add(payment)
 

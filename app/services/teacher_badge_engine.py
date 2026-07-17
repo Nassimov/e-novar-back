@@ -9,7 +9,7 @@ student badges page and vice versa).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Set
 from uuid import UUID
 
@@ -91,7 +91,10 @@ def compute_teacher_stats(teacher_id: UUID, db: Session) -> TeacherStats:
     # ── 5. tenure_days — account age from profiles.created_at ────────────────
     profile = db.get(Profile, teacher_id)
     if profile and profile.created_at:
-        stats.tenure_days = max(0, (datetime.utcnow() - profile.created_at).days)
+        created_at = profile.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        stats.tenure_days = max(0, (datetime.now(timezone.utc) - created_at).days)
 
     # ── 6. referrals_validated — teacher as referrer (role-agnostic table) ───
     stats.referrals_validated = int(db.exec(
