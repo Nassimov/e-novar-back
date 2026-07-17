@@ -168,6 +168,15 @@ class TeacherProfile(SQLModel, table=True):
     payout_mode: str = Field(default="platform")           # "platform" | "direct"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # Booking-safety enforcement (see app/workers/booking_tasks.py). Only ever
+    # set by the automatic no-response job — a manual admin suspension (see
+    # app/routers/admin/teachers.py suspend_teacher) leaves suspended_until
+    # NULL, so it never auto-expires and must be manually reinstated.
+    suspended_until: Optional[datetime] = Field(default=None)
+    suspension_reason: Optional[str] = Field(default=None)
+    no_response_strikes: int = Field(default=0)
+    last_no_response_at: Optional[datetime] = Field(default=None)
+
 
 class ParentProfile(SQLModel, table=True):
     """Mirrors public.parent_profiles."""

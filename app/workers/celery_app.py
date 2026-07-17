@@ -16,6 +16,7 @@ celery_app = Celery(
         "app.workers.sms_tasks",
         "app.workers.pdf_tasks",
         "app.workers.notification_tasks",
+        "app.workers.booking_tasks",
     ],
 )
 
@@ -34,6 +35,7 @@ celery_app.conf.update(
         "app.workers.sms_tasks.*": {"queue": "sms"},
         "app.workers.pdf_tasks.*": {"queue": "pdf"},
         "app.workers.notification_tasks.*": {"queue": "notifications"},
+        "app.workers.booking_tasks.*": {"queue": "notifications"},
     },
     beat_schedule={
         # Every day at 09:00 Algiers time — send reminders for tomorrow's sessions
@@ -45,6 +47,17 @@ celery_app.conf.update(
         "inactivity-reminders-weekly": {
             "task": "app.workers.notification_tasks.task_send_inactivity_reminders",
             "schedule": crontab(hour=10, minute=0, day_of_week=1),
+        },
+        # Every 15 min — auto-cancel bookings the teacher never answered in
+        # time (see app/workers/booking_tasks.py for the full rule).
+        "booking-auto-cancel-unanswered": {
+            "task": "app.workers.booking_tasks.task_auto_cancel_unanswered_bookings",
+            "schedule": crontab(minute="*/15"),
+        },
+        # Every 15 min — lift auto-suspensions whose timer has expired.
+        "teacher-suspension-auto-reinstate": {
+            "task": "app.workers.booking_tasks.task_reinstate_expired_teacher_suspensions",
+            "schedule": crontab(minute="*/15"),
         },
     },
 )

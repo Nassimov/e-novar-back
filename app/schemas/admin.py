@@ -115,3 +115,20 @@ class PlatformPricingSettings(BaseModel):
                 "La réduction du pack de 10 doit être supérieure à celle du pack de 5."
             )
         return v
+
+
+class BookingPolicySettings(BaseModel):
+    """See docs/migrations/067_booking_safety_rules.sql for the full rule write-up."""
+    booking_teacher_response_hours: int = Field(ge=1, le=168)
+    booking_refusal_block_threshold: int = Field(ge=1, le=10)
+    booking_no_response_suspension_days: List[int] = Field(min_length=1, max_length=10)
+    booking_no_response_reset_days: int = Field(ge=1, le=365)
+
+    @field_validator("booking_no_response_suspension_days")
+    @classmethod
+    def validate_escalating(cls, v: List[int]) -> List[int]:
+        if any(d <= 0 for d in v):
+            raise ValueError("Chaque palier doit être un nombre de jours positif.")
+        if any(v[i] > v[i + 1] for i in range(len(v) - 1)):
+            raise ValueError("Les paliers de suspension doivent être croissants (ex: 2, 5, 10).")
+        return v

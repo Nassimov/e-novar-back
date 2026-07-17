@@ -1070,8 +1070,32 @@ async def refuse_booking(
             ))
 
     booking.status = "cancelled"
+    booking.cancelled_reason = "teacher_refused"
     db.add(booking)
     db.commit()
+
+    from app.services.booking_safety import apply_cancellation_side_effects
+    apply_cancellation_side_effects(db, booking, reason="teacher_refused")
+
+    from app.services import notification as notif
+    student_profile = db.get(Profile, booking.student_id)
+    if student_profile is not None:
+        notif.persist(
+            db,
+            user_id=booking.student_id,
+            type="booking_refused",
+            title="Réservation refusée",
+            body="Le professeur a refusé ta demande de réservation. Tu n'as pas été débité·e.",
+            data={"booking_id": str(booking.id)},
+        )
+        notif.push(
+            db,
+            user_id=booking.student_id,
+            title="Réservation refusée",
+            body="Le professeur a refusé ta demande — tu n'as pas été débité·e.",
+            data={"booking_id": str(booking.id)},
+        )
+
     return {"status": "cancelled"}
 
 

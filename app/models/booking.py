@@ -52,6 +52,30 @@ class Booking(SQLModel, table=True):
     subject: Optional[str] = Field(default=None)          # student-chosen subject
     comment: Optional[str] = Field(default=None)          # student note / objective
     pack_sessions: Optional[str] = Field(default=None)    # JSON array for pack5/monthly sessions
+    cancelled_reason: Optional[str] = Field(default=None)  # e.g. "teacher_no_response", "teacher_refused"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class BookingRefusal(SQLModel, table=True):
+    """
+    Mirrors public.booking_refusals.
+    One row per refused-or-timed-out lesson slot (teacher, subject, weekday,
+    time) a student requested. See app/routers/student_teachers.py's
+    booking-creation gate (blocks re-booking the exact same combo once it
+    reaches platform_settings.booking_refusal_block_threshold) and
+    app/workers/booking_tasks.py (writes reason='teacher_no_response').
+    """
+
+    __tablename__ = "booking_refusals"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    student_id: UUID = Field(foreign_key="profiles.id", index=True)
+    teacher_id: UUID = Field(foreign_key="profiles.id", index=True)
+    subject_id: Optional[UUID] = Field(default=None, foreign_key="subjects.id")
+    weekday: int = Field()          # 0=Monday..6=Sunday (date.weekday())
+    slot_time: dt.time = Field()
+    booking_id: UUID = Field(foreign_key="bookings.id")
+    reason: str = Field()           # teacher_refused | teacher_no_response
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

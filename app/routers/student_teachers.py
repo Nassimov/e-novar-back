@@ -8,10 +8,11 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field as PydanticField
+from sqlalchemy import func as sa_func, update as sa_update
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
-from app.models.booking import TutoringSession
+from app.models.booking import Booking, BookingRefusal, TutoringSession
 from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.models.review import Review
@@ -115,6 +116,105 @@ def _resolve_requested_subject_level(
         status_code=422,
         detail="Ce créneau n'accepte pas la matière/niveau demandé(e).",
     )
+
+
+# ─── Booking safety rules ──────────────────────────────────────────────────────
+# See docs/migrations/067_booking_safety_rules.sql for the full write-up of
+# these three rules (race-safe slot claiming, refusal/no-response strikes,
+# teacher no-response auto-cancel — the last one lives in
+# app/workers/booking_tasks.py).
+
+def _claim_slot_or_409(db: Session, slot_id: UUID, student_id: UUID) -> TeacherSlot:
+    """
+    Atomically claim a seat on a TeacherSlot, correct for both individual
+    slots (max_students=1) and group slots (max_students>1) under
+    concurrency: SELECT ... FOR UPDATE takes a row lock so two simultaneous
+    requests for the same slot are serialized (the second sees the first
+    request's just-added Booking row once it gets the lock), instead of both
+    reading "1 seat free" and both succeeding — the exact double-booking race
+    the student flagged.
+    """
+    slot = db.exec(
+        select(TeacherSlot).where(TeacherSlot.id == slot_id).with_for_update()
+    ).first()
+    if slot is None or slot.status not in ("open",):
+        raise HTTPException(
+            status_code=409,
+            detail="Ce créneau n'est plus disponible. Merci de rafraîchir et choisir un autre horaire.",
+        )
+    already = db.exec(
+        select(sa_func.count()).select_from(Booking).where(
+            Booking.slot_id == slot_id,
+            Booking.student_id == student_id,
+            Booking.status.in_(["pending", "confirmed"]),
+        )
+    ).one()
+    if already:
+        raise HTTPException(status_code=409, detail="Vous avez déjà réservé ce créneau.")
+    active_count = db.exec(
+        select(sa_func.count()).select_from(Booking).where(
+            Booking.slot_id == slot_id,
+            Booking.status.in_(["pending", "confirmed"]),
+        )
+    ).one()
+    capacity = max(1, slot.max_students)
+    if active_count >= capacity:
+        raise HTTPException(status_code=409, detail="Ce créneau est complet.")
+    if active_count + 1 >= capacity:
+        slot.status = "booked"
+        db.add(slot)
+    return slot
+
+
+def _check_no_slot_duplicate(
+    db: Session, *, student_id: UUID, teacher_id: UUID, booking_date: date, slot_time,
+) -> None:
+    """Ad-hoc bookings (no published TeacherSlot to lock, e.g. a custom
+    at_home/at_student time) have no row to serialize on — this is the best
+    application-level guard for that case. docs/migrations/067 also adds a
+    partial unique index as a last-resort DB-level backstop."""
+    existing = db.exec(
+        select(Booking).where(
+            Booking.student_id == student_id,
+            Booking.teacher_id == teacher_id,
+            Booking.booking_date == booking_date,
+            Booking.slot_time == slot_time,
+            Booking.status.in_(["pending", "confirmed"]),
+        )
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="Vous avez déjà une réservation en attente ou confirmée pour cette date et cette heure avec ce professeur.",
+        )
+
+
+def _check_refusal_block(
+    db: Session, *, student_id: UUID, teacher_id: UUID, subject_id: Optional[UUID],
+    weekday: int, slot_time, threshold: int,
+) -> None:
+    """A teacher refusing (or never responding to) the same exact (subject,
+    weekday, time) request `threshold` times means the student can no longer
+    request that exact combo again with that teacher — they can still book
+    any other slot, subject, or teacher."""
+    count = db.exec(
+        select(sa_func.count()).select_from(BookingRefusal).where(
+            BookingRefusal.student_id == student_id,
+            BookingRefusal.teacher_id == teacher_id,
+            BookingRefusal.subject_id == subject_id,
+            BookingRefusal.weekday == weekday,
+            BookingRefusal.slot_time == slot_time,
+        )
+    ).one()
+    if count >= threshold:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Ce professeur a déjà refusé (ou n'a pas répondu à) plusieurs de vos demandes "
+                "pour ce créneau et cette matière précis. Vous ne pouvez plus le réserver à nouveau — "
+                "choisissez un autre horaire, une autre matière ou un autre professeur."
+            ),
+        )
 
 
 # ─── Search ──────────────────────────────────────────────────────────────────
@@ -928,6 +1028,44 @@ async def book_teacher_slot(
             ps_slot_uuid = _UUID(ps.slot_id) if ps.slot_id else None
             _resolve_requested_subject_level(ps_slot_uuid, ps.subject_id, ps.level_id, db)
 
+    # ── Booking safety rules — race-safe capacity claim, duplicate check, and
+    # the refusal/no-response strike gate. Must run before we create anything
+    # (including Stripe/Chargily checkout sessions further down) so a
+    # rejected request never has payment-gateway side effects.
+    platform_settings_for_gate = get_platform_settings(db)
+    refusal_threshold = platform_settings_for_gate.booking_refusal_block_threshold
+
+    def _gate_one(gate_slot_id: Optional[UUID], gate_date: date, gate_time, gate_subject_id: Optional[UUID], gate_level_id: Optional[UUID]) -> None:
+        resolved_subject_id, _ = _resolve_requested_subject_level(gate_slot_id, gate_subject_id, gate_level_id, db)
+        _check_refusal_block(
+            db,
+            student_id=student_id,
+            teacher_id=teacher_id,
+            subject_id=resolved_subject_id,
+            weekday=gate_date.weekday(),
+            slot_time=gate_time,
+            threshold=refusal_threshold,
+        )
+        if gate_slot_id:
+            _claim_slot_or_409(db, gate_slot_id, student_id)
+        elif gate_time is not None:
+            _check_no_slot_duplicate(db, student_id=student_id, teacher_id=teacher_id, booking_date=gate_date, slot_time=gate_time)
+
+    if body.pack_sessions:
+        for ps in body.pack_sessions:
+            ps_slot_uuid = _UUID(ps.slot_id) if ps.slot_id else None
+            try:
+                ps_gate_time = dt.time.fromisoformat(ps.slot_time)
+            except ValueError:
+                ps_gate_time = None
+            try:
+                ps_gate_date = dt.date.fromisoformat(ps.date)
+            except ValueError:
+                ps_gate_date = booking_date
+            _gate_one(ps_slot_uuid, ps_gate_date, ps_gate_time, ps.subject_id, ps.level_id)
+    else:
+        _gate_one(slot_id, booking_date, slot_time, body.subject_id, body.level_id)
+
     # Resolve the authoritative single-lesson price — slot-level price takes
     # priority when the teacher set one for this specific slot, else the
     # teacher's default rate. The client never supplies or influences this.
@@ -1033,24 +1171,8 @@ async def book_teacher_slot(
             # manually the same way cash/transfer are handled.
             checkout_url = None
 
-    # For pack5/pack10: reserve all named slots
-    if body.pack_sessions:
-        for ps in body.pack_sessions:
-            if ps.slot_id:
-                try:
-                    ps_slot_id = _UUID(ps.slot_id)
-                    ps_slot = db.get(TeacherSlot, ps_slot_id)
-                    if ps_slot and ps_slot.teacher_id == teacher_id and ps_slot.status == "open":
-                        ps_slot.status = "booked"
-                        db.add(ps_slot)
-                except (ValueError, Exception):
-                    pass
-    elif slot_id:
-        # Single booking: reserve the slot
-        single_slot = db.get(TeacherSlot, slot_id)
-        if single_slot:
-            single_slot.status = "booked"
-            db.add(single_slot)
+    # Slot(s) were already atomically claimed above (_gate_one/_claim_slot_or_409)
+    # before any payment-gateway session was created — nothing left to do here.
 
     # Materialize one TutoringSession row per lesson in the booking — this is
     # what /sessions/{id}/complete later credits payout against, one lesson

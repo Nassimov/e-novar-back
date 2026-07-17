@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, List, Optional
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlmodel import Field, SQLModel
 
 
@@ -39,6 +39,24 @@ class PlatformSettings(SQLModel, table=True):
     token_visible_minutes_before: int = Field(default=30)
     student_validation_window_hours: int = Field(default=24)
     gps_proximity_threshold_meters: int = Field(default=500)
+
+    # Booking safety rules (see app/routers/student_teachers.py +
+    # app/workers/booking_tasks.py). A teacher has this many hours to
+    # accept/refuse a paid booking before it's auto-cancelled (student not
+    # charged). Consecutive no-responses escalate a self-expiring suspension
+    # (one entry of booking_no_response_suspension_days per consecutive
+    # strike, last value repeats past the end of the list); the strike
+    # counter resets after booking_no_response_reset_days of clean history.
+    # Separately, booking_refusal_block_threshold refused/no-response
+    # attempts on the exact same (teacher, subject, weekday, time) combo
+    # permanently blocks the student from re-booking that exact combo.
+    booking_teacher_response_hours: int = Field(default=24)
+    booking_refusal_block_threshold: int = Field(default=2)
+    booking_no_response_suspension_days: List[int] = Field(
+        default=[2, 5, 10],
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=False, server_default="'{2,5,10}'"),
+    )
+    booking_no_response_reset_days: int = Field(default=60)
 
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

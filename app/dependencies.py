@@ -187,12 +187,25 @@ def require_role(*roles: str):
 
     async def _checker(
         current_user: Dict[str, Any] = Depends(get_current_user),
+        db: Session = Depends(get_db),
     ) -> Dict[str, Any]:
         if current_user["role"] not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access denied. Required roles: {list(roles)}",
             )
+        # A suspended teacher (manual admin action, or the automatic
+        # no-response penalty — see app/workers/booking_tasks.py) loses all
+        # teacher-only access, not just visibility in student search/booking.
+        if current_user["role"] == "teacher":
+            from app.models.profile import TeacherProfile
+
+            tp = db.get(TeacherProfile, UUID(current_user["id"]))
+            if tp is not None and tp.status == "suspended":
+                detail = "Votre compte est suspendu."
+                if tp.suspended_until:
+                    detail += f" Réactivation prévue le {tp.suspended_until.strftime('%d/%m/%Y à %Hh%M')}."
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
         return current_user
 
     return _checker
