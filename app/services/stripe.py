@@ -95,11 +95,21 @@ def create_checkout_session(
 
 
 def get_checkout_session(session_id: str) -> Dict[str, Any]:
-    """Retrieve a Checkout Session, including its PaymentIntent ID."""
-    session = stripe_lib.checkout.Session.retrieve(session_id)
+    """Retrieve a Checkout Session, including its PaymentIntent ID and status.
+
+    `payment_status` on the Session itself only ever means "paid" once funds
+    are actually captured — since checkout sessions here use manual capture
+    (see create_checkout_session), a freshly-completed checkout reports
+    payment_intent_status="requires_capture" (card verified, hold placed,
+    nothing charged yet), not "succeeded". Callers that need to know "did the
+    card get authorized" should check payment_intent_status, not payment_status.
+    """
+    session = stripe_lib.checkout.Session.retrieve(session_id, expand=["payment_intent"])
+    pi = session.payment_intent
     return {
         "session_id": session.id,
-        "payment_intent": session.payment_intent,
+        "payment_intent": pi.id if pi else None,
+        "payment_intent_status": pi.status if pi else None,
         "payment_status": session.payment_status,
     }
 

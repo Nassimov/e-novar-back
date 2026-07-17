@@ -1131,6 +1131,88 @@ async def book_teacher_slot(
     }
 
 
+@router.get("/bookings/lookup")
+async def lookup_booking(
+    session_id: Optional[str] = Query(default=None),
+    booking_id: Optional[str] = Query(default=None),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Resolve a booking from the post-payment redirect — used by
+    student.payment_.process.tsx instead of trusting the raw `status` query
+    param on the redirect URL (which is client-controlled and proves
+    nothing). Accepts either the Stripe Checkout Session ID (`session_id`,
+    for CIB payments) or a direct `booking_id` (Chargily/edahabia redirects,
+    and the no-Stripe-configured CIB fallback, neither of which carry a
+    Stripe session id).
+
+    Payment here is auth-only (capture_method=manual — see
+    app.services.stripe.create_checkout_session): a completed Stripe
+    checkout only means the card was verified and the charge authorized/
+    held, not that money moved. The booking stays "pending" and the
+    student is only actually charged once the teacher accepts (POST
+    /teachers/me/bookings/{id}/accept -> capture_payment_intent). This
+    endpoint reports that nuance via `payment_authorized` / `status`
+    rather than a blanket "confirmed", so the frontend never overclaims.
+    """
+    from app.models.booking import Booking
+
+    if not session_id and not booking_id:
+        raise HTTPException(status_code=400, detail="session_id ou booking_id requis")
+
+    student_id = UUID(current_user["id"])
+    query = select(Booking)
+    if session_id:
+        query = query.where(Booking.stripe_cs_id == session_id)
+    else:
+        try:
+            query = query.where(Booking.id == UUID(booking_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="booking_id invalide")
+
+    booking = db.exec(query).first()
+    if booking is None or booking.student_id != student_id:
+        raise HTTPException(status_code=404, detail="Réservation introuvable")
+
+    payment_authorized = booking.payment_method != "cib"  # non-card methods: nothing to "authorize" here
+    if booking.payment_method == "cib" and booking.stripe_cs_id:
+        try:
+            from app.services.stripe import get_checkout_session
+            session_data = get_checkout_session(booking.stripe_cs_id)
+            payment_authorized = session_data.get("payment_intent_status") in ("requires_capture", "succeeded")
+            pi_id = session_data.get("payment_intent")
+            if pi_id and not booking.stripe_pi_id:
+                booking.stripe_pi_id = pi_id
+                db.add(booking)
+                db.commit()
+        except Exception:
+            # Stripe unreachable — don't block the redirect page on a
+            # transient error; fall back to whatever we know locally.
+            payment_authorized = booking.status != "pending"
+
+    teacher_profile = db.get(Profile, booking.teacher_id)
+
+    return {
+        "booking_id": str(booking.id),
+        "status": booking.status,
+        "payment_authorized": payment_authorized,
+        "payment_method": booking.payment_method,
+        "formula": booking.formula,
+        "mode": booking.mode,
+        "amount": booking.amount,
+        "currency": booking.currency,
+        "kp_reward": booking.kp_reward,
+        "booking_date": booking.booking_date.isoformat() if booking.booking_date else None,
+        "slot_time": str(booking.slot_time)[:5] if booking.slot_time else None,
+        "duration_min": booking.duration_min,
+        "subject": booking.subject,
+        "teacher_id": str(booking.teacher_id),
+        "teacher_name": teacher_profile.full_name if teacher_profile else None,
+        "teacher_avatar_url": teacher_profile.avatar_url if teacher_profile else None,
+    }
+
+
 @router.post("/teachers/{teacher_ref}/reviews", status_code=201)
 async def submit_teacher_review(
     teacher_ref: str,
