@@ -13,7 +13,6 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_admin_user, get_db
 from app.models.conversation import ChatMessage, ConversationParticipant
-from app.models.notification import Notification
 from app.models.profile import Profile
 
 logger = logging.getLogger(__name__)
@@ -57,25 +56,6 @@ def _other_participant(conv_id: UUID, sender_id: UUID, db: Session) -> Optional[
         )
     ).first()
     return row.user_id if row else None
-
-
-def _publish_notification(user_id: UUID, notif: Notification, db: Session) -> None:
-    try:
-        import json
-        from app.core.redis import get_redis_client
-        r = get_redis_client()
-        r.publish(
-            f"chat:user:{user_id}",
-            json.dumps({
-                "type": "notification",
-                "id": str(notif.id),
-                "title": notif.title,
-                "body": notif.body,
-                "created_at": notif.created_at.isoformat(),
-            }),
-        )
-    except Exception as exc:
-        logger.debug("Could not push notification: %s", exc)
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -157,27 +137,21 @@ async def warn_sender(
     if not msg:
         raise HTTPException(status_code=404, detail="Message introuvable.")
 
-    # Create in-app notification for the sender
-    notif = Notification(
-        user_id=msg.sender_id,
-        title="Avertissement E-NOVAR",
-        body=(
-            "Un message que vous avez envoyé a été signalé car il suggère de "
-            "poursuivre la collaboration hors de la plateforme. "
-            "Rappel : toutes les interactions pédagogiques et financières doivent "
-            "rester sur E-NOVAR pour votre sécurité et celle de l'autre partie."
-        ),
-        type="warning",
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(notif)
-
     # Dismiss the flag
     msg.is_flagged = False
     msg.flag_reason = None
     db.add(msg)
     db.commit()
-    db.refresh(notif)
 
-    _publish_notification(msg.sender_id, notif, db)
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="warning", user_id=msg.sender_id,
+        title_override="Avertissement E-NOVAR",
+        body_override=(
+            "Un message que vous avez envoyé a été signalé car il suggère de "
+            "poursuivre la collaboration hors de la plateforme. "
+            "Rappel : toutes les interactions pédagogiques et financières doivent "
+            "rester sur E-NOVAR pour votre sécurité et celle de l'autre partie."
+        ),
+    )
     return {"ok": True}

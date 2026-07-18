@@ -284,6 +284,17 @@ def check_and_unlock_badges(
     if newly_unlocked:
         db.commit()
 
+        from app.services.notification_engine import emit
+        badges_by_id = {b.id: b for b in badges}
+        for badge_id in newly_unlocked:
+            badge = badges_by_id.get(badge_id)
+            emit(
+                db, event_type="badge_unlocked", user_id=student_id,
+                context={"badge_name": badge.name if badge else "nouveau badge"},
+                data={"badge_id": badge_id},
+                dedup_key=f"badge_unlocked:{student_id}:{badge_id}",
+            )
+
     return newly_unlocked
 
 

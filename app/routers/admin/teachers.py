@@ -14,7 +14,6 @@ from app.database import get_supabase_service
 from app.dependencies import get_admin_user, get_db
 from app.models.catalog import Level, Subject, TeacherDiploma, TeacherSubjectPrice
 from app.models.kp import KpTransaction
-from app.models.notification import Notification
 from app.models.profile import Profile, TeacherProfile
 from app.services.tenure import experience_years_from
 
@@ -111,7 +110,8 @@ def _reliability_stats_for(teacher_id: UUID, db: Session) -> dict:
 
 
 def _notify(db: Session, user_id: UUID, title: str, body: str) -> None:
-    db.add(Notification(user_id=user_id, title=title, body=body, type="system"))
+    from app.services.notification_engine import emit
+    emit(db, event_type="system", user_id=user_id, title_override=title, body_override=body)
 
 
 def _fire_approval_email(p: Profile) -> None:

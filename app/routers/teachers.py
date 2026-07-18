@@ -1004,6 +1004,19 @@ async def accept_booking(
     # is marked completed via POST /sessions/{id}/complete (see
     # app/routers/sessions.py) — Phase 2b of the implementation plan.
     db.commit()
+
+    from app.services.notification_engine import emit
+    teacher_profile = db.get(Profile, teacher_id)
+    emit(
+        db, event_type="lesson_accepted", user_id=booking.student_id,
+        context={
+            "teacher_name": teacher_profile.full_name if teacher_profile else "Ton professeur",
+            "date": str(booking.booking_date), "time": booking.slot_time or "",
+        },
+        data={"booking_id": str(booking.id)},
+        dedup_key=f"lesson_accepted:{booking.id}",
+    )
+
     return {"status": "confirmed"}
 
 
@@ -1054,23 +1067,24 @@ async def refuse_booking(
     # the money is already in the merchant account and can't be reversed
     # programmatically. Flag every admin so a manual refund gets processed
     # through the Chargily dashboard instead of silently vanishing.
+    from app.services.notification_engine import emit
+
     if booking.payment_method == "edahabia" and booking.chargily_paid_at is not None:
-        from app.models.notification import Notification
         from app.models.profile import UserRole
 
         admin_roles = db.exec(select(UserRole).where(UserRole.role == "admin")).all()
         for ar in admin_roles:
-            db.add(Notification(
-                user_id=ar.user_id,
-                type="system",
-                title="⚠️ Remboursement Edahabia manuel requis",
-                body=(
+            emit(
+                db, event_type="system", user_id=ar.user_id,
+                title_override="⚠️ Remboursement Edahabia manuel requis",
+                body_override=(
                     f"Le professeur a refusé une réservation payée en Edahabia ({booking.amount} DA). "
                     "Chargily ne permet pas le remboursement par API — traitez-le manuellement depuis "
                     "le tableau de bord Chargily."
                 ),
                 data={"booking_id": str(booking.id)},
-            ))
+                dedup_key=f"edahabia_refund_needed_refused:{booking.id}:{ar.user_id}",
+            )
 
     booking.status = "cancelled"
     booking.cancelled_reason = "teacher_refused"
@@ -1080,23 +1094,16 @@ async def refuse_booking(
     from app.services.booking_safety import apply_cancellation_side_effects
     apply_cancellation_side_effects(db, booking, reason="teacher_refused")
 
-    from app.services import notification as notif
     student_profile = db.get(Profile, booking.student_id)
     if student_profile is not None:
-        notif.persist(
+        emit(
             db,
+            event_type="booking_refused",
             user_id=booking.student_id,
-            type="booking_refused",
-            title="Réservation refusée",
-            body="Le professeur a refusé ta demande de réservation. Tu n'as pas été débité·e.",
+            title_override="Réservation refusée",
+            body_override="Le professeur a refusé ta demande de réservation. Tu n'as pas été débité·e.",
             data={"booking_id": str(booking.id)},
-        )
-        notif.push(
-            db,
-            user_id=booking.student_id,
-            title="Réservation refusée",
-            body="Le professeur a refusé ta demande — tu n'as pas été débité·e.",
-            data={"booking_id": str(booking.id)},
+            dedup_key=f"booking_refused:{booking.id}",
         )
 
     return {"status": "cancelled"}

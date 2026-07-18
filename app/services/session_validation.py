@@ -30,7 +30,6 @@ from sqlmodel import Session, select
 
 from app.models.admin import PlatformSettings
 from app.models.booking import Booking, TutoringSession
-from app.models.notification import Notification
 from app.models.profile import TeacherProfile
 from app.models.session_validation import SessionValidation, SessionValidationAuditLog
 from app.services.pricing import PACK_SIZES
@@ -63,7 +62,11 @@ def log_audit(
 
 
 def _notify(db: Session, user_id: UUID, title: str, body: str, data: Optional[Dict[str, Any]] = None) -> None:
-    db.add(Notification(user_id=user_id, type="session_validation", title=title, body=body, data=data or {}))
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="session_validation", user_id=user_id,
+        title_override=title, body_override=body, data=data or {},
+    )
 
 
 # ─── Setup ────────────────────────────────────────────────────────────────────

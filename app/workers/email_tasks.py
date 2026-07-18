@@ -6,7 +6,7 @@ Resend is intentionally NOT used here; it is kept in config for medium-term migr
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from app.config import get_settings
 from app.workers.celery_app import celery_app
@@ -328,5 +328,116 @@ def send_withdrawal_processed_email(self, to: str, name: str, amount: int, statu
     """
     try:
         return _send(to, f"Demande de retrait {status_label} — Enovar", html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+# ─── Notification engine emails ───────────────────────────────────────────────
+# Shared branded wrapper for the generic/catalogue-driven emails below (the
+# bespoke templates above keep their own inline markup untouched).
+
+def _brand_wrap(preheader: str, body_html: str, cta_label: Optional[str] = None, cta_url: Optional[str] = None) -> str:
+    cta_html = ""
+    if cta_label and cta_url:
+        cta_html = f"""
+        <tr><td style="padding:28px 40px 8px;">
+          <a href="{cta_url}"
+             style="display:inline-block;background:linear-gradient(135deg,#4F46E5,#7C3AED);color:#fff;
+                    padding:13px 30px;border-radius:10px;text-decoration:none;font-weight:700;
+                    font-size:14px;letter-spacing:.02em;">
+            {cta_label}
+          </a>
+        </td></tr>
+        """
+    return f"""
+    <html>
+    <body style="margin:0;padding:0;background:#F3F4F6;font-family:Arial,Helvetica,sans-serif;">
+      <span style="display:none;max-height:0;overflow:hidden;">{preheader}</span>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:32px 12px;">
+        <tr><td align="center">
+          <table role="presentation" width="600" cellpadding="0" cellspacing="0"
+                 style="background:#fff;border-radius:16px;overflow:hidden;max-width:600px;width:100%;">
+            <tr><td style="background:linear-gradient(135deg,#000666,#4F46E5);padding:24px 40px;">
+              <span style="color:#fff;font-size:20px;font-weight:800;letter-spacing:.02em;">E-NOVAR</span>
+            </td></tr>
+            <tr><td style="padding:32px 40px 8px;color:#111827;font-size:15px;line-height:1.6;">
+              {body_html}
+            </td></tr>
+            {cta_html}
+            <tr><td style="padding:28px 40px 32px;color:#9CA3AF;font-size:12px;border-top:1px solid #F3F4F6;margin-top:20px;">
+              L'équipe E-NOVAR — la plateforme algérienne de cours particuliers.<br/>
+              Gérez vos préférences de notification depuis votre profil.
+            </td></tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>
+    """
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_generic_notification_email(self, to: str, title: str, body: str, deep_link: Optional[str] = None) -> bool:
+    """Fallback branded email for any notification_templates event that
+    doesn't have a bespoke template above — used by
+    app/services/notification_engine.py's async delivery queue."""
+    url = f"{settings.frontend_url}{deep_link}" if deep_link and deep_link.startswith("/") else (deep_link or settings.frontend_url)
+    html = _brand_wrap(
+        preheader=body[:120],
+        body_html=f"<h2 style='margin:0 0 12px;font-size:19px;color:#111827;'>{title}</h2><p style='margin:0;color:#374151;'>{body}</p>",
+        cta_label="Voir sur Enovar",
+        cta_url=url,
+    )
+    try:
+        return _send(to, title, html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_weekly_summary_email(
+    self,
+    to: str,
+    name: str,
+    sessions_completed: int,
+    ep_earned: int,
+    ep_balance: int,
+    rank: Optional[int] = None,
+) -> bool:
+    """Weekly recap — sent by task_send_weekly_summary (celery beat, Sunday evenings)."""
+    rank_html = f"<li>Classement actuel : <strong>#{rank}</strong></li>" if rank else ""
+    html = _brand_wrap(
+        preheader=f"{sessions_completed} séance(s) cette semaine, +{ep_earned} EP.",
+        body_html=f"""
+          <h2 style="margin:0 0 12px;font-size:19px;">Ton récap de la semaine, {name} !</h2>
+          <ul style="margin:0;padding-left:18px;color:#374151;">
+            <li>Séances terminées : <strong>{sessions_completed}</strong></li>
+            <li>EP gagnés cette semaine : <strong>+{ep_earned}</strong></li>
+            <li>Solde EP total : <strong>{ep_balance}</strong></li>
+            {rank_html}
+          </ul>
+        """,
+        cta_label="Continuer ma progression",
+        cta_url=settings.frontend_url,
+    )
+    try:
+        return _send(to, "Ton récap de la semaine sur Enovar", html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def send_admin_announcement_email(self, to: str, title: str, body: str, deep_link: Optional[str] = None) -> bool:
+    """Admin-authored announcement/campaign email (see
+    app/routers/admin/notification_campaigns.py)."""
+    url = f"{settings.frontend_url}{deep_link}" if deep_link and deep_link.startswith("/") else (deep_link or settings.frontend_url)
+    html = _brand_wrap(
+        preheader=body[:120],
+        body_html=f"<h2 style='margin:0 0 12px;font-size:19px;'>{title}</h2><p style='margin:0;color:#374151;white-space:pre-line;'>{body}</p>",
+        cta_label="Découvrir",
+        cta_url=url,
+    )
+    try:
+        return _send(to, title, html)
     except Exception as exc:
         raise self.retry(exc=exc)

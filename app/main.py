@@ -333,6 +333,7 @@ from app.routers.admin.referrals import router as admin_referrals_router
 from app.routers.admin.bookings import router as admin_bookings_router
 from app.routers.admin.settings import router as admin_settings_router
 from app.routers.admin.session_validation import router as admin_session_validation_router
+from app.routers.admin.notification_campaigns import router as admin_campaigns_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
 
@@ -385,6 +386,7 @@ app.include_router(admin_settings_router,   prefix="/api/admin/settings",   tags
 app.include_router(admin_session_validation_router, prefix="/api/admin/session-validations", tags=["Admin — Session Validation"])
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
+app.include_router(admin_campaigns_router,  prefix="/api/admin/campaigns",  tags=["Admin — Notification Campaigns"])
 
 
 # ── Custom OpenAPI schema (adds Bearer security globally) ─────────────────────

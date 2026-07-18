@@ -278,17 +278,15 @@ async def link_child(
 
     student_profile = db.exec(select(Profile).where(Profile.id == sp.user_id)).first()
     parent_profile = db.exec(select(Profile).where(Profile.id == uid)).first()
-
-    from app.models.notification import Notification
-    db.add(Notification(
-        user_id=sp.user_id,
-        type="system",
-        title="👨‍👩‍👧 Compte parent lié",
-        body=f"{(parent_profile.full_name if parent_profile else None) or 'Un parent'} suit désormais votre compte E-NOVAR.",
-        data={"parent_id": str(uid)},
-    ))
-
     db.commit()
+
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="system", user_id=sp.user_id,
+        title_override="👨‍👩‍👧 Compte parent lié",
+        body_override=f"{(parent_profile.full_name if parent_profile else None) or 'Un parent'} suit désormais votre compte E-NOVAR.",
+        data={"parent_id": str(uid)},
+    )
 
     return {
         "student_id": str(sp.user_id),
@@ -316,17 +314,15 @@ async def unlink_child(
 
     link.status = "revoked"
     db.add(link)
-
-    from app.models.notification import Notification
-    db.add(Notification(
-        user_id=student_id,
-        type="system",
-        title="🔗 Liaison retirée",
-        body="Votre parent s'est dissocié de votre compte. Vous gérez maintenant votre espace en autonomie.",
-        data={"parent_id": str(uid)},
-    ))
-
     db.commit()
+
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="system", user_id=student_id,
+        title_override="🔗 Liaison retirée",
+        body_override="Votre parent s'est dissocié de votre compte. Vous gérez maintenant votre espace en autonomie.",
+        data={"parent_id": str(uid)},
+    )
     return {"status": "revoked"}
 
 

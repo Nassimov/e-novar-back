@@ -32,7 +32,7 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
     from app.models.admin import PlatformSettings
     from app.models.booking import Booking
     from app.models.profile import UserRole
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
     from app.services.booking_safety import apply_cancellation_side_effects, apply_teacher_strike
 
     cancelled = 0
@@ -97,27 +97,23 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
             if booking.payment_method == "edahabia" and booking.chargily_paid_at is not None:
                 # Chargily has no refund API — already paid, needs a human.
                 for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-                    notif.persist(
-                        db, user_id=ar.user_id, type="system",
-                        title="⚠️ Remboursement Edahabia manuel requis",
-                        body=(
+                    emit(
+                        db, event_type="system", user_id=ar.user_id,
+                        title_override="⚠️ Remboursement Edahabia manuel requis",
+                        body_override=(
                             f"Réservation auto-annulée (professeur sans réponse) déjà payée en "
                             f"Edahabia ({booking.amount} DA) — remboursement manuel requis."
                         ),
                         data={"booking_id": str(booking.id)},
+                        dedup_key=f"edahabia_refund_needed:{booking.id}:{ar.user_id}",
                     )
 
-            notif.persist(
-                db, user_id=booking.student_id, type="booking_cancelled_timeout",
-                title="Réservation annulée automatiquement",
-                body="Le professeur n'a pas répondu à temps à ta demande. Ta réservation a été annulée et tu n'as pas été débité·e.",
+            emit(
+                db, event_type="booking_cancelled_timeout", user_id=booking.student_id,
+                title_override="Réservation annulée automatiquement",
+                body_override="Le professeur n'a pas répondu à temps à ta demande. Ta réservation a été annulée et tu n'as pas été débité·e.",
                 data={"booking_id": str(booking.id)},
-            )
-            notif.push(
-                db, user_id=booking.student_id,
-                title="Réservation annulée",
-                body="Le professeur n'a pas répondu à temps — tu n'as pas été débité·e.",
-                data={"booking_id": str(booking.id)},
+                dedup_key=f"booking_cancelled_timeout:{booking.id}",
             )
 
             apply_teacher_strike(
@@ -142,7 +138,7 @@ def task_reinstate_expired_teacher_suspensions() -> Dict[str, int]:
 
     from app.database import get_engine
     from app.models.profile import TeacherProfile
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
 
     reinstated = 0
     engine = get_engine()
@@ -161,11 +157,11 @@ def task_reinstate_expired_teacher_suspensions() -> Dict[str, int]:
             tp.suspended_until = None
             db.add(tp)
             db.commit()
-            notif.persist(
-                db, user_id=tp.user_id, type="teacher_reinstated",
-                title="Compte réactivé",
-                body="Ta suspension automatique est terminée — ton compte est de nouveau actif.",
-                data={},
+            emit(
+                db, event_type="teacher_reinstated", user_id=tp.user_id,
+                title_override="Compte réactivé",
+                body_override="Ta suspension automatique est terminée — ton compte est de nouveau actif.",
+                dedup_key=f"teacher_reinstated:{tp.user_id}:{now.date()}",
             )
             reinstated += 1
 
@@ -189,7 +185,7 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
     from app.database import get_engine
     from app.models.admin import PlatformSettings
     from app.models.booking import Booking, TutoringSession
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
     from app.services.booking_safety import apply_cancellation_side_effects, apply_teacher_strike
     from app.services.refunds import per_lesson_amount, refund_amount_for_booking
 
@@ -240,21 +236,16 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
             )
             apply_cancellation_side_effects(db, booking, reason="teacher_no_response")
 
-            notif.persist(
-                db, user_id=session.student_id, type="session_no_show",
-                title="Séance non honorée par le professeur",
-                body=(
+            emit(
+                db, event_type="session_no_show", user_id=session.student_id,
+                title_override="Séance non honorée par le professeur",
+                body_override=(
                     "Le professeur ne s'est pas connecté à ta séance. Tu as été remboursé·e intégralement."
                     if refund_result["refunded"] else
                     "Le professeur ne s'est pas connecté à ta séance. Ton remboursement est en cours de traitement."
                 ),
                 data={"session_id": str(session.id)},
-            )
-            notif.push(
-                db, user_id=session.student_id,
-                title="Séance non honorée",
-                body="Le professeur ne s'est pas connecté — tu es remboursé·e.",
-                data={"session_id": str(session.id)},
+                dedup_key=f"session_no_show:{session.id}",
             )
 
             incident_key = (session.teacher_id, session.scheduled_at)
@@ -293,7 +284,7 @@ def task_detect_online_student_no_show() -> Dict[str, int]:
     from app.models.admin import PlatformSettings
     from app.models.booking import Booking, TutoringSession
     from app.models.session_validation import SessionValidation
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
     from app.services.booking_safety import apply_student_strike
     from app.services.session_validation import credit_session_payout
 
@@ -334,17 +325,12 @@ def task_detect_online_student_no_show() -> Dict[str, int]:
             credit_session_payout(db, session, sv)  # pays the teacher, sets status="completed"
             db.commit()
 
-            notif.persist(
-                db, user_id=session.teacher_id, type="session_student_no_show",
-                title="Élève absent",
-                body="L'élève ne s'est pas connecté à la séance. Tu es payé·e normalement — ce n'est pas ta faute.",
+            emit(
+                db, event_type="session_student_no_show", user_id=session.teacher_id,
+                title_override="Élève absent",
+                body_override="L'élève ne s'est pas connecté à la séance. Tu es payé·e normalement — ce n'est pas ta faute.",
                 data={"session_id": str(session.id)},
-            )
-            notif.push(
-                db, user_id=session.teacher_id,
-                title="Élève absent",
-                body="L'élève ne s'est pas connecté — tu es payé·e normalement.",
-                data={"session_id": str(session.id)},
+                dedup_key=f"session_student_no_show:{session.id}",
             )
 
             apply_student_strike(
@@ -376,7 +362,7 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
     from app.database import get_engine
     from app.models.booking import Booking
     from app.models.session_validation import SessionValidation
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
     from app.services.booking_safety import apply_student_strike, apply_teacher_strike
     from app.services.refunds import per_lesson_amount, refund_amount_for_booking
     from app.services.session_validation import credit_session_payout
@@ -447,11 +433,12 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                     db.commit()
                     from app.models.profile import UserRole
                     for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-                        notif.persist(
-                            db, user_id=ar.user_id, type="dispute_gps_contradiction_admin_alert",
-                            title="Litige contredit par le GPS — décision requise",
-                            body=sv.admin_review_note,
+                        emit(
+                            db, event_type="dispute_gps_contradiction_admin_alert", user_id=ar.user_id,
+                            title_override="Litige contredit par le GPS — décision requise",
+                            body_override=sv.admin_review_note,
                             data={"session_id": str(session.id)},
+                            dedup_key=f"dispute_gps_contradiction:{sv.id}:{ar.user_id}",
                         )
                     continue
 
@@ -467,11 +454,12 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                 credit_session_payout(db, session, sv)
                 db.commit()
 
-                notif.persist(
-                    db, user_id=session.teacher_id, type="session_student_no_show",
-                    title="Absence élève confirmée",
-                    body="Ton signalement n'a pas été contesté — tu es payé·e normalement.",
+                emit(
+                    db, event_type="session_student_no_show", user_id=session.teacher_id,
+                    title_override="Absence élève confirmée",
+                    body_override="Ton signalement n'a pas été contesté — tu es payé·e normalement.",
                     data={"session_id": str(session.id)},
+                    dedup_key=f"dispute_resolved_student_absent:{sv.id}",
                 )
                 apply_student_strike(
                     db, session.student_id, "student_no_show",
@@ -496,11 +484,12 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                         db, booking, refund_amt,
                         note="Absence du professeur confirmée (signalement non contesté).",
                     )
-                notif.persist(
-                    db, user_id=session.student_id, type="session_no_show",
-                    title="Absence professeur confirmée",
-                    body="Ton signalement n'a pas été contesté — tu as été remboursé·e.",
+                emit(
+                    db, event_type="session_no_show", user_id=session.student_id,
+                    title_override="Absence professeur confirmée",
+                    body_override="Ton signalement n'a pas été contesté — tu as été remboursé·e.",
                     data={"session_id": str(session.id)},
+                    dedup_key=f"dispute_resolved_teacher_absent:{sv.id}",
                 )
                 incident_key = (session.teacher_id, session.scheduled_at)
                 if incident_key not in struck_incidents:
@@ -539,7 +528,7 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
     from app.models.booking import Booking
     from app.models.profile import UserRole
     from app.models.scheduling import TeacherSlot
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
 
     expired = 0
     engine = get_engine()
@@ -569,24 +558,26 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
                     db.add(slot)
             db.commit()
 
-            notif.persist(
-                db, user_id=booking.student_id, type="booking_cancelled_timeout",
-                title="Réservation annulée — paiement non confirmé",
-                body=(
+            emit(
+                db, event_type="booking_cancelled_timeout", user_id=booking.student_id,
+                title_override="Réservation annulée — paiement non confirmé",
+                body_override=(
                     f"Ton paiement {booking.payment_method} n'a pas été confirmé dans les délais. "
                     "Ta réservation a été annulée. Si tu as déjà envoyé le paiement, contacte le support."
                 ),
                 data={"booking_id": str(booking.id)},
+                dedup_key=f"manual_payment_expired:{booking.id}",
             )
             for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-                notif.persist(
-                    db, user_id=ar.user_id, type="manual_payment_expired_admin_alert",
-                    title="Paiement manuel expiré sans traitement",
-                    body=(
+                emit(
+                    db, event_type="manual_payment_expired_admin_alert", user_id=ar.user_id,
+                    title_override="Paiement manuel expiré sans traitement",
+                    body_override=(
                         f"Réservation {booking.id} ({booking.payment_method}, {booking.amount} DA) auto-annulée "
                         f"après {expiry_hours}h sans confirmation admin. Vérifiez qu'aucun virement réel n'a été reçu."
                     ),
                     data={"booking_id": str(booking.id)},
+                    dedup_key=f"manual_payment_expired_admin_alert:{booking.id}:{ar.user_id}",
                 )
 
             expired += 1

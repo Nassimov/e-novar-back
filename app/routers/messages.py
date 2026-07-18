@@ -282,6 +282,36 @@ def _fmt(
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
 
+@router.get("/unread-count")
+async def get_unread_message_count(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Total unread message count across every conversation — feeds the
+    sidebar 'Messages' badge (see src/lib/badge-store.ts)."""
+    from sqlalchemy import func
+
+    me = _me(current_user)
+    my_parts = db.exec(
+        select(ConversationParticipant).where(
+            ConversationParticipant.user_id == me,
+            ConversationParticipant.hidden_at.is_(None),
+        )
+    ).all()
+
+    total = 0
+    for part in my_parts:
+        stmt = select(func.count()).select_from(ChatMessage).where(
+            ChatMessage.conv_id == part.conv_id,
+            ChatMessage.sender_id != me,
+        )
+        if part.last_read_at:
+            stmt = stmt.where(ChatMessage.created_at > part.last_read_at)
+        total += db.exec(stmt).one()
+
+    return {"unread_count": total}
+
+
 @router.get("/", response_model=List[ConversationOut])
 async def list_conversations(
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -576,11 +606,25 @@ async def send_message(
     # Direct push for instant same-worker delivery, Redis for cross-worker + reliability.
     # Frontend deduplicates by message ID, so receiving both paths is harmless.
     from app.core.connections import chat_connections
+    sender_profile = _get_profile(me, db)
+    sender_name = (sender_profile.full_name if sender_profile else None) or "Utilisateur"
+    preview = (body or "📎 Pièce jointe")[:80]
     for pid in _participant_ids(conv_id, db):
         if pid == str(me):
             continue
         await chat_connections.send(pid, event)
         _publish(f"chat:user:{pid}", event)
+
+        recipient_role = _get_role(UUID(pid), db)
+        chat_path = {"parent": "/parent/teacher-chat", "teacher": "/teacher/chat"}.get(recipient_role, "/student/chat")
+
+        from app.services.notification_engine import emit
+        emit(
+            db, event_type="new_message", user_id=UUID(pid),
+            context={"sender_name": sender_name, "preview": preview},
+            data={"conv_id": str(conv_id)},
+            deep_link_override=chat_path,
+        )
 
     return _fmt(msg, me, replied_body_val, replied_sender_name_val)
 

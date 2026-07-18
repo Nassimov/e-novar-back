@@ -113,7 +113,7 @@ def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_la
     """
     from app.models.admin import PlatformSettings
     from app.models.profile import Profile, TeacherProfile, UserRole
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
 
     weight = TEACHER_STRIKE_WEIGHTS.get(reason, 1)
     settings_row = db.get(PlatformSettings, True)
@@ -140,20 +140,22 @@ def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_la
     db.add(tp)
     db.commit()
 
-    notif.persist(
-        db, user_id=teacher_id, type="teacher_suspended",
-        title="⚠️ Compte suspendu",
-        body=f"{human_label} Ton compte est suspendu {days} jour(s) (score de sévérité : {tp.no_response_strikes}).",
+    emit(
+        db, event_type="teacher_suspended", user_id=teacher_id,
+        title_override="⚠️ Compte suspendu",
+        body_override=f"{human_label} Ton compte est suspendu {days} jour(s) (score de sévérité : {tp.no_response_strikes}).",
         data={"reason": reason, "days": days},
+        dedup_key=f"teacher_suspended:{teacher_id}:{tp.no_response_strikes}",
     )
     teacher_profile_row = db.get(Profile, teacher_id)
     teacher_label = teacher_profile_row.full_name if teacher_profile_row else str(teacher_id)
     for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-        notif.persist(
-            db, user_id=ar.user_id, type="teacher_strike_admin_alert",
-            title="Sanction automatique appliquée à un professeur",
-            body=f"{teacher_label} — {human_label} (score {tp.no_response_strikes}) — suspendu {days} jour(s).",
+        emit(
+            db, event_type="teacher_strike_admin_alert", user_id=ar.user_id,
+            title_override="Sanction automatique appliquée à un professeur",
+            body_override=f"{teacher_label} — {human_label} (score {tp.no_response_strikes}) — suspendu {days} jour(s).",
             data={"teacher_id": str(teacher_id), "reason": reason, "days": days},
+            dedup_key=f"teacher_strike_admin_alert:{teacher_id}:{tp.no_response_strikes}:{ar.user_id}",
         )
     return (tp.no_response_strikes, days)
 
@@ -168,7 +170,7 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
     """
     from app.models.admin import PlatformSettings
     from app.models.profile import Profile, StudentProfile, UserRole
-    from app.services import notification as notif
+    from app.services.notification_engine import emit
 
     weight = STUDENT_STRIKE_WEIGHTS.get(reason, 1)
     settings_row = db.get(PlatformSettings, True)
@@ -200,27 +202,30 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
     db.commit()
 
     if days > 0:
-        notif.persist(
-            db, user_id=student_id, type="student_booking_suspended",
-            title="⚠️ Réservations temporairement bloquées",
-            body=f"{human_label} Tu ne peux plus créer de nouvelle réservation pendant {days} jour(s).",
+        emit(
+            db, event_type="student_booking_suspended", user_id=student_id,
+            title_override="⚠️ Réservations temporairement bloquées",
+            body_override=f"{human_label} Tu ne peux plus créer de nouvelle réservation pendant {days} jour(s).",
             data={"reason": reason, "days": days},
+            dedup_key=f"student_booking_suspended:{student_id}:{sp.no_show_strikes}",
         )
     else:
-        notif.persist(
-            db, user_id=student_id, type="student_no_show_warning",
-            title="Absence constatée",
-            body=f"{human_label} En cas de récidive, tes réservations pourront être temporairement bloquées.",
+        emit(
+            db, event_type="student_no_show_warning", user_id=student_id,
+            title_override="Absence constatée",
+            body_override=f"{human_label} En cas de récidive, tes réservations pourront être temporairement bloquées.",
             data={"reason": reason},
+            dedup_key=f"student_no_show_warning:{student_id}:{sp.no_show_strikes}",
         )
     student_profile_row = db.get(Profile, student_id)
     student_label = student_profile_row.full_name if student_profile_row else str(student_id)
     for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-        notif.persist(
-            db, user_id=ar.user_id, type="student_no_show_admin_alert",
-            title="Absence élève constatée",
-            body=f"{student_label} — {human_label} (score {sp.no_show_strikes})" + (f" — réservations bloquées {days} jour(s)." if days else " — avertissement envoyé."),
+        emit(
+            db, event_type="student_no_show_admin_alert", user_id=ar.user_id,
+            title_override="Absence élève constatée",
+            body_override=f"{student_label} — {human_label} (score {sp.no_show_strikes})" + (f" — réservations bloquées {days} jour(s)." if days else " — avertissement envoyé."),
             data={"student_id": str(student_id), "reason": reason, "days": days},
+            dedup_key=f"student_no_show_admin_alert:{student_id}:{sp.no_show_strikes}:{ar.user_id}",
         )
 
     # A linked parent (accepted link — see app/models/parent_link.py) is
@@ -237,14 +242,15 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
         )
     ).all()
     for link in parent_links:
-        notif.persist(
-            db, user_id=link.parent_id, type="child_no_show_alert",
-            title="Absence de votre enfant constatée",
-            body=(
+        emit(
+            db, event_type="child_no_show_alert", user_id=link.parent_id,
+            title_override="Absence de votre enfant constatée",
+            body_override=(
                 f"{student_label} — {human_label}"
                 + (f" Réservations bloquées {days} jour(s)." if days else " Avertissement envoyé — récidive = blocage temporaire des réservations.")
             ),
             data={"student_id": str(student_id), "reason": reason, "days": days},
+            dedup_key=f"child_no_show_alert:{student_id}:{sp.no_show_strikes}:{link.parent_id}",
         )
 
     return (sp.no_show_strikes, days)

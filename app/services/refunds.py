@@ -31,7 +31,7 @@ from sqlmodel import Session, select
 
 from app.models.booking import Booking
 from app.models.profile import UserRole
-from app.services import notification as notif
+from app.services.notification_engine import emit
 from app.services.pricing import PACK_SIZES
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,13 @@ def refund_amount_for_booking(db: Session, booking: Booking, amount_dzd: int, *,
     else:
         return {"refunded": False, "requires_manual_action": False, "method": method}
 
+    if result["refunded"]:
+        emit(
+            db, event_type="refund_completed", user_id=booking.student_id,
+            context={"amount": amount_dzd},
+            data={"booking_id": str(booking.id), "amount": amount_dzd},
+            dedup_key=f"refund_completed:{booking.id}:{amount_dzd}",
+        )
     _notify_parent_of_refund(db, booking, amount_dzd, result)
     return result
 
@@ -108,20 +115,22 @@ def _notify_parent_of_refund(db: Session, booking: Booking, amount_dzd: int, res
         f"Un remboursement de {amount_dzd} DA est en cours de traitement pour la réservation de votre enfant."
     )
     for link in parent_links:
-        notif.persist(
-            db, user_id=link.parent_id, type="child_refund_alert",
-            title="Remboursement — séance de votre enfant",
-            body=body,
+        emit(
+            db, event_type="child_refund_alert", user_id=link.parent_id,
+            title_override="Remboursement — séance de votre enfant",
+            body_override=body,
             data={"booking_id": str(booking.id), "amount": amount_dzd, "refunded": result["refunded"]},
+            dedup_key=f"child_refund_alert:{booking.id}:{amount_dzd}:{link.parent_id}",
         )
 
 
 def _flag_admins_manual_refund(db: Session, booking: Booking, amount_dzd: int, reason: str) -> None:
     admin_roles = db.exec(select(UserRole).where(UserRole.role == "admin")).all()
     for ar in admin_roles:
-        notif.persist(
-            db, user_id=ar.user_id, type="system",
-            title="⚠️ Remboursement manuel requis",
-            body=f"Remboursement de {amount_dzd} DA requis pour la réservation {booking.id}. {reason}",
+        emit(
+            db, event_type="system", user_id=ar.user_id,
+            title_override="⚠️ Remboursement manuel requis",
+            body_override=f"Remboursement de {amount_dzd} DA requis pour la réservation {booking.id}. {reason}",
             data={"booking_id": str(booking.id), "amount": amount_dzd},
+            dedup_key=f"manual_refund_needed:{booking.id}:{amount_dzd}:{ar.user_id}",
         )

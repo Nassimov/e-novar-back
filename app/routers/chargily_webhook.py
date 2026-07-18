@@ -9,7 +9,6 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_db
 from app.models.booking import Booking
-from app.models.notification import Notification
 from app.services.chargily import verify_webhook_signature
 
 logger = logging.getLogger(__name__)
@@ -50,14 +49,15 @@ async def chargily_webhook(request: Request, db: Session = Depends(get_db)):
         if booking.chargily_paid_at is None:
             booking.chargily_paid_at = datetime.utcnow()
             db.add(booking)
-            db.add(Notification(
-                user_id=booking.teacher_id,
-                type="booking",
-                title="💰 Nouveau paiement Edahabia reçu",
-                body="Un élève a payé sa réservation via Edahabia. Acceptez ou refusez la demande.",
-                data={"booking_id": str(booking.id)},
-            ))
             db.commit()
+
+            from app.services.notification_engine import emit
+            emit(
+                db, event_type="booking", user_id=booking.teacher_id,
+                title_override="💰 Nouveau paiement Edahabia reçu",
+                body_override="Un élève a payé sa réservation via Edahabia. Acceptez ou refusez la demande.",
+                data={"booking_id": str(booking.id)},
+            )
     elif event_type in ("checkout.failed", "checkout.canceled"):
         if booking.status == "pending" and booking.chargily_paid_at is None:
             booking.status = "cancelled"

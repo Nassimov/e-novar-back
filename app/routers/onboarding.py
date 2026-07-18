@@ -501,17 +501,15 @@ async def link_parent_post_onboarding(
 
     student_profile = db.exec(select(Profile).where(Profile.id == uid)).first()
     parent_profile = db.exec(select(Profile).where(Profile.id == parent_prof.user_id)).first()
-
-    from app.models.notification import Notification
-    db.add(Notification(
-        user_id=parent_prof.user_id,
-        type="system",
-        title="👨‍👩‍👧 Enfant lié",
-        body=f"{(student_profile.full_name if student_profile else None) or 'Votre enfant'} a lié son compte au vôtre.",
-        data={"student_id": str(uid)},
-    ))
-
     db.commit()
+
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="system", user_id=parent_prof.user_id,
+        title_override="👨‍👩‍👧 Enfant lié",
+        body_override=f"{(student_profile.full_name if student_profile else None) or 'Votre enfant'} a lié son compte au vôtre.",
+        data={"student_id": str(uid)},
+    )
 
     return {
         "parent_id": str(parent_prof.user_id),

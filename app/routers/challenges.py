@@ -12,7 +12,6 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
 from app.models.gamification import Challenge, ChallengeParticipation, ChallengeProofFile
-from app.models.notification import Notification
 from app.models.profile import UserRole
 
 router = APIRouter(tags=["challenges"])
@@ -232,10 +231,25 @@ def _auto_expire(user_id: UUID, db: Session) -> None:
         )
     ).all()
     if expired_parts:
+        challenge_ids = [ep.challenge_id for ep in expired_parts]
+        titles = {
+            c.id: c.title
+            for c in db.exec(select(Challenge).where(Challenge.id.in_(challenge_ids))).all()
+        }
         for ep in expired_parts:
             ep.status = "expired"
             db.add(ep)
         db.commit()
+
+        from app.services.notification_engine import emit
+        for ep in expired_parts:
+            emit(
+                db,
+                event_type="challenge_expired",
+                user_id=user_id,
+                context={"challenge_name": titles.get(ep.challenge_id, "défi")},
+                dedup_key=f"challenge_expired:{ep.id}",
+            )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -545,17 +559,20 @@ def submit_proof(
 
     # Notify all admins of the new submission
     try:
+        from app.services.notification_engine import emit
+
         admin_roles = db.exec(
             select(UserRole).where(UserRole.role == "admin")
         ).all()
         for ar in admin_roles:
-            db.add(Notification(
+            emit(
+                db,
+                event_type="system",
                 user_id=ar.user_id,
-                type="system",
-                title="Nouvelle soumission de défi",
-                body=f"Une preuve a été soumise pour le défi « {challenge.title} ».",
-            ))
-        db.commit()
+                title_override="Nouvelle soumission de défi",
+                body_override=f"Une preuve a été soumise pour le défi « {challenge.title} ».",
+                dedup_key=f"challenge_submission:{part.id}:{ar.user_id}",
+            )
     except Exception:
         pass
 

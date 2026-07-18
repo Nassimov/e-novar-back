@@ -257,6 +257,24 @@ async def cancel_session(
             human_label="Tu as annulé une séance déjà confirmée.",
         )
 
+    # Notify whichever party didn't take the cancelling action themselves —
+    # they otherwise never hear about it. An admin-initiated cancellation
+    # notifies both parties (neither one acted).
+    if uid == session.student_id:
+        notify_ids = [session.teacher_id]
+    elif uid == session.teacher_id:
+        notify_ids = [session.student_id]
+    else:
+        notify_ids = [session.student_id, session.teacher_id]
+    from app.services.notification_engine import emit
+    for notify_user_id in notify_ids:
+        emit(
+            db, event_type="lesson_cancelled", user_id=notify_user_id,
+            context={"date": str(session.scheduled_at.date()), "reason": session.cancellation_reason or ""},
+            data={"session_id": str(session.id)},
+            dedup_key=f"lesson_cancelled:{session.id}:{notify_user_id}",
+        )
+
     return {
         "id": str(session.id),
         "status": session.status,

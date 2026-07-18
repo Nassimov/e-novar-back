@@ -129,6 +129,14 @@ async def create_homework(
     db.commit()
     db.refresh(hw)
 
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="homework_assigned", user_id=hw.student_id,
+        context={"teacher_name": teacher.full_name or "Ton professeur", "title": hw.title},
+        data={"homework_id": str(hw.id)},
+        dedup_key=f"homework_assigned:{hw.id}",
+    )
+
     return HomeworkResponse(
         id=hw.id, teacher_id=hw.teacher_id, student_id=hw.student_id,
         session_id=hw.session_id, subject=hw.subject, title=hw.title,
@@ -258,6 +266,14 @@ async def grade_homework(
             f"Devoir noté: {hw.title} ({payload.score}/20)",
             db,
         )
+
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="homework_corrected", user_id=hw.student_id,
+        context={"title": hw.title, "grade": f"{payload.score}/20"},
+        data={"homework_id": str(hw.id), "score": payload.score},
+        dedup_key=f"homework_corrected:{homework_id}",
+    )
 
     return {
         "message": "Homework graded",

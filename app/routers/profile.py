@@ -368,17 +368,18 @@ async def student_unlink_parent(
 
     parent_link.status = "revoked"
     db.add(parent_link)
-
-    from app.models.notification import Notification
-    db.add(Notification(
-        user_id=parent_link.parent_id,
-        type="system",
-        title="🔗 Liaison retirée",
-        body="Votre enfant s'est dissocié de votre espace parent.",
-        data={"student_id": str(uid)},
-    ))
-
     db.commit()
+
+    from app.services.notification_engine import emit
+    emit(
+        db,
+        event_type="system",
+        user_id=parent_link.parent_id,
+        title_override="🔗 Liaison retirée",
+        body_override="Votre enfant s'est dissocié de votre espace parent.",
+        data={"student_id": str(uid)},
+    )
+
     return await get_student_profile(current_user=current_user, db=db)
 
 

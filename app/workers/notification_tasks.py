@@ -7,11 +7,14 @@ All emails and push use OneSignal — no Resend, no direct DB calls in push task
 
 import logging
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from app.services import onesignal
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+_MAX_QUEUE_ATTEMPTS = 5
 
 
 # ─── Push tasks ───────────────────────────────────────────────────────────────
@@ -66,6 +69,134 @@ def task_email_campaign(
         return result.get("status") != "error"
     except Exception as exc:
         raise self.retry(exc=exc)
+
+
+# ─── Notification engine: async delivery queue ───────────────────────────────
+
+def _deliver_queue_row(db, row: Dict[str, Any]) -> Optional[str]:
+    """Attempt one channel delivery for one notification_queue row.
+    Returns None on success, or an error string on failure."""
+    ctx = row["context"] or {}
+    channel = ctx.get("channel")
+    title = ctx.get("title", "")
+    body = ctx.get("body", "")
+    data = ctx.get("data") or {}
+    deep_link = ctx.get("deep_link")
+
+    try:
+        if channel == "push":
+            result = onesignal.send_push(user_ids=[str(row["user_id"])], title=title, body=body, data=data)
+            if result.get("status") == "error":
+                return result.get("reason", "onesignal push error")
+            return None
+
+        if channel == "email":
+            from app.models.profile import Profile
+            from app.workers.email_tasks import send_generic_notification_email
+
+            profile = db.get(Profile, row["user_id"])
+            if not profile or not profile.email:
+                return "no email on file"
+            ok = send_generic_notification_email.run(profile.email, title, body, deep_link)
+            return None if ok else "email send failed"
+
+        return f"unknown channel: {channel}"
+    except Exception as exc:
+        logger.exception("notification delivery failed channel=%s user=%s", channel, row["user_id"])
+        return str(exc)
+
+
+@celery_app.task(bind=True, max_retries=1)
+def task_process_notification_queue(self, batch_size: int = 200) -> Dict[str, int]:
+    """
+    Claims up to `batch_size` pending/retry-due rows from notification_queue
+    (FOR UPDATE SKIP LOCKED so multiple workers never double-process the same
+    row), attempts delivery, and logs every attempt to
+    notification_delivery_logs. Failures get exponential backoff up to
+    _MAX_QUEUE_ATTEMPTS, after which they're recorded in
+    notification_failures for admin visibility and marked 'failed' (no
+    further retries).
+
+    Triggered on-demand by notification_engine.emit() and as a safety-net by
+    Celery Beat (see celery_app.py) in case a .delay() call is ever lost.
+    """
+    from sqlalchemy import text
+    from sqlmodel import Session
+
+    from app.database import engine
+    from app.models.notification import NotificationDeliveryLog, NotificationFailure
+
+    processed = 0
+    failed = 0
+
+    with Session(engine) as db:
+        rows = db.execute(
+            text(
+                """
+                UPDATE notification_queue
+                SET status = 'processing'
+                WHERE id IN (
+                    SELECT id FROM notification_queue
+                    WHERE status IN ('pending', 'failed') AND next_attempt_at <= now()
+                    ORDER BY created_at
+                    LIMIT :limit
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, event_type, user_id, context, attempts
+                """
+            ),
+            {"limit": batch_size},
+        ).mappings().all()
+
+        for row in rows:
+            error = _deliver_queue_row(db, row)
+            notification_id = (row["context"] or {}).get("notification_id")
+            channel = (row["context"] or {}).get("channel", "unknown")
+
+            db.add(NotificationDeliveryLog(
+                notification_id=UUID(notification_id) if notification_id else None,
+                user_id=row["user_id"],
+                channel=channel,
+                status="failed" if error else "success",
+                error=error,
+            ))
+
+            if error is None:
+                db.execute(
+                    text("UPDATE notification_queue SET status='done', processed_at=now() WHERE id=:id"),
+                    {"id": row["id"]},
+                )
+                processed += 1
+            else:
+                attempts = row["attempts"] + 1
+                failed += 1
+                if attempts >= _MAX_QUEUE_ATTEMPTS:
+                    db.execute(
+                        text("UPDATE notification_queue SET status='failed', attempts=:a, processed_at=now() WHERE id=:id"),
+                        {"a": attempts, "id": row["id"]},
+                    )
+                    db.add(NotificationFailure(
+                        queue_id=row["id"],
+                        notification_id=UUID(notification_id) if notification_id else None,
+                        user_id=row["user_id"],
+                        channel=channel,
+                        error=error,
+                        retry_count=attempts,
+                    ))
+                else:
+                    backoff_minutes = 2 ** attempts
+                    db.execute(
+                        text(
+                            "UPDATE notification_queue SET status='pending', attempts=:a, "
+                            "next_attempt_at = now() + (:m * interval '1 minute') WHERE id=:id"
+                        ),
+                        {"a": attempts, "m": backoff_minutes, "id": row["id"]},
+                    )
+            db.commit()
+
+    if processed or failed:
+        logger.info("notification queue processed=%d failed=%d", processed, failed)
+    return {"processed": processed, "failed": failed}
 
 
 # ─── Periodic automations ─────────────────────────────────────────────────────
@@ -177,4 +308,67 @@ def task_send_inactivity_reminders() -> Dict[str, int]:
     )
 
     logger.info("Inactivity reminders sent: %d push + 1 email campaign (students segment)", sent)
+    return {"sent": sent}
+
+
+@celery_app.task
+def task_send_weekly_summary() -> Dict[str, int]:
+    """
+    Sunday 18:00 → per-student weekly recap email (sessions completed this
+    week, EP earned this week, EP balance, current weekly KP leaderboard
+    rank if any). Only sent to students with at least one completed session
+    or EP earned this week — an empty recap isn't worth an email.
+    """
+    from datetime import datetime, timedelta, timezone as _tz
+
+    from sqlmodel import Session, func, select
+
+    from app.database import engine
+    from app.models.booking import TutoringSession
+    from app.models.kp import KpBalance
+    from app.models.profile import Profile, StudentProfile
+    from app.models.progress import LeaderboardRankSnapshot
+
+    week_ago = datetime.now(_tz.utc) - timedelta(days=7)
+    sent = 0
+
+    with Session(engine) as db:
+        students = db.exec(select(StudentProfile)).all()
+        for sp in students:
+            profile = db.get(Profile, sp.user_id)
+            balance = db.get(KpBalance, sp.user_id)
+            if not profile or not profile.email or not balance:
+                continue
+            if balance.week_earned <= 0:
+                continue
+
+            sessions_completed = db.exec(
+                select(func.count()).select_from(TutoringSession).where(
+                    TutoringSession.student_id == sp.user_id,
+                    TutoringSession.status == "completed",
+                    TutoringSession.scheduled_at >= week_ago,
+                )
+            ).one()
+
+            snapshot = db.exec(
+                select(LeaderboardRankSnapshot).where(
+                    LeaderboardRankSnapshot.user_id == sp.user_id,
+                    LeaderboardRankSnapshot.period_type == "weekly",
+                    LeaderboardRankSnapshot.audience == "students",
+                    LeaderboardRankSnapshot.sort_by == "kp",
+                )
+            ).first()
+
+            from app.workers.email_tasks import send_weekly_summary_email
+            send_weekly_summary_email.delay(
+                profile.email,
+                profile.first_name or "",
+                sessions_completed,
+                balance.week_earned,
+                balance.balance,
+                snapshot.rank if snapshot else None,
+            )
+            sent += 1
+
+    logger.info("Weekly summary emails queued: %d", sent)
     return {"sent": sent}

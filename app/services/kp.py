@@ -72,14 +72,29 @@ def award_kp(
         )
         db.add(account)
 
-    db.add(KpTransaction(
+    txn = KpTransaction(
         user_id=account.user_id,
         label=label,
         source=source,
         amount=amount,
-    ))
+    )
+    db.add(txn)
     db.commit()
     db.refresh(account)
+    db.refresh(txn)
+
+    # 'challenge' source is skipped — app/routers/admin/challenges.py's
+    # approve_submission already sends a richer "challenge_approved"
+    # notification that mentions the EP amount inline; a second generic one
+    # would just be noise for that specific flow.
+    if amount > 0 and source != KpSource.challenge:
+        from app.services.notification_engine import emit
+        emit(
+            db, event_type="ep_rewarded", user_id=account.user_id,
+            context={"amount": amount, "label": label},
+            data={"amount": amount, "source": source.value},
+            dedup_key=f"ep_rewarded:{txn.id}",
+        )
 
     return account, leveled_up
 

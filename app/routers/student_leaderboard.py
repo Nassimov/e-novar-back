@@ -396,10 +396,27 @@ def _upsert_snapshot(
         )
     ).first()
     if existing:
+        previous_rank = existing.rank
         existing.rank = rank
         existing.score = score
         existing.created_at = datetime.now(tz=timezone.utc)
         db.add(existing)
+        # Only the main/default ranking (weekly KP) triggers a notification —
+        # emitting for every period_type x sort_by combination would spam the
+        # user on every leaderboard recompute.
+        if previous_rank != rank and period_type == "weekly" and sort_by == "kp":
+            from app.services.notification_engine import emit
+            emit(
+                db,
+                event_type="leaderboard_rank_changed",
+                user_id=uid,
+                context={
+                    "previous_rank": previous_rank,
+                    "rank": rank,
+                    "direction": "amélioré" if rank < previous_rank else "reculé",
+                },
+                dedup_key=f"leaderboard_rank_changed:{period_key}:{audience}:{previous_rank}:{rank}",
+            )
     else:
         db.add(LeaderboardRankSnapshot(
             period_type=period_type,

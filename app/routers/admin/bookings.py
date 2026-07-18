@@ -10,7 +10,6 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_admin_user, get_db
 from app.models.booking import Booking, TutoringSession
-from app.models.notification import Notification
 from app.models.profile import Profile, UserRole
 
 logger = logging.getLogger(__name__)
@@ -154,13 +153,12 @@ async def approve_manual_payment(
     method_label = _METHOD_LABELS.get(booking.payment_method, booking.payment_method)
 
     def _notify(user_id: UUID, title: str, body: str):
-        db.add(Notification(
-            user_id=user_id,
-            title=title,
-            body=body,
-            type="booking",
+        from app.services.notification_engine import emit
+        emit(
+            db, event_type="booking", user_id=user_id,
+            title_override=title, body_override=body,
             data={"booking_id": str(booking.id)},
-        ))
+        )
 
     if student:
         _notify(
@@ -209,33 +207,34 @@ async def reject_manual_payment(
     booking.status = "cancelled"
     db.add(booking)
 
+    db.commit()
+
+    from app.services.notification_engine import emit
+
     if booking.payment_method == "edahabia" and booking.chargily_paid_at is not None:
         # Chargily has no refund API — already paid, needs a human, same as
         # app/routers/teachers.py's refuse_booking.
         for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-            db.add(Notification(
-                user_id=ar.user_id,
-                type="system",
-                title="⚠️ Remboursement Edahabia manuel requis",
-                body=(
+            emit(
+                db, event_type="manual_payment_expired_admin_alert", user_id=ar.user_id,
+                title_override="⚠️ Remboursement Edahabia manuel requis",
+                body_override=(
                     f"Réservation rejetée par l'administration mais déjà payée en Edahabia "
                     f"({booking.amount} DA) — remboursement manuel requis."
                 ),
                 data={"booking_id": str(booking.id)},
-            ))
+            )
 
     method_label = _METHOD_LABELS.get(booking.payment_method, booking.payment_method)
     student = db.get(Profile, booking.student_id)
     if student:
-        db.add(Notification(
-            user_id=booking.student_id,
-            title="❌ Paiement non validé",
-            body=f"Votre paiement {method_label} pour la réservation du {booking.booking_date} n'a pas pu être validé. Contactez le support.",
-            type="booking",
+        emit(
+            db, event_type="booking", user_id=booking.student_id,
+            title_override="❌ Paiement non validé",
+            body_override=f"Votre paiement {method_label} pour la réservation du {booking.booking_date} n'a pas pu être validé. Contactez le support.",
             data={"booking_id": str(booking.id)},
-        ))
+        )
 
-    db.commit()
     return {"status": "cancelled", "booking_id": str(booking_id)}
 
 

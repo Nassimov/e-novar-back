@@ -13,7 +13,6 @@ from sqlmodel import Session, func, select
 from app.dependencies import get_admin_user, get_db
 from app.models.enums import KpSource
 from app.models.gamification import Challenge, ChallengeParticipation, ChallengeProofFile
-from app.models.notification import Notification
 from app.models.profile import Profile
 from app.services.kp import award_kp
 
@@ -341,14 +340,16 @@ async def approve_submission(
         db,
     )
 
-    notif = Notification(
+    from app.services.notification_engine import emit
+    emit(
+        db,
+        event_type="challenge_approved",
         user_id=part.user_id,
-        type="kp",
-        title="Défi approuvé !",
-        body=f"Ta soumission pour « {challenge.title} » a été approuvée. Tu gagnes {challenge.reward} EP !",
+        title_override="Défi approuvé !",
+        body_override=f"Ta soumission pour « {challenge.title} » a été approuvée. Tu gagnes {challenge.reward} EP !",
+        data={"challenge_id": str(challenge.id), "ep_awarded": challenge.reward},
+        dedup_key=f"challenge_approved:{part.id}",
     )
-    db.add(notif)
-    db.commit()
 
     return {"message": "Submission approved", "ep_awarded": challenge.reward}
 
@@ -381,13 +382,17 @@ async def reject_submission(
     db.add(part)
 
     title_str = challenge.title if challenge else "défi"
-    notif = Notification(
-        user_id=part.user_id,
-        type="system",
-        title="Soumission refusée",
-        body=f"Ta soumission pour « {title_str} » n'a pas été acceptée. Motif : {reason or 'Non conforme aux critères.'}",
-    )
-    db.add(notif)
     db.commit()
+
+    from app.services.notification_engine import emit
+    emit(
+        db,
+        event_type="challenge_rejected",
+        user_id=part.user_id,
+        title_override="Soumission refusée",
+        body_override=f"Ta soumission pour « {title_str} » n'a pas été acceptée. Motif : {reason or 'Non conforme aux critères.'}",
+        data={"challenge_id": str(challenge.id) if challenge else None, "reason": reason},
+        dedup_key=f"challenge_rejected:{part.id}",
+    )
 
     return {"message": "Submission rejected"}

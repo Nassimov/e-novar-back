@@ -17,6 +17,7 @@ celery_app = Celery(
         "app.workers.pdf_tasks",
         "app.workers.notification_tasks",
         "app.workers.booking_tasks",
+        "app.workers.campaign_tasks",
     ],
 )
 
@@ -36,6 +37,7 @@ celery_app.conf.update(
         "app.workers.pdf_tasks.*": {"queue": "pdf"},
         "app.workers.notification_tasks.*": {"queue": "notifications"},
         "app.workers.booking_tasks.*": {"queue": "notifications"},
+        "app.workers.campaign_tasks.*": {"queue": "notifications"},
     },
     beat_schedule={
         # Every day at 09:00 Algiers time — send reminders for tomorrow's sessions
@@ -80,6 +82,24 @@ celery_app.conf.update(
         "manual-payment-expiry": {
             "task": "app.workers.booking_tasks.task_expire_unconfirmed_manual_payments",
             "schedule": crontab(minute="*/30"),
+        },
+        # Every 2 min — safety net for the notification delivery queue: the
+        # normal path is notification_engine.emit() triggering .delay()
+        # on-demand, this just catches anything that slipped through (worker
+        # restart, lost broker message, backoff retry becoming due).
+        "notification-queue-safety-net": {
+            "task": "app.workers.notification_tasks.task_process_notification_queue",
+            "schedule": crontab(minute="*/2"),
+        },
+        # Sunday 18:00 — weekly recap email (sessions done, EP earned, rank).
+        "weekly-summary-sunday": {
+            "task": "app.workers.notification_tasks.task_send_weekly_summary",
+            "schedule": crontab(hour=18, minute=0, day_of_week=0),
+        },
+        # Every 5 min — fire due scheduled/recurring admin campaigns.
+        "notification-campaigns-due": {
+            "task": "app.workers.campaign_tasks.task_dispatch_due_campaigns",
+            "schedule": crontab(minute="*/5"),
         },
     },
 )
