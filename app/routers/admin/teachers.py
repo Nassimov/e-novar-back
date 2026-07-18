@@ -76,6 +76,40 @@ def _full_name(p: Profile) -> str:
     return name or "—"
 
 
+def _reliability_stats_for(teacher_id: UUID, db: Session) -> dict:
+    """
+    Acceptance rate is deliberately NOT part of the automatic strike/
+    suspension system (see app/services/booking_safety.py — refusing a
+    request quickly and honestly is never auto-punished, since it's the
+    best-case outcome after a request). It's admin-VISIBILITY only, to spot
+    a teacher who refuses so much it looks like a service-quality problem,
+    without pressuring teachers into bad acceptances that lead to worse
+    downstream no-shows/cancellations.
+    """
+    from app.models.booking import Booking
+
+    rows = db.exec(
+        select(Booking.status, Booking.cancelled_reason).where(Booking.teacher_id == teacher_id)
+    ).all()
+    accepted = sum(1 for status, _ in rows if status in ("confirmed",))
+    refused = sum(1 for status, reason in rows if status == "cancelled" and reason == "teacher_refused")
+    no_response = sum(1 for status, reason in rows if status == "cancelled" and reason == "teacher_no_response")
+    decided = accepted + refused + no_response
+    acceptance_rate = round(accepted / decided * 100) if decided else None
+
+    tp = db.get(TeacherProfile, teacher_id)
+    return {
+        "acceptance_rate_percent": acceptance_rate,
+        "bookings_accepted": accepted,
+        "bookings_refused": refused,
+        "bookings_no_response": no_response,
+        "reliability_strikes": tp.no_response_strikes if tp else 0,
+        "reliability_last_incident_at": tp.last_no_response_at.isoformat() if tp and tp.last_no_response_at else None,
+        "suspension_reason": tp.suspension_reason if tp else None,
+        "suspended_until": tp.suspended_until.isoformat() if tp and tp.suspended_until else None,
+    }
+
+
 def _notify(db: Session, user_id: UUID, title: str, body: str) -> None:
     db.add(Notification(user_id=user_id, title=title, body=body, type="system"))
 
@@ -208,6 +242,7 @@ async def list_active_teachers(
             "price_per_session": tp.price_per_session,
             "subjects_summary": summary,
             "created_at": tp.created_at.isoformat(),
+            **_reliability_stats_for(tp.user_id, db),
         })
 
     return {
@@ -260,6 +295,7 @@ async def get_teacher_detail(
         "status": tp.status,
         "verified": tp.verified,
         "submitted_at": tp.created_at.isoformat(),
+        **_reliability_stats_for(tp.user_id, db),
     }
 
 

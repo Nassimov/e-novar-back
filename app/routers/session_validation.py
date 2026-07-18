@@ -290,6 +290,11 @@ async def dispute_session(
     calls this same endpoint on the same session while it's already
     disputed, that's treated as a counter — contested claims always go to
     a human (admin_review), never auto-resolve.
+
+    Only usable on a CONFIRMED (paid/accepted) booking — disputing
+    attendance on a booking nobody ever confirmed would let either party
+    manufacture a payout/refund/strike out of nothing (there's no real
+    money or commitment behind it yet).
     """
     session, sv, is_student, is_teacher = _load(db, session_id, current_user)
     if not is_student and not is_teacher:
@@ -298,6 +303,14 @@ async def dispute_session(
         raise HTTPException(status_code=409, detail=f"Cannot dispute a session in status '{sv.status}'")
 
     normalized_reason_code = reason_code if reason_code in _AUTO_RESOLVABLE_REASON_CODES else None
+    if normalized_reason_code:
+        from app.models.booking import Booking
+        booking = db.get(Booking, session.booking_id) if session.booking_id else None
+        if booking is None or booking.status != "confirmed":
+            raise HTTPException(
+                status_code=409,
+                detail="Cette réservation n'est pas confirmée — impossible de signaler une absence dessus.",
+            )
 
     attachment_urls = []
     for f in files or []:
@@ -347,6 +360,28 @@ async def dispute_session(
         _notify(db, ar.user_id,
                 "⚠️ Litige contesté — décision requise" if is_counter else "⚠️ Litige sur une séance",
                 f"Un litige a été signalé sur une séance ({reason}) — intervention requise.",
+                {"session_id": str(session.id)})
+
+    # The accused party MUST be told directly, not just admins — otherwise a
+    # structured absence report with an auto-resolve deadline could go
+    # completely unnoticed by the one person who could counter it, and
+    # silently resolve in the filer's favor by default. This is the fix for
+    # exactly that gap.
+    if is_counter:
+        # Notify whoever originally filed, since their claim is now contested.
+        original_filer = sv.dispute_filed_by
+        if original_filer is not None:
+            _notify(db, original_filer, "Ton signalement a été contesté",
+                    "L'autre partie a contesté ton signalement — un administrateur va trancher.",
+                    {"session_id": str(session.id)})
+    elif normalized_reason_code:
+        accused_id = session.teacher_id if uid == session.student_id else session.student_id
+        deadline_hours = get_platform_settings(db).in_person_dispute_auto_resolve_hours
+        _notify(db, accused_id, "⚠️ Une absence a été signalée sur ta séance",
+                (
+                    f"{'Ton élève' if accused_id == session.teacher_id else 'Ton professeur'} a signalé une absence. "
+                    f"Si tu ne contestes pas sous {deadline_hours}h, ce signalement sera automatiquement validé."
+                ),
                 {"session_id": str(session.id)})
 
     db.commit()

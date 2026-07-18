@@ -382,6 +382,13 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
     from app.services.session_validation import credit_session_payout
 
     resolved = 0
+    # Same dedup need as task_detect_online_teacher_no_show: a group in-person
+    # lesson has one SessionValidation row per enrolled student, all sharing
+    # (teacher_id, scheduled_at) — if several students each file their own
+    # "teacher_absent" report for the same missed class, that's still ONE
+    # real-world incident and must only strike the teacher once. Refund
+    # happens per row regardless (each student individually deserves theirs).
+    struck_incidents = set()
     engine = get_engine()
 
     with Session(engine) as db:
@@ -402,6 +409,51 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
             booking = db.get(Booking, sv.booking_id) if sv.booking_id else None
             if session is None:
                 continue
+            if booking is None or booking.status != "confirmed":
+                # Defense in depth — dispute_session already rejects filing a
+                # structured report on a non-confirmed booking, so this
+                # shouldn't be reachable, but never auto-resolve a
+                # payout/refund/strike against a booking nobody ever confirmed.
+                sv.status = "admin_review"
+                sv.updated_at = now
+                db.add(sv)
+                db.commit()
+                continue
+
+            # GPS is otherwise pure positive evidence (trust-score bonus only,
+            # see app/services/session_validation.py) — this is the one place
+            # it's used ACTIVELY: if both parties' GPS puts them at the same
+            # place around the session, that directly contradicts an absence
+            # claim from either side. A silent "nobody countered" default
+            # shouldn't win against real evidence the other party was there —
+            # force a human decision instead of auto-resolving.
+            if sv.gps_teacher_lat is not None and sv.gps_student_lat is not None:
+                from app.models.admin import PlatformSettings
+                from app.services.session_validation import _haversine_meters
+
+                settings_row = db.get(PlatformSettings, True)
+                gps_threshold = settings_row.gps_proximity_threshold_meters if settings_row else 500
+                dist = _haversine_meters(
+                    sv.gps_teacher_lat, sv.gps_teacher_lng, sv.gps_student_lat, sv.gps_student_lng,
+                )
+                if dist <= gps_threshold:
+                    sv.status = "admin_review"
+                    sv.admin_review_note = (
+                        "Auto-résolution bloquée : les positions GPS des deux parties concordent "
+                        f"(~{round(dist)}m d'écart), ce qui contredit le signalement d'absence."
+                    )
+                    sv.updated_at = now
+                    db.add(sv)
+                    db.commit()
+                    from app.models.profile import UserRole
+                    for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
+                        notif.persist(
+                            db, user_id=ar.user_id, type="dispute_gps_contradiction_admin_alert",
+                            title="Litige contredit par le GPS — décision requise",
+                            body=sv.admin_review_note,
+                            data={"session_id": str(session.id)},
+                        )
+                    continue
 
             if sv.dispute_reason_code == "student_absent":
                 # Teacher showed up, student didn't — paid normally, student strike.
@@ -450,12 +502,94 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                     body="Ton signalement n'a pas été contesté — tu as été remboursé·e.",
                     data={"session_id": str(session.id)},
                 )
-                apply_teacher_strike(
-                    db, session.teacher_id, "teacher_no_show",
-                    human_label="Une absence signalée par ton élève n'a pas été contestée.",
-                )
+                incident_key = (session.teacher_id, session.scheduled_at)
+                if incident_key not in struck_incidents:
+                    struck_incidents.add(incident_key)
+                    apply_teacher_strike(
+                        db, session.teacher_id, "teacher_no_show",
+                        human_label="Une absence signalée par ton élève n'a pas été contestée.",
+                    )
 
             resolved += 1
 
     logger.info("task_auto_resolve_disputes: resolved=%d", resolved)
     return {"resolved": resolved}
+
+
+@celery_app.task
+def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
+    """
+    cash/transfer/rib_cib/rib_edahabia bookings need an ADMIN to manually
+    confirm or reject the payment (see app/routers/admin/bookings.py) before
+    the teacher can even respond — nothing was auto-cancelling these if an
+    admin simply never got to it, despite older UI copy promising a 48h
+    window. This is never the teacher's fault (they never got a chance to
+    accept/refuse), so unlike task_auto_cancel_unanswered_bookings, this
+    never strikes anyone — it just frees the slot and flags admins, since an
+    expired RIB/cash booking might mean a real transfer arrived and was
+    simply never reconciled in time (a process failure worth checking), not
+    necessarily that nothing was ever paid.
+    """
+    from datetime import datetime, timedelta
+
+    from sqlmodel import Session, select
+
+    from app.database import get_engine
+    from app.models.admin import PlatformSettings
+    from app.models.booking import Booking
+    from app.models.profile import UserRole
+    from app.models.scheduling import TeacherSlot
+    from app.services import notification as notif
+
+    expired = 0
+    engine = get_engine()
+
+    with Session(engine) as db:
+        settings_row = db.get(PlatformSettings, True)
+        expiry_hours = settings_row.manual_payment_expiry_hours if settings_row else 48
+        cutoff = datetime.utcnow() - timedelta(hours=expiry_hours)
+
+        candidates = db.exec(
+            select(Booking).where(
+                Booking.status == "pending",
+                Booking.payment_method.in_(["cash", "transfer", "rib_cib", "rib_edahabia"]),
+                Booking.created_at < cutoff,
+            )
+        ).all()
+
+        for booking in candidates:
+            booking.status = "cancelled"
+            booking.cancelled_reason = "manual_payment_expired"
+            db.add(booking)
+
+            if booking.slot_id:
+                slot = db.get(TeacherSlot, booking.slot_id)
+                if slot is not None and slot.status == "booked":
+                    slot.status = "open"
+                    db.add(slot)
+            db.commit()
+
+            notif.persist(
+                db, user_id=booking.student_id, type="booking_cancelled_timeout",
+                title="Réservation annulée — paiement non confirmé",
+                body=(
+                    f"Ton paiement {booking.payment_method} n'a pas été confirmé dans les délais. "
+                    "Ta réservation a été annulée. Si tu as déjà envoyé le paiement, contacte le support."
+                ),
+                data={"booking_id": str(booking.id)},
+            )
+            for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
+                notif.persist(
+                    db, user_id=ar.user_id, type="manual_payment_expired_admin_alert",
+                    title="Paiement manuel expiré sans traitement",
+                    body=(
+                        f"Réservation {booking.id} ({booking.payment_method}, {booking.amount} DA) auto-annulée "
+                        f"après {expiry_hours}h sans confirmation admin. Vérifiez qu'aucun virement réel n'a été reçu."
+                    ),
+                    data={"booking_id": str(booking.id)},
+                )
+
+            expired += 1
+
+    logger.info("task_expire_unconfirmed_manual_payments: expired=%d", expired)
+    return {"expired": expired}

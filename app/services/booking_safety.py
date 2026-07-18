@@ -222,4 +222,29 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
             body=f"{student_label} — {human_label} (score {sp.no_show_strikes})" + (f" — réservations bloquées {days} jour(s)." if days else " — avertissement envoyé."),
             data={"student_id": str(student_id), "reason": reason, "days": days},
         )
+
+    # A linked parent (accepted link — see app/models/parent_link.py) is
+    # otherwise completely blind to their child's no-shows/suspensions: every
+    # other surface (app/routers/parent.py's session list) shows the raw
+    # status with no explanation. Every incident is reported to the parent,
+    # not just ones that escalate to a suspension — they're the one actually
+    # responsible for getting their child to a paid lesson on time.
+    from app.models.parent_link import ParentStudentLink
+    parent_links = db.exec(
+        select(ParentStudentLink).where(
+            ParentStudentLink.student_id == student_id,
+            ParentStudentLink.status == "accepted",
+        )
+    ).all()
+    for link in parent_links:
+        notif.persist(
+            db, user_id=link.parent_id, type="child_no_show_alert",
+            title="Absence de votre enfant constatée",
+            body=(
+                f"{student_label} — {human_label}"
+                + (f" Réservations bloquées {days} jour(s)." if days else " Avertissement envoyé — récidive = blocage temporaire des réservations.")
+            ),
+            data={"student_id": str(student_id), "reason": reason, "days": days},
+        )
+
     return (sp.no_show_strikes, days)

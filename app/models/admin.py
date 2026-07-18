@@ -89,6 +89,14 @@ class PlatformSettings(SQLModel, table=True):
     # resolved in the filer's favor if the other party never counters.
     in_person_dispute_auto_resolve_hours: int = Field(default=48)
 
+    # cash/transfer/rib_cib/rib_edahabia bookings stay "pending" until an
+    # admin manually confirms or rejects the payment (see
+    # app/routers/admin/bookings.py) — nothing auto-cancels these otherwise.
+    # Not the teacher's fault (they never even got a chance to respond), so
+    # this never strikes anyone — see app/workers/booking_tasks.py's
+    # task_expire_unconfirmed_manual_payments.
+    manual_payment_expiry_hours: int = Field(default=48)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

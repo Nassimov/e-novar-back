@@ -532,6 +532,60 @@ async def get_child_progress(
     }
 
 
+# ── Child no-show / booking-suspension history ───────────────────────────────
+# Every incident already triggers a notification to the parent directly (see
+# app/services/booking_safety.py's apply_student_strike /
+# app/services/refunds.py's _notify_parent_of_refund) — this endpoint backs a
+# proper detail view instead of only a passing notification.
+
+@router.get("/children/{child_id}/incidents")
+async def get_child_incidents(
+    child_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("parent")),
+    db: Session = Depends(get_db),
+):
+    uid = UUID(current_user["id"])
+    _verify_child_link(uid, child_id, db)
+
+    child_sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == child_id)).first()
+
+    no_show_sessions = db.exec(
+        select(TutoringSession)
+        .where(TutoringSession.student_id == child_id)
+        .where(TutoringSession.no_show == True)  # noqa: E712
+        .order_by(TutoringSession.scheduled_at.desc())
+    ).all()
+
+    teacher_ids = list({s.teacher_id for s in no_show_sessions})
+    teachers = db.exec(select(Profile).where(Profile.id.in_(teacher_ids))).all() if teacher_ids else []
+    teacher_map = {t.id: t for t in teachers}
+
+    incidents = []
+    for s in no_show_sessions:
+        teacher = teacher_map.get(s.teacher_id)
+        incidents.append({
+            "session_id": str(s.id),
+            "scheduled_at": s.scheduled_at.isoformat(),
+            "mode": s.mode,
+            "teacher_name": teacher.full_name if teacher else "—",
+            # cancellation_reason distinguishes fault: "student_no_show" (the
+            # child's own absence) vs "teacher_no_show" (not the child's
+            # fault — refunded, no impact on the child's own record).
+            "reason": s.cancellation_reason,
+            "at_fault": "student" if s.cancellation_reason == "student_no_show" else "teacher",
+            "refund_amount": s.refund_amount,
+        })
+
+    return {
+        "student_id": str(child_id),
+        "no_show_strikes": child_sp.no_show_strikes if child_sp else 0,
+        "last_no_show_at": child_sp.last_no_show_at.isoformat() if child_sp and child_sp.last_no_show_at else None,
+        "booking_suspended_until": child_sp.booking_suspended_until.isoformat() if child_sp and child_sp.booking_suspended_until else None,
+        "booking_suspension_reason": child_sp.booking_suspension_reason if child_sp else None,
+        "incidents": incidents,
+    }
+
+
 # ── Child KP balance ─────────────────────────────────────────────────────────
 
 @router.get("/children/{child_id}/kp/balance")

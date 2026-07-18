@@ -123,19 +123,41 @@ class BankTransferSettings(BaseModel):
     platform_rib_edahabia: Optional[str] = Field(default=None, pattern=r"^\d{20}$")
 
 
+def _validate_escalating_days(v: List[int]) -> List[int]:
+    if any(d <= 0 for d in v):
+        raise ValueError("Chaque palier doit être un nombre de jours positif.")
+    if any(v[i] > v[i + 1] for i in range(len(v) - 1)):
+        raise ValueError("Les paliers de suspension doivent être croissants (ex: 2, 5, 10).")
+    return v
+
+
 class BookingPolicySettings(BaseModel):
-    """See docs/migrations/067_booking_safety_rules.sql for the full rule write-up."""
+    """See docs/migrations/067_booking_safety_rules.sql and
+    docs/migrations/069_fairness_pass.sql for the full rule write-up."""
     booking_teacher_response_hours: int = Field(ge=1, le=168)
     booking_refusal_block_threshold: int = Field(ge=1, le=10)
     booking_no_response_suspension_days: List[int] = Field(min_length=1, max_length=10)
     booking_no_response_reset_days: int = Field(ge=1, le=365)
     online_no_show_grace_minutes: int = Field(ge=1, le=120)
+    # Student no-show — booking-only suspension (never a full account lock,
+    # see app/services/booking_safety.py's apply_student_strike). First
+    # offense is always a warning regardless of this list — these paliers
+    # only apply from the 2nd incident onward.
+    student_no_show_suspension_days: List[int] = Field(min_length=1, max_length=10)
+    student_no_show_reset_days: int = Field(ge=1, le=365)
+    # In-person (at_home/at_student) absence reports auto-resolve in the
+    # filer's favor after this many hours if the other party never counters.
+    in_person_dispute_auto_resolve_hours: int = Field(ge=1, le=336)
+    # cash/transfer/rib_cib/rib_edahabia auto-cancel if an admin never
+    # confirms/rejects the payment within this window — never strikes anyone.
+    manual_payment_expiry_hours: int = Field(ge=1, le=336)
 
     @field_validator("booking_no_response_suspension_days")
     @classmethod
     def validate_escalating(cls, v: List[int]) -> List[int]:
-        if any(d <= 0 for d in v):
-            raise ValueError("Chaque palier doit être un nombre de jours positif.")
-        if any(v[i] > v[i + 1] for i in range(len(v) - 1)):
-            raise ValueError("Les paliers de suspension doivent être croissants (ex: 2, 5, 10).")
-        return v
+        return _validate_escalating_days(v)
+
+    @field_validator("student_no_show_suspension_days")
+    @classmethod
+    def validate_student_escalating(cls, v: List[int]) -> List[int]:
+        return _validate_escalating_days(v)

@@ -30,6 +30,10 @@ def _serialize_booking_policy(s: PlatformSettings) -> dict:
         "booking_no_response_suspension_days": s.booking_no_response_suspension_days,
         "booking_no_response_reset_days": s.booking_no_response_reset_days,
         "online_no_show_grace_minutes": s.online_no_show_grace_minutes,
+        "student_no_show_suspension_days": s.student_no_show_suspension_days,
+        "student_no_show_reset_days": s.student_no_show_reset_days,
+        "in_person_dispute_auto_resolve_hours": s.in_person_dispute_auto_resolve_hours,
+        "manual_payment_expiry_hours": s.manual_payment_expiry_hours,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 
@@ -84,6 +88,10 @@ async def update_booking_policy_settings(
     settings.booking_no_response_suspension_days = body.booking_no_response_suspension_days
     settings.booking_no_response_reset_days = body.booking_no_response_reset_days
     settings.online_no_show_grace_minutes = body.online_no_show_grace_minutes
+    settings.student_no_show_suspension_days = body.student_no_show_suspension_days
+    settings.student_no_show_reset_days = body.student_no_show_reset_days
+    settings.in_person_dispute_auto_resolve_hours = body.in_person_dispute_auto_resolve_hours
+    settings.manual_payment_expiry_hours = body.manual_payment_expiry_hours
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)

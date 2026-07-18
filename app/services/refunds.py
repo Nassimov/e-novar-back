@@ -52,12 +52,15 @@ def refund_amount_for_booking(db: Session, booking: Booking, amount_dzd: int, *,
 
     Returns {"refunded": bool, "requires_manual_action": bool, "method": str}.
     Never raises — a failed/impossible refund is reported back for the
-    caller to notify admins, not swallowed silently.
+    caller to notify admins, not swallowed silently. Also notifies a linked
+    parent (accepted app.models.parent_link.ParentStudentLink), if any —
+    they're typically the one who actually paid.
     """
     if amount_dzd <= 0:
         return {"refunded": False, "requires_manual_action": False, "method": booking.payment_method or "unknown"}
 
     method = booking.payment_method or "unknown"
+    result: dict
 
     if method == "cib":
         if booking.stripe_pi_id:
@@ -65,25 +68,52 @@ def refund_amount_for_booking(db: Session, booking: Booking, amount_dzd: int, *,
                 from app.services.stripe import create_refund
                 create_refund(booking.stripe_pi_id, amount_cents=amount_dzd)
                 logger.info("Stripe refund issued: booking_id=%s amount=%d note=%s", booking.id, amount_dzd, note)
-                return {"refunded": True, "requires_manual_action": False, "method": "cib"}
+                result = {"refunded": True, "requires_manual_action": False, "method": "cib"}
             except Exception as exc:
                 logger.error("Stripe refund FAILED: booking_id=%s amount=%d error=%s", booking.id, amount_dzd, exc)
                 _flag_admins_manual_refund(db, booking, amount_dzd, f"Le remboursement Stripe automatique a échoué ({exc}). {note}")
-                return {"refunded": False, "requires_manual_action": True, "method": "cib"}
-        # Never captured (still just an authorization) — nothing was ever
-        # charged, so there's nothing to refund; the hold itself is
-        # released by the caller (cancel_payment_intent).
-        return {"refunded": False, "requires_manual_action": False, "method": "cib"}
-
-    if method == "edahabia":
+                result = {"refunded": False, "requires_manual_action": True, "method": "cib"}
+        else:
+            # Never captured (still just an authorization) — nothing was ever
+            # charged, so there's nothing to refund; the hold itself is
+            # released by the caller (cancel_payment_intent).
+            return {"refunded": False, "requires_manual_action": False, "method": "cib"}
+    elif method == "edahabia":
         _flag_admins_manual_refund(db, booking, amount_dzd, f"Paiement Edahabia — Chargily n'a pas d'API de remboursement. {note}")
-        return {"refunded": False, "requires_manual_action": True, "method": "edahabia"}
-
-    if method in ("cash", "transfer"):
+        result = {"refunded": False, "requires_manual_action": True, "method": "edahabia"}
+    elif method in ("cash", "transfer", "rib_cib", "rib_edahabia"):
         _flag_admins_manual_refund(db, booking, amount_dzd, f"Paiement {method} — aucune passerelle à rembourser automatiquement. {note}")
-        return {"refunded": False, "requires_manual_action": True, "method": method}
+        result = {"refunded": False, "requires_manual_action": True, "method": method}
+    else:
+        return {"refunded": False, "requires_manual_action": False, "method": method}
 
-    return {"refunded": False, "requires_manual_action": False, "method": method}
+    _notify_parent_of_refund(db, booking, amount_dzd, result)
+    return result
+
+
+def _notify_parent_of_refund(db: Session, booking: Booking, amount_dzd: int, result: dict) -> None:
+    from app.models.parent_link import ParentStudentLink
+
+    parent_links = db.exec(
+        select(ParentStudentLink).where(
+            ParentStudentLink.student_id == booking.student_id,
+            ParentStudentLink.status == "accepted",
+        )
+    ).all()
+    if not parent_links:
+        return
+    body = (
+        f"{amount_dzd} DA ont été remboursés pour la réservation de votre enfant."
+        if result["refunded"] else
+        f"Un remboursement de {amount_dzd} DA est en cours de traitement pour la réservation de votre enfant."
+    )
+    for link in parent_links:
+        notif.persist(
+            db, user_id=link.parent_id, type="child_refund_alert",
+            title="Remboursement — séance de votre enfant",
+            body=body,
+            data={"booking_id": str(booking.id), "amount": amount_dzd, "refunded": result["refunded"]},
+        )
 
 
 def _flag_admins_manual_refund(db: Session, booking: Booking, amount_dzd: int, reason: str) -> None:

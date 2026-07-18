@@ -75,5 +75,11 @@ celery_app.conf.update(
             "task": "app.workers.booking_tasks.task_auto_resolve_disputes",
             "schedule": crontab(minute="*/30"),
         },
+        # Every 30 min — expire cash/transfer/RIB bookings an admin never
+        # confirmed/rejected in time.
+        "manual-payment-expiry": {
+            "task": "app.workers.booking_tasks.task_expire_unconfirmed_manual_payments",
+            "schedule": crontab(minute="*/30"),
+        },
     },
 )
