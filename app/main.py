@@ -336,6 +336,10 @@ from app.routers.admin.session_validation import router as admin_session_validat
 from app.routers.admin.notification_campaigns import router as admin_campaigns_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
+from app.routers.competitive.matches import router as competitive_matches_router
+from app.routers.competitive.lobby import router as competitive_lobby_router
+from app.routers.competitive.invitations import router as competitive_invitations_router
+from app.routers.competitive.stats import router as competitive_stats_router
 
 app.include_router(public_router,        prefix="/api/public",         tags=["Public"])
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
@@ -387,6 +391,10 @@ app.include_router(admin_session_validation_router, prefix="/api/admin/session-v
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 app.include_router(admin_campaigns_router,  prefix="/api/admin/campaigns",  tags=["Admin — Notification Campaigns"])
+app.include_router(competitive_matches_router,     prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_lobby_router,       prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_invitations_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_stats_router,       prefix="/api/competitive", tags=["Competitive"])
 
 
 # ── Custom OpenAPI schema (adds Bearer security globally) ─────────────────────

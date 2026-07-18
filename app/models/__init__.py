@@ -147,3 +147,11 @@ from app.models.admin import (  # noqa: F401
     PromoRedemption,
     Report,
 )
+
+# Competitive Arena (Phase 1 — foundation & architecture)
+from app.models.competitive import (  # noqa: F401
+    CompetitiveInvitation,
+    CompetitiveMatch,
+    CompetitiveMatchParticipant,
+    CompetitiveStatistics,
+)

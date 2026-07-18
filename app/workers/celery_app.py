@@ -18,6 +18,7 @@ celery_app = Celery(
         "app.workers.notification_tasks",
         "app.workers.booking_tasks",
         "app.workers.campaign_tasks",
+        "app.workers.competitive_tasks",
     ],
 )
 
@@ -38,6 +39,7 @@ celery_app.conf.update(
         "app.workers.notification_tasks.*": {"queue": "notifications"},
         "app.workers.booking_tasks.*": {"queue": "notifications"},
         "app.workers.campaign_tasks.*": {"queue": "notifications"},
+        "app.workers.competitive_tasks.*": {"queue": "notifications"},
     },
     beat_schedule={
         # Every day at 09:00 Algiers time — send reminders for tomorrow's sessions
@@ -99,6 +101,13 @@ celery_app.conf.update(
         # Every 5 min — fire due scheduled/recurring admin campaigns.
         "notification-campaigns-due": {
             "task": "app.workers.campaign_tasks.task_dispatch_due_campaigns",
+            "schedule": crontab(minute="*/5"),
+        },
+        # Every 5 min — expire stale competitive challenge invitations
+        # (default TTL 15 min) and draft matches that were never followed
+        # by an invitation.
+        "competitive-invitations-expiry": {
+            "task": "app.workers.competitive_tasks.task_expire_competitive_invitations",
             "schedule": crontab(minute="*/5"),
         },
     },
