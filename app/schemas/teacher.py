@@ -221,6 +221,9 @@ class TeacherBookingItem(BaseModel):
 
 class WalletResponse(BaseModel):
     wallet_balance_dzd: int
+    # Lifetime sum of every completed lesson's payout, since account
+    # creation — never decreases on withdrawal, unlike wallet_balance_dzd.
+    total_earned_dzd: int
     payout_mode: str
     ep_balance: int
     ep_total_earned: int

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -146,7 +146,7 @@ async def parent_dashboard(
     db: Session = Depends(get_db),
 ):
     uid = UUID(current_user["id"])
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
 
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
     if not profile:
@@ -268,7 +268,7 @@ async def link_child(
     if existing and existing.status == "accepted":
         raise HTTPException(status_code=409, detail="Cet enfant est déjà lié à votre compte.")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if existing:
         existing.status = "accepted"
         existing.accepted_at = now
@@ -340,7 +340,7 @@ async def get_child_sessions(
     uid = UUID(current_user["id"])
     _verify_child_link(uid, child_id, db)
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     if type == "upcoming":
         query = (
             select(TutoringSession)
@@ -433,7 +433,7 @@ async def parent_cancel_session(
     if session.status in ("completed", "cancelled"):
         raise HTTPException(status_code=400, detail="Cannot cancel a completed or already cancelled session")
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     # A parent cancelling on their child's behalf is always the "student
     # side" — the courtesy time-based tiers apply (teacher-fault cancellation
     # goes through sessions.py's own cancel_session, called by the teacher).

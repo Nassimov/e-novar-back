@@ -22,7 +22,7 @@ from __future__ import annotations
 import hashlib
 import math
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 from uuid import UUID
 
@@ -102,7 +102,7 @@ def token_window_open(sv: SessionValidation, session: TutoringSession, settings:
     minutes before the session's scheduled start (spec point 2) — never
     before, regardless of what the client asks."""
     opens_at = session.scheduled_at - timedelta(minutes=settings.token_visible_minutes_before)
-    return datetime.utcnow() >= opens_at
+    return datetime.now(timezone.utc) >= opens_at
 
 
 def generate_token(
@@ -118,7 +118,7 @@ def generate_token(
     there is never more than one valid token per session at a time."""
     plaintext = f"{secrets.choice(_TOKEN_ALPHABET)}{''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(3))}-" \
                 f"{''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(4))}"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sv.token_hash = _hash_token(plaintext)
     sv.token_expires_at = now + timedelta(hours=24)  # generous ceiling; the real gate is the validation window
     sv.token_shown_at = now
@@ -150,7 +150,7 @@ def consume_token(
     if not plaintext or sv.token_hash is None:
         return False
     candidate_hash = _hash_token(plaintext.strip().upper())
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if sv.token_expires_at and now > sv.token_expires_at:
         return False
 
@@ -277,7 +277,7 @@ def credit_session_payout(db: Session, session: TutoringSession, sv: SessionVali
 
     session.status = "completed"
     if session.ended_at is None:
-        session.ended_at = datetime.utcnow()
+        session.ended_at = datetime.now(timezone.utc)
     session.teacher_payout_amount = payout
     db.add(session)
 
@@ -286,7 +286,7 @@ def credit_session_payout(db: Session, session: TutoringSession, sv: SessionVali
         teacher_profile.wallet_balance_dzd += payout
         db.add(teacher_profile)
 
-    sv.payment_credited_at = datetime.utcnow()
+    sv.payment_credited_at = datetime.now(timezone.utc)
     sv.updated_at = sv.payment_credited_at
     db.add(sv)
 
@@ -321,7 +321,7 @@ def evaluate_and_finalize(
 
     if score >= settings.trust_auto_approve_threshold:
         sv.status = "approved"
-        sv.payment_eligible_at = datetime.utcnow()
+        sv.payment_eligible_at = datetime.now(timezone.utc)
         db.add(sv)
         db.flush()
         credit_session_payout(db, session, sv)

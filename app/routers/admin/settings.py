@@ -103,6 +103,7 @@ def _serialize_bank_transfer(s: PlatformSettings) -> dict:
         "bank_beneficiary_name": s.bank_beneficiary_name,
         "platform_rib_cib": s.platform_rib_cib,
         "platform_rib_edahabia": s.platform_rib_edahabia,
+        "dzd_per_eur": s.dzd_per_eur,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 
@@ -132,6 +133,7 @@ async def update_bank_transfer_settings(
     settings.bank_beneficiary_name = body.bank_beneficiary_name
     settings.platform_rib_cib = body.platform_rib_cib
     settings.platform_rib_edahabia = body.platform_rib_edahabia
+    settings.dzd_per_eur = body.dzd_per_eur
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)

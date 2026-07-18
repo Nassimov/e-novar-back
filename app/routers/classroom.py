@@ -12,7 +12,7 @@ individual ones. Same logic for the shared group chat conversation.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -114,7 +114,7 @@ async def get_classroom_room(
     duration = session.duration_min or 90
     scheduled_end = session.scheduled_at + timedelta(minutes=duration)
     join_opens_at = session.scheduled_at - timedelta(minutes=settings.token_visible_minutes_before)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     grace_end = scheduled_end + timedelta(minutes=45)
 
     can_join = join_opens_at <= now <= grace_end
@@ -180,7 +180,7 @@ async def get_classroom_room(
         lvl = db.get(Level, session.level_id)
         level_name = lvl.label if lvl else None
 
-    now_join = datetime.utcnow()
+    now_join = datetime.now(timezone.utc)
     # Per-participant join timestamps — status="live"/started_at (above)
     # only ever record "SOMEONE joined", not who specifically. This is what
     # app/workers/booking_tasks.py's online no-show detector needs to tell a
@@ -235,7 +235,7 @@ async def dev_simulate_session_start(
     if session.status in ("cancelled", "no_show", "completed"):
         raise HTTPException(status_code=409, detail=f"Séance en statut '{session.status}' — impossible à simuler.")
 
-    session.scheduled_at = datetime.utcnow()
+    session.scheduled_at = datetime.now(timezone.utc)
     db.add(session)
     db.commit()
     db.refresh(session)
@@ -464,7 +464,7 @@ async def advance_chapter(
         raise HTTPException(status_code=404, detail="Chapter not found")
 
     all_chapters = db.exec(select(SessionChapter).where(SessionChapter.session_id == session_id)).all()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     for c in all_chapters:
         if c.id == target.id:
             c.status = "active"

@@ -121,6 +121,9 @@ class BankTransferSettings(BaseModel):
     bank_beneficiary_name: str = Field(min_length=1, max_length=200)
     platform_rib_cib: Optional[str] = Field(default=None, pattern=r"^\d{20}$")
     platform_rib_edahabia: Optional[str] = Field(default=None, pattern=r"^\d{20}$")
+    # How many DZD = 1 EUR — Stripe (international CIB payment) settles in
+    # EUR, so this is what converts the DZD-priced booking at checkout time.
+    dzd_per_eur: float = Field(gt=0, le=1000)
 
 
 def _validate_escalating_days(v: List[int]) -> List[int]:

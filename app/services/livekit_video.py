@@ -18,7 +18,7 @@ Security model:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from livekit.api import (
@@ -129,7 +129,7 @@ def create_access_token(
 ) -> str:
     """One-shot, per-user, per-room JWT. `identity` (user_id) lets LiveKit's
     participant list/webhooks be correlated back to our own profiles.id."""
-    ttl = max(timedelta(minutes=5), (scheduled_end_at + timedelta(minutes=_GRACE_MINUTES)) - datetime.utcnow())
+    ttl = max(timedelta(minutes=5), (scheduled_end_at + timedelta(minutes=_GRACE_MINUTES)) - datetime.now(timezone.utc))
     grants = VideoGrants(
         room_join=True,
         room=room_name,

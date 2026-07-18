@@ -121,11 +121,18 @@ async def invite_admin(
     result = send_email(to=payload.email, subject="Invitation administrateur E-NOVAR", html=html)
 
     response: Dict[str, Any] = {"message": f"Invitation envoyée à {payload.email}"}
-    if result.get("status") == "skipped":
-        # Email provider not configured in this environment — surface the
-        # link directly so the invite is still usable (never silently lost).
+    if result.get("status") in ("skipped", "error"):
+        # Either the email provider isn't configured, or OneSignal genuinely
+        # couldn't deliver (e.g. a brand-new address it had never seen before
+        # and the registration retry in onesignal.send_email still failed) —
+        # either way, never leave the admin with just a false "sent"
+        # confirmation and no way to actually get the invite to the person.
         response["invite_url"] = invite_url
-        response["message"] = "Email non configuré sur cet environnement — lien d'invitation généré ci-dessous."
+        response["message"] = (
+            "Email non configuré sur cet environnement — lien d'invitation généré ci-dessous."
+            if result.get("status") == "skipped"
+            else "L'email n'a pas pu être délivré — partage ce lien d'invitation directement."
+        )
     return response
 
 

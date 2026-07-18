@@ -169,7 +169,17 @@ def send_email(
 ) -> Dict[str, Any]:
     """
     Send a transactional email to a specific address via OneSignal.
-    Uses include_email_tokens so no prior subscription is required.
+
+    include_email_tokens targets a OneSignal "email player" — if `to` has
+    never been registered as one (e.g. a brand-new invitee who has never
+    logged in / triggered register_user()), OneSignal accepts the request
+    with HTTP 200 but recipients=0 and NOTHING is actually delivered. That
+    used to be silently reported back as success (only an HTTP-level failure
+    was ever treated as an error) — callers would tell the admin "email sent"
+    with nothing ever arriving. Now explicitly checked: recipients=0 or a
+    populated `errors` field both come back as {"status": "error"} so the
+    caller can fall back (e.g. show the invite link directly) instead of
+    claiming delivery that didn't happen.
     """
     if not _configured():
         return {"status": "skipped", "reason": "not_configured"}
@@ -183,7 +193,27 @@ def send_email(
         "email_from_address": from_address,
     }
 
-    return _post("notifications", payload)
+    result = _post("notifications", payload)
+    if result.get("status") == "error":
+        return result
+    if result.get("errors"):
+        logger.warning("OneSignal send_email to=%s returned errors: %s", to, result["errors"])
+        return {"status": "error", "reason": str(result["errors"])}
+    if result.get("recipients", 0) == 0:
+        # Most likely cause: `to` was never registered as a OneSignal email
+        # player (brand-new recipient — invite emails, password resets for
+        # accounts that never logged in, etc.). Self-heal: register the
+        # email channel on the fly, then retry once before giving up.
+        logger.info("OneSignal send_email to=%s matched 0 recipients — registering and retrying once.", to)
+        _post("players", {"app_id": settings.onesignal_app_id, "device_type": 11, "identifier": to})
+        retry = _post("notifications", payload)
+        if retry.get("status") == "error" or retry.get("errors") or retry.get("recipients", 0) == 0:
+            logger.warning(
+                "OneSignal send_email to=%s still matched 0 recipients after registration retry — nothing delivered.", to,
+            )
+            return {"status": "error", "reason": "no_matching_recipient"}
+        return retry
+    return result
 
 
 # ─── Email (campaigns / automations) ─────────────────────────────────────────

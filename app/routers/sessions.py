@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -41,7 +41,7 @@ def _compute_refund_pct(scheduled_at: datetime, at_fault: str) -> int:
     """
     if at_fault == "teacher":
         return 100
-    hours = (scheduled_at - datetime.utcnow()).total_seconds() / 3600
+    hours = (scheduled_at - datetime.now(timezone.utc)).total_seconds() / 3600
     if hours > 24:
         return 100
     if hours > 6:
@@ -195,7 +195,7 @@ async def cancel_session(
     if session.status in ("completed", "cancelled"):
         raise HTTPException(status_code=400, detail="Cannot cancel a completed or already cancelled session")
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
 
     # Who's actually at fault decides the refund policy — never the student's
     # cost to bear when the teacher backs out of an accepted lesson. Only an
@@ -331,7 +331,7 @@ async def complete_session(
     payout = round(booking.amount / pack_size)
 
     session.status = "completed"
-    session.ended_at = datetime.utcnow()
+    session.ended_at = datetime.now(timezone.utc)
     session.teacher_payout_amount = payout
     db.add(session)
 
@@ -402,7 +402,7 @@ async def join_session(
         session.room_url = f"https://meet.enovar.dz/{room_id}"
         session.status = SessionStatus.live
         if session.started_at is None:
-            session.started_at = datetime.utcnow()
+            session.started_at = datetime.now(timezone.utc)
         db.add(session)
         db.commit()
         db.refresh(session)

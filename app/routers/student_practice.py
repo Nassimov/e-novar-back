@@ -205,7 +205,7 @@ def _assess_fraud(
     total_questions: int,
     db:              Session,
 ) -> _FraudResult:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     # ── 1. Daily cooldown: already accumulated too many hard flags today ──────
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -327,7 +327,7 @@ def _select_questions(
     eligible_ids = {q.id for q in all_qs}
 
     # ── past attempt history for this subject + level ─────────────────────────
-    cutoff_naive = datetime.utcnow() - timedelta(days=RECENT_DAYS)
+    cutoff_naive = datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)
 
     past_attempts = db.exec(
         select(QuizAttempt).where(
@@ -478,7 +478,7 @@ def _upsert_mastery(
         )
     ).first()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if row is None:
         pct = round((correct / total) * 100, 2) if total else 0
         db.add(StudentSubjectMastery(
@@ -567,7 +567,7 @@ async def start_quiz(
     ).all()
     for a in stale:
         a.completed    = False   # stays incomplete; just mark completed_at
-        a.completed_at = datetime.utcnow()
+        a.completed_at = datetime.now(timezone.utc)
         db.add(a)
 
     # Fetch eligible questions (active + validated + not soft-deleted)
@@ -812,7 +812,7 @@ async def submit_quiz(
     attempt.fraud_flag       = fraud_flag
     attempt.fraud_reason     = fraud_reason
     attempt.completed        = True
-    attempt.completed_at     = datetime.utcnow()
+    attempt.completed_at     = datetime.now(timezone.utc)
     db.add(attempt)
 
     if ep_awarded > 0:

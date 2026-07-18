@@ -7,7 +7,7 @@ admin review queue.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 from uuid import UUID
 
@@ -58,7 +58,7 @@ def _load(db: Session, session_id: UUID, current_user: Dict[str, Any]):
 def _check_expiry(db: Session, session: TutoringSession, sv, settings) -> None:
     if sv.status == "awaiting_student_validation" and sv.teacher_ended_at:
         deadline = sv.teacher_ended_at + timedelta(hours=settings.student_validation_window_hours)
-        if datetime.utcnow() > deadline:
+        if datetime.now(timezone.utc) > deadline:
             sv.status = "expired"
             db.add(sv)
             log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=None,
@@ -78,7 +78,7 @@ def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatu
         session_id=session.id,
         booking_id=session.booking_id,
         status=sv.status,
-        can_teacher_end=(sv.status == "scheduled" and datetime.utcnow() >= scheduled_end),
+        can_teacher_end=(sv.status == "scheduled" and datetime.now(timezone.utc) >= scheduled_end),
         can_view_token=token_window_open(sv, session, settings) and sv.status in ("scheduled", "awaiting_student_validation"),
         token_visible_at=token_visible_at,
         scheduled_end_at=scheduled_end,
@@ -126,13 +126,13 @@ async def teacher_end_session(
         raise HTTPException(status_code=409, detail=f"Cannot end a session in status '{sv.status}'")
 
     scheduled_end = session.scheduled_at + timedelta(minutes=session.duration_min or 90)
-    if datetime.utcnow() < scheduled_end:
+    if datetime.now(timezone.utc) < scheduled_end:
         raise HTTPException(
             status_code=409,
             detail="La séance ne peut être terminée qu'après son heure de fin prévue.",
         )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sv.teacher_ended_at = now
     sv.status = "awaiting_student_validation"
     sv.updated_at = now
@@ -211,7 +211,7 @@ async def validate_session(
         db.commit()
         raise HTTPException(status_code=400, detail="Code invalide ou expiré")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sv.student_validated_at = now
     sv.validation_method = body.method
     sv.status = "validated"
@@ -249,7 +249,7 @@ async def teacher_confirm_session(
     if sv.teacher_confirmed_at is not None:
         raise HTTPException(status_code=409, detail="Déjà confirmée")
 
-    sv.teacher_confirmed_at = datetime.utcnow()
+    sv.teacher_confirmed_at = datetime.now(timezone.utc)
     db.add(sv)
     log_audit(db, session_id=session.id, booking_id=session.booking_id,
               actor_user_id=UUID(current_user["id"]) if current_user.get("id") else None,
@@ -320,7 +320,7 @@ async def dispute_session(
         url = upload_file(raw, f.filename or "attachment", f.content_type, folder=f"session-disputes/{session_id}")
         attachment_urls.append(url)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     uid = UUID(current_user["id"]) if current_user.get("id") else None
 
     is_counter = sv.status == "disputed" and sv.dispute_filed_by is not None and sv.dispute_filed_by != uid
@@ -398,7 +398,7 @@ async def record_online_connect(
     if not is_student and not is_teacher:
         raise HTTPException(status_code=403, detail="Access denied")
     if sv.online_connected_at is None:
-        sv.online_connected_at = datetime.utcnow()
+        sv.online_connected_at = datetime.now(timezone.utc)
         db.add(sv)
         db.commit()
     return {"online_connected_at": sv.online_connected_at}
@@ -413,7 +413,7 @@ async def record_online_disconnect(
     session, sv, is_student, is_teacher = _load(db, session_id, current_user)
     if not is_student and not is_teacher:
         raise HTTPException(status_code=403, detail="Access denied")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sv.online_disconnected_at = now
     if sv.online_connected_at:
         sv.online_duration_min = max(0, round((now - sv.online_connected_at).total_seconds() / 60))
@@ -436,7 +436,7 @@ async def submit_gps(
     if not is_student and not is_teacher:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sv.gps_consent = True
     if is_student:
         sv.gps_student_lat = body.lat

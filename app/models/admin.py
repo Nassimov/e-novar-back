@@ -75,6 +75,13 @@ class PlatformSettings(SQLModel, table=True):
     platform_rib_cib: Optional[str] = Field(default=None)
     platform_rib_edahabia: Optional[str] = Field(default=None)
 
+    # International card payments (CIB via Stripe) settle in EUR — Stripe
+    # has no DZD settlement currency, so the DZD price must be converted at
+    # checkout time. How many DZD = 1 EUR — see app/services/stripe.py's
+    # create_checkout_session and app/routers/student_teachers.py's
+    # book_teacher_slot for where this is actually applied.
+    dzd_per_eur: float = Field(default=145.00)
+
     # Student no-show enforcement — mirrors the teacher escalation below but
     # only ever blocks new bookings (see StudentProfile.booking_suspended_until).
     student_no_show_suspension_days: List[int] = Field(

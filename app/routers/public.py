@@ -37,10 +37,33 @@ async def get_public_pricing(db: Session = Depends(get_db)):
     )
 
 
+class BookingPolicyPublic(BaseModel):
+    booking_teacher_response_hours: int
+    in_person_dispute_auto_resolve_hours: int
+    manual_payment_expiry_hours: int
+
+
+@router.get("/booking-policy", response_model=BookingPolicyPublic)
+async def get_public_booking_policy(db: Session = Depends(get_db)):
+    """Timing rules shown as countdowns to the user (teacher's pending
+    request auto-cancel deadline, student's pending-validation window) —
+    admin-configurable in app/routers/admin/settings.py."""
+    settings = get_platform_settings(db)
+    return BookingPolicyPublic(
+        booking_teacher_response_hours=settings.booking_teacher_response_hours,
+        in_person_dispute_auto_resolve_hours=settings.in_person_dispute_auto_resolve_hours,
+        manual_payment_expiry_hours=settings.manual_payment_expiry_hours,
+    )
+
+
 class BankTransferInfoPublic(BaseModel):
     beneficiary_name: str
     rib_cib: Optional[str] = None
     rib_edahabia: Optional[str] = None
+    # How many DZD = 1 EUR — lets the frontend show "≈ X EUR" next to the
+    # international card payment option before checkout (Stripe settles in
+    # EUR, see app/services/stripe.py's create_checkout_session).
+    dzd_per_eur: float
 
 
 @router.get("/bank-transfer-info", response_model=BankTransferInfoPublic)
@@ -53,6 +76,7 @@ async def get_bank_transfer_info(db: Session = Depends(get_db)):
         beneficiary_name=settings.bank_beneficiary_name,
         rib_cib=settings.platform_rib_cib,
         rib_edahabia=settings.platform_rib_edahabia,
+        dzd_per_eur=settings.dzd_per_eur,
     )
 
 

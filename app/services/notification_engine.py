@@ -85,8 +85,42 @@ def emit(
     Returns the persisted in_app Notification, or None if:
       - the event_type has no active template AND no title/body override, or
       - dedup_key collided with an existing notification for this user
-        (constraint violation is swallowed — that IS the intended behavior).
+        (constraint violation is swallowed — that IS the intended behavior),
+      - or ANYTHING else went wrong (see the top-level guard below).
+
+    Notifications are a side effect, never the main point of the request
+    that triggers them — a caller accepting a booking, awarding KP, etc.
+    must never fail just because a notification template is missing, a
+    migration hasn't run yet, the DB hiccuped, or any other notification-only
+    problem. Every failure path here is caught, logged, and swallowed.
     """
+    try:
+        return _emit_inner(
+            db, event_type=event_type, user_id=user_id, context=context,
+            dedup_key=dedup_key, data=data, title_override=title_override,
+            body_override=body_override, deep_link_override=deep_link_override,
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception("notification_engine.emit failed for event_type=%s user=%s — swallowed", event_type, user_id)
+        return None
+
+
+def _emit_inner(
+    db: Session,
+    *,
+    event_type: str,
+    user_id: UUID,
+    context: Optional[Dict[str, Any]] = None,
+    dedup_key: Optional[str] = None,
+    data: Optional[Dict[str, Any]] = None,
+    title_override: Optional[str] = None,
+    body_override: Optional[str] = None,
+    deep_link_override: Optional[str] = None,
+) -> Optional[Notification]:
     context = context or {}
     template = db.exec(
         select(NotificationTemplate).where(NotificationTemplate.event_type == event_type)

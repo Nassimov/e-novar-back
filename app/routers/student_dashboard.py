@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -132,7 +132,7 @@ async def student_dashboard(
     db: Session = Depends(get_db),
 ):
     uid = UUID(current_user["id"])
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
 
@@ -310,6 +310,15 @@ class SessionListItem(BaseModel):
     refund_percentage: Optional[int] = None
     can_cancel: bool = False
     cancel_refund: str = "none"
+    # Booking.status — 'pending' means the teacher hasn't accepted/refused
+    # yet (or, for cash/transfer/RIB, an admin hasn't confirmed the manual
+    # payment yet). The TutoringSession row already exists at this point
+    # (status='scheduled') but the booking isn't actually confirmed —
+    # frontend uses this to show the session in a separate "en attente de
+    # confirmation" tab instead of mixing it in with real upcoming sessions.
+    booking_status: Optional[str] = None
+    booking_created_at: Optional[str] = None
+    payment_method: Optional[str] = None
 
 
 class StudentSessionListResponse(BaseModel):
@@ -329,7 +338,7 @@ async def student_session_list(
     db: Session = Depends(get_db),
 ):
     uid = UUID(current_user["id"])
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
 
     # Check parent link
     parent_link = db.exec(
@@ -419,6 +428,9 @@ async def student_session_list(
             refund_percentage=s.refund_percentage,
             can_cancel=can_cancel,
             cancel_refund=cancel_refund,
+            booking_status=booking.status if booking else None,
+            booking_created_at=booking.created_at.isoformat() if booking else None,
+            payment_method=booking.payment_method if booking else None,
         ))
 
     return StudentSessionListResponse(

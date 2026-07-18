@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -325,7 +325,7 @@ async def get_student_progress(
     db: Session = Depends(get_db),
 ):
     uid = UUID(current_user["id"])
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     this_month = _month_first(now.date())
     last_month = _prev_month(this_month)
     month_start_dt = datetime(this_month.year, this_month.month, 1)
@@ -484,7 +484,7 @@ async def get_student_progress(
         snap.quiz_count = quiz_count
         snap.ep_earned = ep_month
         snap.subject_mastery = current_mastery_snapshot
-        snap.updated_at = datetime.utcnow()
+        snap.updated_at = datetime.now(timezone.utc)
         db.add(snap)
 
     db.commit()

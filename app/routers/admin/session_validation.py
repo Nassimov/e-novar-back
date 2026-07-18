@@ -4,7 +4,7 @@ app/services/session_validation.py for the trust-score engine.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -126,7 +126,7 @@ async def approve_validation(
         except ValueError:
             admin_id = None
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     sv.status = "approved"
     sv.admin_decision = "approved"
     sv.admin_reviewed_by = admin_id
@@ -170,7 +170,7 @@ async def reject_validation(
     sv.admin_decision = "rejected"
     sv.admin_reviewed_by = admin_id
     sv.admin_review_note = body.note
-    sv.admin_reviewed_at = datetime.utcnow()
+    sv.admin_reviewed_at = datetime.now(timezone.utc)
     db.add(sv)
     db.commit()
 
@@ -252,7 +252,7 @@ async def update_trust_score_settings(
         settings = PlatformSettings(id=True)
     for field, value in body.model_dump().items():
         setattr(settings, field, value)
-    settings.updated_at = datetime.utcnow()
+    settings.updated_at = datetime.now(timezone.utc)
     db.add(settings)
     db.commit()
     db.refresh(settings)

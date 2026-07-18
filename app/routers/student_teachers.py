@@ -964,7 +964,7 @@ async def book_teacher_slot(
     # keeps full access to their account/history/messages throughout.
     student_profile = db.get(StudentProfile, student_id)
     if student_profile is not None and student_profile.booking_suspended_until:
-        if student_profile.booking_suspended_until > dt.datetime.utcnow():
+        if student_profile.booking_suspended_until > dt.datetime.now(dt.timezone.utc):
             raise HTTPException(
                 status_code=403,
                 detail=(
@@ -1158,6 +1158,7 @@ async def book_teacher_slot(
         try:
             session = create_checkout_session(
                 amount_dzd=amount,
+                dzd_per_eur=platform_settings_for_gate.dzd_per_eur,
                 booking_id=str(booking.id),
                 teacher_name=teacher_name,
                 success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",

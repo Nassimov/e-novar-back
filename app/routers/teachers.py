@@ -776,6 +776,8 @@ async def get_wallet(
     db: Session = Depends(get_db),
 ):
     """Get the teacher's DZD wallet, EP balance, and bank info."""
+    from sqlalchemy import func
+    from app.models.booking import TutoringSession
     from app.models.kp import KpBalance
     from app.models.profile import TeacherProfile as _TeacherProfile
 
@@ -783,8 +785,16 @@ async def get_wallet(
     kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
     tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == uid)).first()
 
+    total_earned_dzd = db.exec(
+        select(func.coalesce(func.sum(TutoringSession.teacher_payout_amount), 0)).where(
+            TutoringSession.teacher_id == uid,
+            TutoringSession.status == "completed",
+        )
+    ).one()
+
     return WalletResponse(
         wallet_balance_dzd=tp.wallet_balance_dzd if tp else 0,
+        total_earned_dzd=int(total_earned_dzd),
         payout_mode=tp.payout_mode if tp else "platform",
         ep_balance=kp.balance if kp else 0,
         ep_total_earned=kp.total_earned if kp else 0,

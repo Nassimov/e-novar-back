@@ -66,28 +66,42 @@ def create_refund(payment_intent_id: str, amount_cents: Optional[int] = None) ->
     }
 
 
+def dzd_to_eur_cents(amount_dzd: int, dzd_per_eur: float) -> int:
+    """Convert a DZD price to EUR cents using the admin-configured rate
+    (PlatformSettings.dzd_per_eur — see app/routers/admin/settings.py).
+    Stripe requires a minimum charge (~0.50 EUR), enforced with a floor."""
+    if dzd_per_eur <= 0:
+        dzd_per_eur = 145.00  # defensive fallback — should never happen, admin field has a DB default
+    eur_cents = round((amount_dzd / dzd_per_eur) * 100)
+    return max(50, eur_cents)
+
+
 def create_checkout_session(
     amount_dzd: int,
+    dzd_per_eur: float,
     booking_id: str,
     teacher_name: str,
     success_url: str,
     cancel_url: str,
 ) -> Dict[str, Any]:
-    """Create a Stripe Checkout Session with manual capture (auth only)."""
+    """Create a Stripe Checkout Session with manual capture (auth only).
+    Charges in EUR — Stripe has no DZD settlement currency — converted from
+    the DZD price using the admin-configured exchange rate."""
+    unit_amount = dzd_to_eur_cents(amount_dzd, dzd_per_eur)
     session = stripe_lib.checkout.Session.create(
         line_items=[
             {
                 "price_data": {
                     "currency": "eur",
                     "product_data": {"name": f"Séance avec {teacher_name}"},
-                    "unit_amount": max(50, amount_dzd),  # treat DZD as EUR cents for test
+                    "unit_amount": unit_amount,
                 },
                 "quantity": 1,
             }
         ],
         mode="payment",
         payment_intent_data={"capture_method": "manual"},
-        metadata={"booking_id": booking_id},
+        metadata={"booking_id": booking_id, "amount_dzd": str(amount_dzd), "dzd_per_eur": str(dzd_per_eur)},
         success_url=success_url,
         cancel_url=cancel_url,
     )
