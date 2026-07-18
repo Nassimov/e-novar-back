@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -250,48 +250,12 @@ async def cancel_session(
     # cancelling before that point is what refuse_booking (with its own
     # strike) is for.
     if at_fault == "teacher" and booking is not None and booking.status == "confirmed":
-        from app.services.booking_safety import apply_cancellation_side_effects
+        from app.services.booking_safety import apply_cancellation_side_effects, apply_teacher_strike
         apply_cancellation_side_effects(db, booking, reason="teacher_refused")
-
-        from app.config import get_settings as _get_settings
-        from app.models.admin import PlatformSettings
-        from app.models.profile import UserRole
-
-        settings_row = db.get(PlatformSettings, True)
-        suspension_days_list = (
-            settings_row.booking_no_response_suspension_days
-            if settings_row and settings_row.booking_no_response_suspension_days else [2, 5, 10]
+        apply_teacher_strike(
+            db, session.teacher_id, "teacher_cancelled_confirmed",
+            human_label="Tu as annulé une séance déjà confirmée.",
         )
-        reset_days = settings_row.booking_no_response_reset_days if settings_row else 60
-
-        tp = db.get(TeacherProfile, session.teacher_id)
-        if tp is not None:
-            if tp.last_no_response_at is None or (now_utc - tp.last_no_response_at).days > reset_days:
-                tp.no_response_strikes = 0
-            tp.no_response_strikes += 1
-            tp.last_no_response_at = now_utc
-            idx = min(tp.no_response_strikes - 1, len(suspension_days_list) - 1)
-            days = suspension_days_list[idx]
-            tp.status = "suspended"
-            tp.suspended_until = now_utc + timedelta(days=days)
-            tp.suspension_reason = f"teacher_cancelled_confirmed (récidive n°{tp.no_response_strikes})"
-            db.add(tp)
-            db.commit()
-
-            from app.services import notification as _notif
-            _notif.persist(
-                db, user_id=session.teacher_id, type="teacher_suspended",
-                title="⚠️ Compte suspendu — séance annulée",
-                body=f"Tu as annulé une séance déjà confirmée. Ton compte est suspendu {days} jour(s) (récidive n°{tp.no_response_strikes}).",
-                data={"session_id": str(session.id), "days": days},
-            )
-            for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-                _notif.persist(
-                    db, user_id=ar.user_id, type="teacher_cancelled_confirmed_admin_alert",
-                    title="Professeur — séance confirmée annulée",
-                    body=f"Une séance déjà confirmée a été annulée par le professeur (récidive n°{tp.no_response_strikes}) — suspendu {days} jour(s).",
-                    data={"session_id": str(session.id), "teacher_id": str(session.teacher_id)},
-                )
 
     return {
         "id": str(session.id),

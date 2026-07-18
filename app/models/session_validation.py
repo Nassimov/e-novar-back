@@ -46,6 +46,19 @@ class SessionValidation(SQLModel, table=True):
     )
     dispute_created_at: Optional[datetime] = Field(default=None)
 
+    # Structured absence reports (in addition to the free-text dispute_reason
+    # above) — 'student_absent' | 'teacher_absent'. See
+    # app/routers/session_validation.py's dispute_session and
+    # app/workers/booking_tasks.py's task_auto_resolve_disputes: if the other
+    # party doesn't counter within in_person_dispute_auto_resolve_hours, it's
+    # auto-resolved in the filer's favor.
+    dispute_reason_code: Optional[str] = Field(default=None)
+    dispute_filed_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    dispute_countered_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    dispute_countered_reason: Optional[str] = Field(default=None)
+    dispute_countered_at: Optional[datetime] = Field(default=None)
+    dispute_auto_resolve_at: Optional[datetime] = Field(default=None)
+
     trust_score: Optional[int] = Field(default=None)
     trust_score_breakdown: Optional[Any] = Field(
         default=None, sa_column=sa.Column(JSONB, nullable=True),

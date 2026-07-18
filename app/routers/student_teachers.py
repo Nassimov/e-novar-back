@@ -959,6 +959,23 @@ async def book_teacher_slot(
     teacher_id = tp.user_id
     student_id = _UUID(current_user["id"])
 
+    # Repeated no-shows temporarily block NEW bookings only (see
+    # app/services/booking_safety.py's apply_student_strike) — the student
+    # keeps full access to their account/history/messages throughout.
+    student_profile = db.get(StudentProfile, student_id)
+    if student_profile is not None and student_profile.booking_suspended_until:
+        if student_profile.booking_suspended_until > dt.datetime.utcnow():
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Réservations temporairement bloquées suite à des absences répétées. "
+                    f"Réactivation le {student_profile.booking_suspended_until.strftime('%d/%m/%Y à %Hh%M')}."
+                ),
+            )
+        student_profile.booking_suspended_until = None
+        db.add(student_profile)
+        db.commit()
+
     # Parse date — infer from first pack session when omitted
     raw_date = body.date
     if not raw_date and body.pack_sessions:

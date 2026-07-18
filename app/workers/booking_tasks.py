@@ -31,9 +31,9 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
     from app.database import get_engine
     from app.models.admin import PlatformSettings
     from app.models.booking import Booking
-    from app.models.profile import Profile, TeacherProfile, UserRole
+    from app.models.profile import UserRole
     from app.services import notification as notif
-    from app.services.booking_safety import apply_cancellation_side_effects
+    from app.services.booking_safety import apply_cancellation_side_effects, apply_teacher_strike
 
     cancelled = 0
     unpaid_expired = 0
@@ -42,10 +42,6 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
     with Session(engine) as db:
         settings_row = db.get(PlatformSettings, True)
         timeout_hours = settings_row.booking_teacher_response_hours if settings_row else 24
-        suspension_days_list = (
-            settings_row.booking_no_response_suspension_days if settings_row and settings_row.booking_no_response_suspension_days else [2, 5, 10]
-        )
-        reset_days = settings_row.booking_no_response_reset_days if settings_row else 60
 
         cutoff = datetime.utcnow() - timedelta(hours=timeout_hours)
         candidates = db.exec(
@@ -124,43 +120,10 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
                 data={"booking_id": str(booking.id)},
             )
 
-            tp = db.get(TeacherProfile, booking.teacher_id)
-            if tp is not None:
-                now = datetime.utcnow()
-                if tp.last_no_response_at is None or (now - tp.last_no_response_at).days > reset_days:
-                    tp.no_response_strikes = 0
-                tp.no_response_strikes += 1
-                tp.last_no_response_at = now
-                idx = min(tp.no_response_strikes - 1, len(suspension_days_list) - 1)
-                days = suspension_days_list[idx]
-                tp.status = "suspended"
-                tp.suspended_until = now + timedelta(days=days)
-                tp.suspension_reason = f"no_response_auto (récidive n°{tp.no_response_strikes})"
-                db.add(tp)
-                db.commit()
-
-                notif.persist(
-                    db, user_id=booking.teacher_id, type="teacher_suspended",
-                    title="⚠️ Compte suspendu — réservation sans réponse",
-                    body=(
-                        f"Tu n'as pas répondu à une demande de réservation dans les {timeout_hours}h. "
-                        f"Ton compte est suspendu {days} jour(s) (récidive n°{tp.no_response_strikes})."
-                    ),
-                    data={"booking_id": str(booking.id), "days": days},
-                )
-
-                teacher_profile_row = db.get(Profile, booking.teacher_id)
-                teacher_label = teacher_profile_row.full_name if teacher_profile_row else str(booking.teacher_id)
-                for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-                    notif.persist(
-                        db, user_id=ar.user_id, type="teacher_no_response_admin_alert",
-                        title="Professeur sans réponse à une réservation",
-                        body=(
-                            f"{teacher_label} n'a pas répondu dans les délais (récidive n°{tp.no_response_strikes}) "
-                            f"— suspendu automatiquement {days} jour(s)."
-                        ),
-                        data={"booking_id": str(booking.id), "teacher_id": str(booking.teacher_id)},
-                    )
+            apply_teacher_strike(
+                db, booking.teacher_id, "no_response",
+                human_label=f"Tu n'as pas répondu à une demande de réservation dans les {timeout_hours}h.",
+            )
 
             cancelled += 1
 
@@ -226,21 +189,22 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
     from app.database import get_engine
     from app.models.admin import PlatformSettings
     from app.models.booking import Booking, TutoringSession
-    from app.models.profile import Profile, TeacherProfile, UserRole
     from app.services import notification as notif
-    from app.services.booking_safety import apply_cancellation_side_effects
+    from app.services.booking_safety import apply_cancellation_side_effects, apply_teacher_strike
     from app.services.refunds import per_lesson_amount, refund_amount_for_booking
 
     flagged = 0
+    # A group lesson has one TutoringSession row per enrolled student, all
+    # sharing (teacher_id, scheduled_at) — refund+notify happens per row
+    # below (each student individually deserves that), but the STRIKE must
+    # only apply once per real-world incident, or one missed group class of
+    # N students would wrongly register as N strikes.
+    struck_incidents = set()
     engine = get_engine()
 
     with Session(engine) as db:
         settings_row = db.get(PlatformSettings, True)
         grace_minutes = settings_row.online_no_show_grace_minutes if settings_row else 20
-        suspension_days_list = (
-            settings_row.booking_no_response_suspension_days if settings_row and settings_row.booking_no_response_suspension_days else [2, 5, 10]
-        )
-        reset_days = settings_row.booking_no_response_reset_days if settings_row else 60
         now = datetime.utcnow()
 
         candidates = db.exec(
@@ -293,44 +257,205 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
                 data={"session_id": str(session.id)},
             )
 
-            tp = db.get(TeacherProfile, session.teacher_id)
-            if tp is not None:
-                if tp.last_no_response_at is None or (now - tp.last_no_response_at).days > reset_days:
-                    tp.no_response_strikes = 0
-                tp.no_response_strikes += 1
-                tp.last_no_response_at = now
-                idx = min(tp.no_response_strikes - 1, len(suspension_days_list) - 1)
-                days = suspension_days_list[idx]
-                tp.status = "suspended"
-                tp.suspended_until = now + timedelta(days=days)
-                tp.suspension_reason = f"teacher_session_no_show (récidive n°{tp.no_response_strikes})"
-                db.add(tp)
-                db.commit()
-
-                notif.persist(
-                    db, user_id=session.teacher_id, type="teacher_suspended",
-                    title="⚠️ Compte suspendu — absence en séance",
-                    body=(
-                        f"Tu ne t'es pas connecté·e à une séance confirmée. Ton compte est suspendu "
-                        f"{days} jour(s) (récidive n°{tp.no_response_strikes})."
-                    ),
-                    data={"session_id": str(session.id), "days": days},
+            incident_key = (session.teacher_id, session.scheduled_at)
+            if incident_key not in struck_incidents:
+                struck_incidents.add(incident_key)
+                apply_teacher_strike(
+                    db, session.teacher_id, "teacher_no_show",
+                    human_label="Tu ne t'es pas connecté·e à une séance confirmée.",
                 )
-
-                teacher_profile_row = db.get(Profile, session.teacher_id)
-                teacher_label = teacher_profile_row.full_name if teacher_profile_row else str(session.teacher_id)
-                for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
-                    notif.persist(
-                        db, user_id=ar.user_id, type="teacher_no_show_admin_alert",
-                        title="Professeur absent en séance en ligne",
-                        body=(
-                            f"{teacher_label} ne s'est pas connecté à une séance confirmée "
-                            f"(récidive n°{tp.no_response_strikes}) — suspendu {days} jour(s)."
-                        ),
-                        data={"session_id": str(session.id), "teacher_id": str(session.teacher_id)},
-                    )
 
             flagged += 1
 
     logger.info("task_detect_online_teacher_no_show: flagged=%d", flagged)
     return {"flagged": flagged}
+
+
+@celery_app.task
+def task_detect_online_student_no_show() -> Dict[str, int]:
+    """
+    A confirmed online session where the TEACHER showed up but the student
+    never joined within the grace window is the student's fault, not the
+    teacher's — symmetric opposite of task_detect_online_teacher_no_show
+    above, with deliberately different consequences: the teacher is paid
+    normally (they showed up, ready to teach — see credit_session_payout,
+    called directly here instead of going through the usual multi-factor
+    trust score, since we already have stronger evidence than that flow was
+    designed to require), the student is NOT refunded, and repeated
+    student no-shows escalate a booking-only suspension
+    (apply_student_strike) — never a full account lock.
+    """
+    from datetime import datetime, timedelta
+
+    from sqlmodel import Session, select
+
+    from app.database import get_engine
+    from app.models.admin import PlatformSettings
+    from app.models.booking import Booking, TutoringSession
+    from app.models.session_validation import SessionValidation
+    from app.services import notification as notif
+    from app.services.booking_safety import apply_student_strike
+    from app.services.session_validation import credit_session_payout
+
+    flagged = 0
+    engine = get_engine()
+
+    with Session(engine) as db:
+        settings_row = db.get(PlatformSettings, True)
+        grace_minutes = settings_row.online_no_show_grace_minutes if settings_row else 20
+        now = datetime.utcnow()
+
+        candidates = db.exec(
+            select(TutoringSession).where(
+                TutoringSession.mode == "online",
+                TutoringSession.status.in_(["scheduled", "waiting", "live"]),
+                TutoringSession.teacher_joined_at.is_not(None),
+                TutoringSession.student_joined_at.is_(None),
+            )
+        ).all()
+
+        for session in candidates:
+            if now < session.scheduled_at + timedelta(minutes=grace_minutes):
+                continue  # still inside the grace window
+
+            booking = db.get(Booking, session.booking_id) if session.booking_id else None
+            if booking is None or booking.status != "confirmed":
+                continue  # never actually paid/accepted
+
+            sv = db.exec(
+                select(SessionValidation).where(SessionValidation.session_id == session.id)
+            ).first()
+            if sv is None:
+                continue  # one SessionValidation row per session, created alongside it at booking time
+
+            session.cancellation_reason = "student_no_show"
+            session.no_show = True
+            db.add(session)
+            credit_session_payout(db, session, sv)  # pays the teacher, sets status="completed"
+            db.commit()
+
+            notif.persist(
+                db, user_id=session.teacher_id, type="session_student_no_show",
+                title="Élève absent",
+                body="L'élève ne s'est pas connecté à la séance. Tu es payé·e normalement — ce n'est pas ta faute.",
+                data={"session_id": str(session.id)},
+            )
+            notif.push(
+                db, user_id=session.teacher_id,
+                title="Élève absent",
+                body="L'élève ne s'est pas connecté — tu es payé·e normalement.",
+                data={"session_id": str(session.id)},
+            )
+
+            apply_student_strike(
+                db, session.student_id, "student_no_show",
+                human_label="Tu ne t'es pas connecté·e à une séance confirmée.",
+            )
+
+            flagged += 1
+
+    logger.info("task_detect_online_student_no_show: flagged=%d", flagged)
+    return {"flagged": flagged}
+
+
+@celery_app.task
+def task_auto_resolve_disputes() -> Dict[str, int]:
+    """
+    Resolves a structured in-person absence report (dispute_reason_code —
+    see app/routers/session_validation.py's dispute_session) in the filer's
+    favor once in_person_dispute_auto_resolve_hours has passed with no
+    counter-dispute from the other party. Same financial/strike consequences
+    as the automatic online detectors above — this is the manual-report
+    equivalent for at_home/at_student sessions, which have no join-timestamp
+    signal to detect absence automatically.
+    """
+    from datetime import datetime
+
+    from sqlmodel import Session, select
+
+    from app.database import get_engine
+    from app.models.booking import Booking
+    from app.models.session_validation import SessionValidation
+    from app.services import notification as notif
+    from app.services.booking_safety import apply_student_strike, apply_teacher_strike
+    from app.services.refunds import per_lesson_amount, refund_amount_for_booking
+    from app.services.session_validation import credit_session_payout
+
+    resolved = 0
+    engine = get_engine()
+
+    with Session(engine) as db:
+        now = datetime.utcnow()
+        candidates = db.exec(
+            select(SessionValidation).where(
+                SessionValidation.status == "disputed",
+                SessionValidation.dispute_reason_code.is_not(None),
+                SessionValidation.dispute_auto_resolve_at.is_not(None),
+                SessionValidation.dispute_auto_resolve_at <= now,
+                SessionValidation.dispute_countered_at.is_(None),
+            )
+        ).all()
+
+        for sv in candidates:
+            from app.models.booking import TutoringSession
+            session = db.get(TutoringSession, sv.session_id)
+            booking = db.get(Booking, sv.booking_id) if sv.booking_id else None
+            if session is None:
+                continue
+
+            if sv.dispute_reason_code == "student_absent":
+                # Teacher showed up, student didn't — paid normally, student strike.
+                sv.status = "approved"
+                sv.admin_decision = "auto_resolved_student_absent"
+                sv.admin_reviewed_at = now
+                session.cancellation_reason = "student_no_show"
+                session.no_show = True
+                db.add(session)
+                db.add(sv)
+                credit_session_payout(db, session, sv)
+                db.commit()
+
+                notif.persist(
+                    db, user_id=session.teacher_id, type="session_student_no_show",
+                    title="Absence élève confirmée",
+                    body="Ton signalement n'a pas été contesté — tu es payé·e normalement.",
+                    data={"session_id": str(session.id)},
+                )
+                apply_student_strike(
+                    db, session.student_id, "student_no_show",
+                    human_label="Une absence signalée par ton professeur n'a pas été contestée.",
+                )
+
+            elif sv.dispute_reason_code == "teacher_absent":
+                # Student showed up, teacher didn't — full refund, teacher strike.
+                sv.status = "rejected"
+                sv.admin_decision = "auto_resolved_teacher_absent"
+                sv.admin_reviewed_at = now
+                session.cancellation_reason = "teacher_no_show"
+                session.no_show = True
+                session.status = "no_show"
+                db.add(session)
+                db.add(sv)
+                db.commit()
+
+                if booking is not None:
+                    refund_amt = per_lesson_amount(booking)
+                    refund_amount_for_booking(
+                        db, booking, refund_amt,
+                        note="Absence du professeur confirmée (signalement non contesté).",
+                    )
+                notif.persist(
+                    db, user_id=session.student_id, type="session_no_show",
+                    title="Absence professeur confirmée",
+                    body="Ton signalement n'a pas été contesté — tu as été remboursé·e.",
+                    data={"session_id": str(session.id)},
+                )
+                apply_teacher_strike(
+                    db, session.teacher_id, "teacher_no_show",
+                    human_label="Une absence signalée par ton élève n'a pas été contestée.",
+                )
+
+            resolved += 1
+
+    logger.info("task_auto_resolve_disputes: resolved=%d", resolved)
+    return {"resolved": resolved}

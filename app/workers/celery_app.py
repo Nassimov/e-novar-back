@@ -65,5 +65,15 @@ celery_app.conf.update(
             "task": "app.workers.booking_tasks.task_detect_online_teacher_no_show",
             "schedule": crontab(minute="*/5"),
         },
+        "online-student-no-show-detection": {
+            "task": "app.workers.booking_tasks.task_detect_online_student_no_show",
+            "schedule": crontab(minute="*/5"),
+        },
+        # Every 30 min — resolve in-person absence reports the other party
+        # never countered within the configured window.
+        "in-person-dispute-auto-resolve": {
+            "task": "app.workers.booking_tasks.task_auto_resolve_disputes",
+            "schedule": crontab(minute="*/30"),
+        },
     },
 )

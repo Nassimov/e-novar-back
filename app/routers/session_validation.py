@@ -263,23 +263,41 @@ async def teacher_confirm_session(
     return {"status": sv.status, "trust_score": sv.trust_score}
 
 
+_AUTO_RESOLVABLE_REASON_CODES = ("student_absent", "teacher_absent")
+
+
 @router.post("/{session_id}/validation/dispute")
 async def dispute_session(
     session_id: UUID,
     request: Request,
     reason: str = Form(...),
     comment: str = Form(""),
+    reason_code: str = Form(""),
     files: list[UploadFile] = File(default=[]),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Either party can flag a problem — this always forces mandatory admin
-    review and blocks payment, regardless of trust score."""
+    """
+    Either party can flag a problem — this always forces mandatory admin
+    review and blocks payment, regardless of trust score.
+
+    reason_code ('student_absent' | 'teacher_absent', optional): the
+    structured in-person absence report — see
+    app/workers/booking_tasks.py's task_auto_resolve_disputes. If the OTHER
+    party never counters within in_person_dispute_auto_resolve_hours, it's
+    auto-resolved in the filer's favor (payout/refund + strike, same
+    consequences as the automatic online detection). If the other party
+    calls this same endpoint on the same session while it's already
+    disputed, that's treated as a counter — contested claims always go to
+    a human (admin_review), never auto-resolve.
+    """
     session, sv, is_student, is_teacher = _load(db, session_id, current_user)
     if not is_student and not is_teacher:
         raise HTTPException(status_code=403, detail="Access denied")
     if sv.status in ("approved", "rejected", "cancelled"):
         raise HTTPException(status_code=409, detail=f"Cannot dispute a session in status '{sv.status}'")
+
+    normalized_reason_code = reason_code if reason_code in _AUTO_RESOLVABLE_REASON_CODES else None
 
     attachment_urls = []
     for f in files or []:
@@ -290,24 +308,44 @@ async def dispute_session(
         attachment_urls.append(url)
 
     now = datetime.utcnow()
-    sv.status = "disputed"
-    sv.dispute_reason = reason
-    sv.dispute_comment = comment or None
-    sv.dispute_attachments = attachment_urls
-    sv.dispute_created_at = now
-    sv.updated_at = now
-    db.add(sv)
-
     uid = UUID(current_user["id"]) if current_user.get("id") else None
+
+    is_counter = sv.status == "disputed" and sv.dispute_filed_by is not None and sv.dispute_filed_by != uid
+    if is_counter:
+        # Contested claim — always a human decision from here, no auto-resolve.
+        sv.dispute_countered_by = uid
+        sv.dispute_countered_reason = reason
+        sv.dispute_countered_at = now
+        sv.dispute_auto_resolve_at = None
+        sv.status = "admin_review"
+        sv.updated_at = now
+        db.add(sv)
+        action = "dispute_countered"
+    else:
+        sv.status = "disputed"
+        sv.dispute_reason = reason
+        sv.dispute_comment = comment or None
+        sv.dispute_attachments = attachment_urls
+        sv.dispute_created_at = sv.dispute_created_at or now
+        sv.dispute_reason_code = normalized_reason_code
+        sv.dispute_filed_by = sv.dispute_filed_by or uid
+        sv.updated_at = now
+        if normalized_reason_code:
+            settings = get_platform_settings(db)
+            sv.dispute_auto_resolve_at = now + timedelta(hours=settings.in_person_dispute_auto_resolve_hours)
+        db.add(sv)
+        action = "dispute_filed"
+
     log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=uid,
-              actor_ip=_client_ip(request), action="dispute_filed", metadata={"reason": reason})
+              actor_ip=_client_ip(request), action=action, metadata={"reason": reason, "reason_code": normalized_reason_code})
 
     from app.models.profile import UserRole
     from app.services.session_validation import _notify
     from sqlmodel import select as _select
     admin_ids = db.exec(_select(UserRole).where(UserRole.role == "admin")).all()
     for ar in admin_ids:
-        _notify(db, ar.user_id, "⚠️ Litige sur une séance",
+        _notify(db, ar.user_id,
+                "⚠️ Litige contesté — décision requise" if is_counter else "⚠️ Litige sur une séance",
                 f"Un litige a été signalé sur une séance ({reason}) — intervention requise.",
                 {"session_id": str(session.id)})
 

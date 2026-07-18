@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from app.dependencies import get_admin_user, get_db
 from app.models.booking import Booking, TutoringSession
 from app.models.notification import Notification
-from app.models.profile import Profile
+from app.models.profile import Profile, UserRole
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Admin — Bookings"])
@@ -186,9 +186,14 @@ async def reject_manual_payment(
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Admin rejects (cancels) a booking whose cash/Edahabia/transfer payment
-    could not be verified. Nothing was ever captured for these rails, so
-    there is nothing to refund — this purely cancels the reservation."""
+    """Admin rejects (cancels) a booking whose cash/Edahabia/transfer/RIB
+    payment could not be verified. For cash/transfer/rib_cib/rib_edahabia,
+    rejection itself means "reconciliation failed", i.e. nothing was
+    received — nothing to refund. Edahabia is the one exception: Chargily
+    may have already charged the student (chargily_paid_at set) even though
+    the booking is still 'pending' awaiting the teacher's decision — that
+    money is real and needs a human refund, same as refuse_booking already
+    handles for this exact case."""
     booking = db.get(Booking, booking_id)
     if booking is None:
         raise HTTPException(status_code=404, detail="Booking not found")
@@ -203,6 +208,21 @@ async def reject_manual_payment(
 
     booking.status = "cancelled"
     db.add(booking)
+
+    if booking.payment_method == "edahabia" and booking.chargily_paid_at is not None:
+        # Chargily has no refund API — already paid, needs a human, same as
+        # app/routers/teachers.py's refuse_booking.
+        for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
+            db.add(Notification(
+                user_id=ar.user_id,
+                type="system",
+                title="⚠️ Remboursement Edahabia manuel requis",
+                body=(
+                    f"Réservation rejetée par l'administration mais déjà payée en Edahabia "
+                    f"({booking.amount} DA) — remboursement manuel requis."
+                ),
+                data={"booking_id": str(booking.id)},
+            ))
 
     method_label = _METHOD_LABELS.get(booking.payment_method, booking.payment_method)
     student = db.get(Profile, booking.student_id)

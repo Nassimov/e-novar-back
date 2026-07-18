@@ -121,6 +121,15 @@ class StudentProfile(SQLModel, table=True):
     )
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # No-show enforcement (see app/workers/booking_tasks.py). Unlike the
+    # teacher's full-account suspension, this only blocks NEW bookings — a
+    # paying customer keeps access to their history/messages/existing
+    # sessions even while booking-suspended.
+    no_show_strikes: int = Field(default=0)
+    last_no_show_at: Optional[datetime] = Field(default=None)
+    booking_suspended_until: Optional[datetime] = Field(default=None)
+    booking_suspension_reason: Optional[str] = Field(default=None)
+
 
 class TeacherProfile(SQLModel, table=True):
     """Mirrors public.teacher_profiles — one row per teacher user."""

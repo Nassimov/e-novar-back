@@ -75,6 +75,20 @@ class PlatformSettings(SQLModel, table=True):
     platform_rib_cib: Optional[str] = Field(default=None)
     platform_rib_edahabia: Optional[str] = Field(default=None)
 
+    # Student no-show enforcement — mirrors the teacher escalation below but
+    # only ever blocks new bookings (see StudentProfile.booking_suspended_until).
+    student_no_show_suspension_days: List[int] = Field(
+        default=[3, 7, 14],
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=False, server_default="'{3,7,14}'"),
+    )
+    student_no_show_reset_days: int = Field(default=60)
+
+    # In-person (at_home/at_student) absence reports (see
+    # app/routers/session_validation.py's dispute_reason_code and
+    # app/workers/booking_tasks.py's task_auto_resolve_disputes) — auto-
+    # resolved in the filer's favor if the other party never counters.
+    in_person_dispute_auto_resolve_hours: int = Field(default=48)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
