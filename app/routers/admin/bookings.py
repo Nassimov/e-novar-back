@@ -30,9 +30,20 @@ router = APIRouter(tags=["Admin — Bookings"])
 # kept in this admin list only as a manual fallback (e.g. a missed webhook
 # delivery), not the primary path — never claim "instant"/"automatic" for
 # cash/transfer, but edahabia genuinely is once paid.
-MANUAL_PAYMENT_METHODS = ("cash", "edahabia", "transfer")
+#
+# rib_cib / rib_edahabia: the student's own saved RIB is only used for
+# reconciliation — no gateway integration yet (deferred phase, see
+# docs/migrations/068), so exactly like cash/transfer this admin review is
+# their only confirmation path for now.
+MANUAL_PAYMENT_METHODS = ("cash", "edahabia", "transfer", "rib_cib", "rib_edahabia")
 
-_METHOD_LABELS = {"cash": "en espèces", "edahabia": "Edahabia", "transfer": "par virement bancaire"}
+_METHOD_LABELS = {
+    "cash": "en espèces",
+    "edahabia": "Edahabia",
+    "transfer": "par virement bancaire",
+    "rib_cib": "par virement RIB CIB",
+    "rib_edahabia": "par virement RIB Edahabia",
+}
 
 
 class BookingListItem(BaseModel):
@@ -45,6 +56,7 @@ class BookingListItem(BaseModel):
     slot_time: Optional[str]
     amount: int
     payment_method: Optional[str]
+    payment_rib: Optional[str] = None
     subject: Optional[str]
     comment: Optional[str]
     status: str
@@ -85,6 +97,7 @@ async def list_bookings(
             slot_time=str(b.slot_time)[:5] if b.slot_time else None,
             amount=b.amount,
             payment_method=b.payment_method,
+            payment_rib=b.payment_rib,
             subject=b.subject,
             comment=b.comment,
             status=b.status,

@@ -37,6 +37,25 @@ async def get_public_pricing(db: Session = Depends(get_db)):
     )
 
 
+class BankTransferInfoPublic(BaseModel):
+    beneficiary_name: str
+    rib_cib: Optional[str] = None
+    rib_edahabia: Optional[str] = None
+
+
+@router.get("/bank-transfer-info", response_model=BankTransferInfoPublic)
+async def get_bank_transfer_info(db: Session = Depends(get_db)):
+    """Platform's own receiving RIBs, shown to a student who picks the RIB
+    CIB / RIB Edahabia payment method at booking (see student.payment.tsx) —
+    admin-configurable in app/routers/admin/settings.py."""
+    settings = get_platform_settings(db)
+    return BankTransferInfoPublic(
+        beneficiary_name=settings.bank_beneficiary_name,
+        rib_cib=settings.platform_rib_cib,
+        rib_edahabia=settings.platform_rib_edahabia,
+    )
+
+
 # ─── Response schemas ─────────────────────────────────────────────────────────
 
 class PlatformStats(BaseModel):

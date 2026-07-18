@@ -125,6 +125,13 @@ class PaymentMethodType(str, Enum):
     visa = "visa"
     transfer = "transfer"
     cash = "cash"
+    # Manual bank-transfer rails identified by a saved RIB (see
+    # app/models/payment.py's PaymentMethod.rib) — the student/teacher's own
+    # account, used for admin reconciliation. Real automated debit via these
+    # rails is a future phase; for now booking with these behaves like
+    # transfer/cash (pending, admin-confirmed manually).
+    rib_cib = "rib_cib"
+    rib_edahabia = "rib_edahabia"
 
 
 class PaymentStatus(str, Enum):

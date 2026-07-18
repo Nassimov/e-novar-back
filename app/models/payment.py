@@ -23,7 +23,9 @@ class PaymentMethod(SQLModel, table=True):
     Display/reference metadata only — never the full card number, CVV or
     expiry (migration 056). Card rails (cib/edahabia/visa) carry `last4`;
     the wallet rail (baridimob, identified by phone number, not a card)
-    carries `phone` instead.
+    carries `phone` instead; the RIB rails (rib_cib/rib_edahabia — a
+    student's or teacher's own bank account, used for manual-transfer
+    reconciliation, not automated debit — see migration 068) carry `rib`.
     """
 
     __tablename__ = "payment_methods"
@@ -37,6 +39,7 @@ class PaymentMethod(SQLModel, table=True):
     holder_name: Optional[str] = Field(default=None)
     phone: Optional[str] = Field(default=None)           # baridimob only
     bank_name: Optional[str] = Field(default=None)
+    rib: Optional[str] = Field(default=None)             # rib_cib / rib_edahabia only
     is_default: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 

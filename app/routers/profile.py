@@ -49,7 +49,9 @@ class ProfileUpdateRequest(BaseModel):
 
 _CARD_TYPES = {"cib", "edahabia", "visa"}
 _WALLET_TYPES = {"baridimob"}
+_RIB_TYPES = {"rib_cib", "rib_edahabia"}
 _PHONE_RE = re.compile(r"^0[5-7]\d{8}$")   # Algerian mobile: 05/06/07 + 8 digits
+_RIB_RE = re.compile(r"^\d{20}$")          # Algerian RIB: 20 digits (bank+agency+account+key)
 
 
 class PaymentMethodCreate(BaseModel):
@@ -60,18 +62,24 @@ class PaymentMethodCreate(BaseModel):
       4 digits — the last 4 digits of the card, never the full PAN.
     - baridimob (Algérie Poste mobile wallet): identified by the registered
       Algerian mobile number, not a card — `phone` required instead.
+    - rib_cib / rib_edahabia (the user's own bank account for CIB/Edahabia
+      manual-transfer bookings — see docs/migrations/068): `rib` required,
+      20 digits. This is NOT an automated-debit instrument yet (that's a
+      future phase) — it's the account the platform reconciles an incoming
+      manual transfer against.
     """
     type: str
     holder_name: str
     card_last4: Optional[str] = None
     phone: Optional[str] = None
     bank_name: Optional[str] = None
+    rib: Optional[str] = None
 
     @field_validator("type")
     @classmethod
     def _valid_type(cls, v: str) -> str:
-        if v not in _CARD_TYPES | _WALLET_TYPES:
-            raise ValueError(f"type must be one of {sorted(_CARD_TYPES | _WALLET_TYPES)}")
+        if v not in _CARD_TYPES | _WALLET_TYPES | _RIB_TYPES:
+            raise ValueError(f"type must be one of {sorted(_CARD_TYPES | _WALLET_TYPES | _RIB_TYPES)}")
         return v
 
     @field_validator("holder_name")
@@ -87,10 +95,17 @@ class PaymentMethodCreate(BaseModel):
             if not self.card_last4 or not re.fullmatch(r"\d{4}", self.card_last4):
                 raise ValueError("card_last4 must be exactly 4 digits for cib/edahabia/visa")
             self.phone = None
+            self.rib = None
+        elif self.type in _RIB_TYPES:
+            if not self.rib or not _RIB_RE.fullmatch(self.rib):
+                raise ValueError("rib must be exactly 20 digits for rib_cib/rib_edahabia")
+            self.card_last4 = None
+            self.phone = None
         else:  # baridimob
             if not self.phone or not _PHONE_RE.fullmatch(self.phone):
                 raise ValueError("phone must be a valid Algerian mobile number (05/06/07 + 8 digits) for baridimob")
             self.card_last4 = None
+            self.rib = None
         return self
 
 
@@ -101,6 +116,7 @@ class PaymentMethodResponse(BaseModel):
     card_last4: Optional[str] = None
     phone: Optional[str] = None
     bank_name: Optional[str] = None
+    rib: Optional[str] = None
     is_default: bool = False
 
 
@@ -652,6 +668,7 @@ def _pm_to_response(pm: PaymentMethod) -> PaymentMethodResponse:
         card_last4=pm.last4,
         phone=pm.phone,
         bank_name=pm.bank_name,
+        rib=pm.rib,
         is_default=pm.is_default,
     )
 
@@ -686,10 +703,14 @@ async def add_payment_method(
     Algerian mobile number for baridimob)."""
     uid = UUID(current_user["id"])
 
-    existing_count = db.exec(
-        select(PaymentMethod).where(PaymentMethod.user_id == uid)
+    # "Default" is scoped per rail (type), not globally — a student can have
+    # a default "cib" card AND an independent default "rib_cib" account at
+    # the same time (see set_default_payment_method / student.payment.tsx,
+    # which needs a per-rail default to pre-fill whichever tab is selected).
+    existing_same_type = db.exec(
+        select(PaymentMethod).where(PaymentMethod.user_id == uid, PaymentMethod.type == payload.type)
     ).all()
-    is_first = len(existing_count) == 0
+    is_first = len(existing_same_type) == 0
 
     pm = PaymentMethod(
         user_id=uid,
@@ -698,8 +719,48 @@ async def add_payment_method(
         last4=payload.card_last4,
         phone=payload.phone,
         bank_name=payload.bank_name,
+        rib=payload.rib,
         is_default=is_first,   # first saved method becomes the default automatically
     )
+    db.add(pm)
+    db.commit()
+    db.refresh(pm)
+    return _pm_to_response(pm)
+
+
+@router.put("/payment-methods/{method_id}/set-default", response_model=PaymentMethodResponse)
+async def set_default_payment_method(
+    method_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Explicitly mark one saved payment method as the default — e.g. after
+    adding a new RIB CIB, the student picks it as their new default RIB CIB
+    for future bookings (see student.payment.tsx)."""
+    uid = UUID(current_user["id"])
+    try:
+        pm_id = UUID(method_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+
+    pm = db.exec(
+        select(PaymentMethod).where(PaymentMethod.id == pm_id, PaymentMethod.user_id == uid)
+    ).first()
+    if pm is None:
+        raise HTTPException(status_code=404, detail="Payment method not found")
+
+    others = db.exec(
+        select(PaymentMethod).where(
+            PaymentMethod.user_id == uid,
+            PaymentMethod.type == pm.type,
+            PaymentMethod.id != pm.id,
+        )
+    ).all()
+    for other in others:
+        if other.is_default:
+            other.is_default = False
+            db.add(other)
+    pm.is_default = True
     db.add(pm)
     db.commit()
     db.refresh(pm)
@@ -727,13 +788,16 @@ async def delete_payment_method(
         raise HTTPException(status_code=404, detail="Payment method not found")
 
     was_default = pm.is_default
+    pm_type = pm.type
     db.delete(pm)
     db.commit()
 
     if was_default:
+        # Promote within the same rail only — deleting your default RIB CIB
+        # should never silently make an unrelated Visa card your new default.
         next_pm = db.exec(
             select(PaymentMethod)
-            .where(PaymentMethod.user_id == uid)
+            .where(PaymentMethod.user_id == uid, PaymentMethod.type == pm_type)
             .order_by(PaymentMethod.created_at.desc())
         ).first()
         if next_pm is not None:

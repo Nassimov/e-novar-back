@@ -8,7 +8,7 @@ from sqlmodel import Session
 
 from app.dependencies import get_admin_user, get_db
 from app.models.admin import PlatformSettings
-from app.schemas.admin import BookingPolicySettings, PlatformPricingSettings
+from app.schemas.admin import BankTransferSettings, BookingPolicySettings, PlatformPricingSettings
 from app.services.pricing import get_platform_settings
 
 router = APIRouter(tags=["admin-settings"])
@@ -88,3 +88,43 @@ async def update_booking_policy_settings(
     db.commit()
     db.refresh(settings)
     return _serialize_booking_policy(settings)
+
+
+def _serialize_bank_transfer(s: PlatformSettings) -> dict:
+    return {
+        "bank_beneficiary_name": s.bank_beneficiary_name,
+        "platform_rib_cib": s.platform_rib_cib,
+        "platform_rib_edahabia": s.platform_rib_edahabia,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/bank-transfer")
+async def get_bank_transfer_settings(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    return _serialize_bank_transfer(get_platform_settings(db))
+
+
+@router.put("/bank-transfer")
+async def update_bank_transfer_settings(
+    body: BankTransferSettings,
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """The platform's own receiving RIBs for the RIB CIB / RIB Edahabia
+    manual-transfer payment methods (see app/routers/public.py's
+    bank-transfer-info endpoint, which is what the student's booking flow
+    actually reads)."""
+    settings = db.get(PlatformSettings, True)
+    if settings is None:
+        settings = PlatformSettings(id=True)
+        db.add(settings)
+    settings.bank_beneficiary_name = body.bank_beneficiary_name
+    settings.platform_rib_cib = body.platform_rib_cib
+    settings.platform_rib_edahabia = body.platform_rib_edahabia
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settings)
+    return _serialize_bank_transfer(settings)

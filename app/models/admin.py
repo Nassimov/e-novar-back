@@ -65,6 +65,16 @@ class PlatformSettings(SQLModel, table=True):
     # teacher gets a strike via the same escalating suspension counter above.
     online_no_show_grace_minutes: int = Field(default=20)
 
+    # Platform's own receiving accounts for the manual RIB CIB / RIB Edahabia
+    # bank-transfer payment methods (see docs/migrations/068_rib_payment_methods.sql
+    # and app/routers/public.py's bank-transfer-info endpoint). A student
+    # paying via one of these rails transfers into whichever of these RIBs is
+    # set here — real automated debit isn't built yet, this phase is manual/
+    # admin-reconciled only, same as the existing cash/transfer flow.
+    bank_beneficiary_name: str = Field(default="E-NOVAR SARL")
+    platform_rib_cib: Optional[str] = Field(default=None)
+    platform_rib_edahabia: Optional[str] = Field(default=None)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

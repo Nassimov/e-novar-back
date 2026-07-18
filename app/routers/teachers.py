@@ -221,7 +221,10 @@ _VALID_DELIVERY_TYPES = {"individual", "group"}
 # see app/services/chargily.py + app/routers/chargily_webhook.py) — its own
 # gate is `booking.chargily_paid_at is not None`, checked directly in
 # accept_booking/refuse_booking below, not this admin-manual-approval path.
-_MANUAL_PAYMENT_METHODS = ("cash", "transfer")
+# rib_cib/rib_edahabia ARE here: unlike "edahabia" (Chargily), these have no
+# gateway integration yet (deferred phase — see docs/migrations/068) so, like
+# cash/transfer, only an admin manually confirming receipt can unblock them.
+_MANUAL_PAYMENT_METHODS = ("cash", "transfer", "rib_cib", "rib_edahabia")
 
 
 @router.put("/me", response_model=TeacherDetailResponse)

@@ -117,6 +117,12 @@ class PlatformPricingSettings(BaseModel):
         return v
 
 
+class BankTransferSettings(BaseModel):
+    bank_beneficiary_name: str = Field(min_length=1, max_length=200)
+    platform_rib_cib: Optional[str] = Field(default=None, pattern=r"^\d{20}$")
+    platform_rib_edahabia: Optional[str] = Field(default=None, pattern=r"^\d{20}$")
+
+
 class BookingPolicySettings(BaseModel):
     """See docs/migrations/067_booking_safety_rules.sql for the full rule write-up."""
     booking_teacher_response_hours: int = Field(ge=1, le=168)

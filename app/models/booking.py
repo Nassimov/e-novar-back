@@ -48,7 +48,11 @@ class Booking(SQLModel, table=True):
     stripe_pi_id: Optional[str] = Field(default=None)     # Stripe PaymentIntent ID
     chargily_checkout_id: Optional[str] = Field(default=None)  # Chargily Checkout ID (edahabia)
     chargily_paid_at: Optional[datetime] = Field(default=None)  # set by webhook on checkout.paid
-    payment_method: Optional[str] = Field(default=None)   # cib | edahabia | transfer | cash
+    payment_method: Optional[str] = Field(default=None)   # cib | edahabia | transfer | cash | rib_cib | rib_edahabia
+    # Snapshot of the student's own RIB at booking time (rib_cib/rib_edahabia
+    # only) — used for admin reconciliation of the manual transfer (see
+    # app/routers/admin/bookings.py); not an automated-debit instrument yet.
+    payment_rib: Optional[str] = Field(default=None)
     subject: Optional[str] = Field(default=None)          # student-chosen subject
     comment: Optional[str] = Field(default=None)          # student note / objective
     pack_sessions: Optional[str] = Field(default=None)    # JSON array for pack5/monthly sessions

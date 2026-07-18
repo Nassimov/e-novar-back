@@ -915,7 +915,12 @@ class BookingBody(BaseModel):
     slot_time: Optional[str] = None       # "HH:MM"
     end_time: Optional[str] = None        # "HH:MM" (for sub-slot selection)
     duration_min: int = 90
-    payment_method: str = "cib"           # cib | edahabia | transfer | cash
+    payment_method: str = "cib"           # cib | edahabia | transfer | cash | rib_cib | rib_edahabia
+    # Snapshot of the student's RIB at booking time (rib_cib/rib_edahabia
+    # only) — stored on the booking so admin reconciliation (see
+    # app/routers/admin/bookings.py) reflects whichever RIB was actually
+    # used, even if the student later changes their saved default.
+    payment_rib: Optional[str] = None
     subject: Optional[str] = None
     subject_id: Optional[UUID] = None      # must be one of the slot's declared combos, if provided
     level_id: Optional[UUID] = None
@@ -1117,6 +1122,7 @@ async def book_teacher_slot(
         kp_reward=tp.kp_reward,
         status=booking_status,
         payment_method=body.payment_method,
+        payment_rib=body.payment_rib if body.payment_method in ("rib_cib", "rib_edahabia") else None,
         subject=body.subject,
         comment=body.comment,
         pack_sessions=pack_sessions_json,
