@@ -181,20 +181,14 @@ async def get_classroom_room(
         level_name = lvl.label if lvl else None
 
     now_join = datetime.now(timezone.utc)
-    # Per-participant join timestamps — status="live"/started_at (above)
-    # only ever record "SOMEONE joined", not who specifically. This is what
-    # app/workers/booking_tasks.py's online no-show detector needs to tell a
-    # genuine teacher no-show apart from a student who never showed up (or
-    # simply hasn't yet, this early in the join window).
-    join_targets = group_sessions if slot_id else [session]
-    for s in join_targets:
-        if uid == s.teacher_id and s.teacher_joined_at is None:
-            s.teacher_joined_at = now_join
-            db.add(s)
-        if uid == s.student_id and s.student_joined_at is None:
-            s.student_joined_at = now_join
-            db.add(s)
-
+    # NOTE: teacher_joined_at/student_joined_at are deliberately NOT set
+    # here. This endpoint is fetched by the waiting-room page's 15s poll —
+    # merely fetching room/token info is not the same as actually joining
+    # the LiveKit call, and the online no-show detector (app/workers/
+    # booking_tasks.py) needs the real thing: those fields are set by
+    # POST /{session_id}/validation/online-connect instead, which only
+    # fires from the live page's LiveKitRoom onConnected callback — i.e.
+    # once WebRTC has genuinely connected.
     if session.status == "scheduled":
         session.status = "live"
         if session.started_at is None:
@@ -229,6 +223,10 @@ async def dev_simulate_session_start(
     its normal timing logic, just against a (deliberately) adjusted clock
     target. Either the session's student or its teacher can call this.
     """
+    from app.config import get_settings as _get_settings
+    if _get_settings().is_production:
+        raise HTTPException(status_code=403, detail="Outil de test désactivé en production.")
+
     session = _load_session(db, session_id)
     _authorize(session, current_user)
 

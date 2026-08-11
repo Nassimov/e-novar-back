@@ -394,13 +394,36 @@ async def record_online_connect(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Fired once from the live page's LiveKitRoom `onConnected` callback —
+    i.e. only once WebRTC has genuinely connected, unlike GET .../room
+    (fetched by the waiting-room page's 15s poll well before anyone has
+    actually joined the call). This is also where TutoringSession.
+    teacher_joined_at/student_joined_at get set (moved here from
+    app/routers/classroom.py's get_classroom_room — see that function's own
+    comment) so the online no-show detector (app/workers/booking_tasks.py)
+    reflects a real join, not a mere room-info fetch."""
     session, sv, is_student, is_teacher = _load(db, session_id, current_user)
     if not is_student and not is_teacher:
         raise HTTPException(status_code=403, detail="Access denied")
     if sv.online_connected_at is None:
         sv.online_connected_at = datetime.now(timezone.utc)
         db.add(sv)
-        db.commit()
+
+    now_join = datetime.now(timezone.utc)
+    from app.services import livekit_video as lk_video
+    slot_id = lk_video.group_slot_id(db, session)
+    # Teacher is shared across every sibling session of a group lesson —
+    # their join must be reflected on all of them (mirrors classroom.py's
+    # former join-marking loop). A student only ever owns their own row.
+    join_targets = lk_video.group_sessions(db, slot_id) if slot_id and is_teacher else [session]
+    for s in join_targets:
+        if is_teacher and s.teacher_joined_at is None:
+            s.teacher_joined_at = now_join
+            db.add(s)
+        if is_student and s.student_joined_at is None:
+            s.student_joined_at = now_join
+            db.add(s)
+    db.commit()
     return {"online_connected_at": sv.online_connected_at}
 
 

@@ -50,6 +50,13 @@ class Profile(SQLModel, table=True):
     language: Optional[str] = Field(default="fr")        # public.lang enum value
     theme: Optional[str] = Field(default="system")       # public.theme_pref enum value
     onboarding_completed: bool = Field(default=False)
+    # Phase 13 (Competitive Arena) — reserved: no verification FLOW sets
+    # these yet, they exist only so an admin's "require phone/email
+    # verification for ranked" toggle (PlatformSettings) is real,
+    # enforceable infrastructure rather than a no-op. Defaults false for
+    # everyone — never fabricated as true.
+    phone_verified: bool = Field(default=False)
+    email_verified: bool = Field(default=False)
     last_seen_at: Optional[datetime] = Field(default=None)
     referral_code: Optional[str] = Field(
         default=None,

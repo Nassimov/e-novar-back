@@ -197,6 +197,8 @@ TAGS_METADATA = [
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Enovar API v1.0.0 ...")
+    from app.core import domain_events_bootstrap
+    domain_events_bootstrap.register()
     yield
     logger.info("Shutting down Enovar API ...")
     from app.core.redis import close_redis
@@ -284,6 +286,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from app.core.security_headers import SecurityHeadersMiddleware  # noqa: E402
+app.add_middleware(SecurityHeadersMiddleware)
+
 register_exception_handlers(app)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -334,12 +339,31 @@ from app.routers.admin.bookings import router as admin_bookings_router
 from app.routers.admin.settings import router as admin_settings_router
 from app.routers.admin.session_validation import router as admin_session_validation_router
 from app.routers.admin.notification_campaigns import router as admin_campaigns_router
+from app.routers.admin.competitive import router as admin_competitive_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
 from app.routers.competitive.matches import router as competitive_matches_router
 from app.routers.competitive.lobby import router as competitive_lobby_router
 from app.routers.competitive.invitations import router as competitive_invitations_router
 from app.routers.competitive.stats import router as competitive_stats_router
+from app.routers.competitive.ranking import router as competitive_ranking_router
+from app.routers.competitive.opponents import router as competitive_opponents_router
+from app.routers.competitive.schedule import router as competitive_schedule_router
+from app.routers.competitive.gameplay import router as competitive_gameplay_router
+from app.routers.competitive.analysis import router as competitive_analysis_router
+from app.routers.competitive.matchmaking import router as competitive_matchmaking_router
+from app.routers.competitive.spectate import router as competitive_spectate_router
+from app.routers.competitive.tournaments import router as competitive_tournaments_router
+from app.routers.competitive.battle_royale import router as competitive_battle_royale_router
+from app.routers.competitive.achievements import router as competitive_achievements_router
+from app.routers.competitive.liveops import router as competitive_liveops_router
+from app.routers.competitive.moderation import router as competitive_moderation_router
+from app.routers.club.clubs import router as clubs_router
+from app.routers.club.chat import router as clubs_chat_router
+from app.routers.club.social import router as clubs_social_router
+from app.routers.club.battles import router as clubs_battles_router
+from app.routers.club.seasons import router as clubs_seasons_router
+from app.routers.admin.club import router as admin_clubs_router
 
 app.include_router(public_router,        prefix="/api/public",         tags=["Public"])
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
@@ -391,10 +415,29 @@ app.include_router(admin_session_validation_router, prefix="/api/admin/session-v
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 app.include_router(admin_campaigns_router,  prefix="/api/admin/campaigns",  tags=["Admin — Notification Campaigns"])
+app.include_router(admin_competitive_router, prefix="/api/admin/competitive", tags=["Admin — Competitive"])
 app.include_router(competitive_matches_router,     prefix="/api/competitive", tags=["Competitive"])
 app.include_router(competitive_lobby_router,       prefix="/api/competitive", tags=["Competitive"])
 app.include_router(competitive_invitations_router, prefix="/api/competitive", tags=["Competitive"])
 app.include_router(competitive_stats_router,       prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_ranking_router,     prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_opponents_router,   prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_schedule_router,    prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_gameplay_router,    prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_analysis_router,    prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_matchmaking_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_spectate_router,    prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_tournaments_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_battle_royale_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_achievements_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_liveops_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(competitive_moderation_router, prefix="/api/competitive", tags=["Competitive"])
+app.include_router(clubs_router,             prefix="/api",                tags=["Clubs"])
+app.include_router(clubs_chat_router,        prefix="/api",                tags=["Clubs"])
+app.include_router(clubs_social_router,      prefix="/api",                tags=["Clubs"])
+app.include_router(clubs_battles_router,     prefix="/api",                tags=["Clubs"])
+app.include_router(clubs_seasons_router,     prefix="/api",                tags=["Clubs"])
+app.include_router(admin_clubs_router,       prefix="/api/admin/clubs",    tags=["Admin — Clubs"])
 
 
 # ── Custom OpenAPI schema (adds Bearer security globally) ─────────────────────
@@ -469,6 +512,34 @@ async def health_deps():
         result["service_client"] = "ok"
     except Exception as e:
         result["service_client"] = f"ERROR: {type(e).__name__}: {e}"
+
+    # Phase 16 — Production Hardening: Redis + Celery worker liveness,
+    # so this one endpoint covers every dependency the spec's "Health
+    # Checks" section names (API/DB/Redis/Workers) except Realtime, which
+    # is this same FastAPI process (no separate service to probe).
+    try:
+        from app.core.redis import get_redis_client
+        get_redis_client().ping()
+        result["redis"] = "ok"
+    except Exception as e:
+        result["redis"] = f"ERROR: {type(e).__name__}: {e}"
+
+    try:
+        from app.workers.celery_app import celery_app
+        pings = celery_app.control.ping(timeout=1.0)
+        result["celery_workers"] = f"ok ({len(pings)} responding)" if pings else "no workers responding"
+    except Exception as e:
+        result["celery_workers"] = f"ERROR: {type(e).__name__}: {e}"
+
+    try:
+        from sqlmodel import Session, select
+        from app.database import get_engine
+        with Session(get_engine()) as db:
+            db.exec(select(1))
+        result["database"] = "ok"
+    except Exception as e:
+        result["database"] = f"ERROR: {type(e).__name__}: {e}"
+
     return result
 
 
@@ -513,6 +584,8 @@ notification_manager = ConnectionManager()
 # the same room shares one broadcast "channel".
 from app.core.connections import ChatConnectionManager as _ChatConnectionManager  # noqa: E402
 classroom_connections = _ChatConnectionManager()
+competitive_connections = _ChatConnectionManager()
+club_connections = _ChatConnectionManager()
 
 
 async def _resolve_ws_user(token: str) -> tuple[str, str]:
@@ -778,6 +851,592 @@ async def websocket_classroom(websocket: WebSocket, session_id: str, token: str 
         sender_task.cancel()
         publish_classroom_event(room_key, {"type": "participant_left", "user_id": user_id})
         logger.info("WS /classroom disconnected: user=%s room=%s", user_id, room_key)
+
+
+@app.websocket("/ws/competitive/{match_id}")
+async def websocket_competitive(websocket: WebSocket, match_id: str, token: str = ""):
+    """Competitive Arena real-time channel (Phase 2 lobby + Phase 5 live
+    gameplay push). Connect with `?token=<jwt>`. Mirrors /ws/classroom's
+    per-match Redis-backed pub/sub room, one queue per connection.
+
+    Phase 5: `gameplay_update` signals published via app.core.competitive_ws
+    are no longer relayed raw — this handler computes THIS connection's own
+    personalized MatchStateResponse (own answer visible, opponent's never
+    leaked pre-reveal) and pushes it directly as `gameplay_state`, so the
+    frontend never needs to poll GET .../gameplay/state on an interval.
+    Other signal types (ready_changed, participant_connected/disconnected)
+    are still relayed as-is (Phase 2 lobby behavior, unchanged)."""
+    import asyncio
+    from uuid import UUID as _UUID
+
+    from app.core.competitive_ws import competitive_channel, publish_competitive_event
+    from app.database import get_session as _get_db_session
+    from app.models.admin import PlatformSettings
+    from app.services.competitive import connection_service, gameplay_service, match_service, presence_service
+
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /competitive rejected: %s", exc)
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    try:
+        from app.models.competitive import CompetitiveMatch as _CompetitiveMatch
+
+        was_disconnected = False
+        with next(_get_db_session()) as _db:
+            match = _db.get(_CompetitiveMatch, _UUID(match_id))
+            if match is None:
+                await websocket.close(code=4004, reason="Match not found")
+                return
+            participants = match_service.get_participants(_db, match.id)
+            if not any(str(p.user_id) == user_id for p in participants):
+                await websocket.close(code=4003, reason="Forbidden")
+                return
+            settings_row = _db.get(PlatformSettings, True) or PlatformSettings()
+            grace_minutes = settings_row.competitive_disconnect_grace_minutes
+            ingame_grace_seconds = settings_row.competitive_ingame_disconnect_grace_seconds
+            prior_presence = presence_service.get_presence(match.id).get(user_id)
+            was_disconnected = bool(prior_presence and prior_presence.get("status") == presence_service.STATUS_DISCONNECTED)
+    except Exception:
+        logger.exception("WS /competitive setup failed match_id=%s", match_id)
+        await websocket.close(code=1011, reason="Server error")
+        return
+
+    await websocket.accept()
+    send_queue = competitive_connections.register(match_id)
+    stop_evt = asyncio.Event()
+
+    async def _sender():
+        while True:
+            data = await send_queue.get()
+            if data is None:
+                break
+            try:
+                await websocket.send_json(data)
+            except Exception:
+                break
+
+    async def _push_personal_gameplay_state():
+        """Phase 5 true push — computed fresh per connection, never a raw
+        relay, so each player only ever sees their own answer pre-reveal.
+
+        Phase 10, Part B: a battle_royale match reuses this SAME connection/
+        push mechanism (same audience — authenticated participants of this
+        match_id) but needs an N-player-shaped payload, so it's computed via
+        gameplay_service.compute_battle_royale_state and pushed under a
+        distinct `battle_royale_state` type instead of `gameplay_state` —
+        one cheap match_type check per push, no new WS endpoint."""
+        try:
+            with next(_get_db_session()) as _db:
+                from app.models.competitive import CompetitiveMatch as _CM
+                m = _db.get(_CM, _UUID(match_id))
+                if m is None:
+                    return
+                if m.match_type == "battle_royale":
+                    br_state = gameplay_service.compute_battle_royale_state(_db, m, viewer_id=_UUID(user_id))
+                    await send_queue.put({"type": "battle_royale_state", "state": json.loads(br_state.model_dump_json())})
+                else:
+                    state = gameplay_service.compute_state(_db, m, viewer_id=_UUID(user_id))
+                    await send_queue.put({"type": "gameplay_state", "state": json.loads(state.model_dump_json())})
+        except Exception:
+            logger.debug("failed to push personalized gameplay state match=%s user=%s", match_id, user_id, exc_info=True)
+
+    async def _redis_subscriber():
+        import redis.asyncio as aioredis
+
+        url = get_settings().redis_url
+        while not stop_evt.is_set():
+            r = None
+            try:
+                r = aioredis.Redis.from_url(url, decode_responses=True)
+                ps = r.pubsub()
+                await ps.subscribe(competitive_channel(match_id))
+                while not stop_evt.is_set():
+                    raw = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if raw is None:
+                        continue
+                    if raw.get("type") == "message":
+                        try:
+                            payload = json.loads(raw["data"])
+                            if payload.get("type") == "gameplay_update":
+                                await _push_personal_gameplay_state()
+                            else:
+                                await send_queue.put(payload)
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("competitive redis subscriber error match=%s: %s — reconnecting", match_id, exc)
+                await asyncio.sleep(2.0)
+            finally:
+                if r:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
+
+    sender_task = asyncio.create_task(_sender())
+    sub_task = asyncio.create_task(_redis_subscriber())
+
+    presence_service.set_status(_UUID(match_id), _UUID(user_id), presence_service.STATUS_ONLINE)
+    publish_competitive_event(match_id, {"type": "participant_connected", "user_id": user_id})
+    try:
+        with next(_get_db_session()) as _db:
+            connection_service.log_connection_event(
+                _db, match_id=_UUID(match_id), user_id=_UUID(user_id),
+                event_type="reconnected" if was_disconnected else "connected",
+            )
+            from app.services.notification_engine import emit as _emit
+            other = next((p for p in match_service.get_participants(_db, _UUID(match_id)) if str(p.user_id) != user_id), None)
+            if other:
+                _emit(
+                    _db, event_type="competitive_opponent_connected", user_id=other.user_id,
+                    dedup_key=f"competitive_opponent_connected:{match_id}:{user_id}",
+                )
+    except Exception:
+        logger.debug("competitive opponent_connected notify failed", exc_info=True)
+    logger.info("WS /competitive connected: user=%s match=%s reconnect=%s", user_id, match_id, was_disconnected)
+
+    # If gameplay is already live, push this connection its own state right
+    # away (covers reconnect-mid-question without waiting for the next tick).
+    if match.status == "in_progress":
+        await _push_personal_gameplay_state()
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    # Heartbeat: refresh presence's last_seen so
+                    # task_detect_stale_gameplay_connections never flags an
+                    # actively-connected client as stale.
+                    presence_service.set_status(_UUID(match_id), _UUID(user_id), presence_service.STATUS_ONLINE)
+                    send_queue.put_nowait({"type": "pong"})
+            except json.JSONDecodeError:
+                send_queue.put_nowait({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        stop_evt.set()
+        sub_task.cancel()
+        competitive_connections.unregister(match_id, send_queue)
+        sender_task.cancel()
+        presence_service.set_status(_UUID(match_id), _UUID(user_id), presence_service.STATUS_DISCONNECTED)
+        publish_competitive_event(match_id, {"type": "participant_disconnected", "user_id": user_id})
+        try:
+            with next(_get_db_session()) as _db:
+                connection_service.log_connection_event(
+                    _db, match_id=_UUID(match_id), user_id=_UUID(user_id), event_type="disconnected",
+                )
+                from app.models.competitive import CompetitiveMatch as _CM
+                current_match = _db.get(_CM, _UUID(match_id))
+                current_br = None
+                if current_match is not None and current_match.match_type == "battle_royale":
+                    from app.models.competitive import CompetitiveBattleRoyaleMatch as _BRM
+                    current_br = _db.get(_BRM, _UUID(match_id))
+            is_ingame = current_match is not None and current_match.status == "in_progress"
+            if is_ingame and current_match.match_type == "battle_royale":
+                # Phase 10, Part B — a BR-specific disconnect task: the
+                # existing task_check_ingame_disconnect forfeits the ENTIRE
+                # match to "the other player", which is the wrong shape for
+                # an N-player Battle Royale (one disconnect must never end
+                # the match for everyone else). See task_check_battle_
+                # royale_disconnect's own docstring.
+                from app.workers.competitive_tasks import task_check_battle_royale_disconnect
+                grace = current_br.disconnect_grace_seconds if current_br else ingame_grace_seconds
+                task_check_battle_royale_disconnect.apply_async(
+                    args=[match_id, user_id], countdown=grace,
+                )
+            elif is_ingame:
+                from app.workers.competitive_tasks import task_check_ingame_disconnect
+                task_check_ingame_disconnect.apply_async(
+                    args=[match_id, user_id], countdown=ingame_grace_seconds,
+                )
+            else:
+                from app.workers.competitive_tasks import task_check_waiting_room_disconnect
+                task_check_waiting_room_disconnect.apply_async(
+                    args=[match_id, user_id], countdown=grace_minutes * 60,
+                )
+        except Exception:
+            logger.debug("scheduling disconnect grace check failed", exc_info=True)
+        logger.info("WS /competitive disconnected: user=%s match=%s", user_id, match_id)
+
+
+@app.websocket("/ws/competitive/{match_id}/spectate")
+async def websocket_competitive_spectate(websocket: WebSocket, match_id: str, token: str = ""):
+    """Competitive Arena Spectator Mode real-time channel (Phase 8). Connect
+    with `?token=<jwt>`. Structurally mirrors /ws/competitive/{match_id}
+    (the player channel just above) — same auth, same per-connection queue
+    via competitive_connections (the same _ChatConnectionManager instance
+    the player channel and /ws/chat both already share, just keyed by a
+    different match_id-derived channel), same Redis pub/sub subscriber
+    pattern — but with three deliberate differences:
+
+    1. NO participant check — any authenticated user may connect (this
+       platform requires login everywhere already; spectating isn't
+       restricted to invited players). Only PUBLIC matches are surfaced by
+       GET /live-matches, so an uninvited spectator would need the private
+       match's exact match_id to reach this at all.
+    2. A CAPACITY check — rejects with 4029 if
+       platform_settings.competitive_spectator_max_default is set and the
+       live spectator count (Redis-backed, spectator_presence_service) is
+       already at/above it.
+    3. The pushed state is VIEWER-AGNOSTIC — gameplay_service.
+       compute_spectator_state() is computed once and pushed identically to
+       every connected spectator (unlike the player channel's per-viewer
+       compute_state()), since spectators never see hidden per-player info
+       before the reveal phase anyway.
+    """
+    import asyncio
+    from uuid import UUID as _UUID
+
+    from app.core.spectator_ws import publish_spectator_event, spectator_channel
+    from app.database import get_session as _get_db_session
+    from app.models.admin import PlatformSettings
+    from app.services.competitive import gameplay_service, spectator_presence_service, spectator_service
+
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /competitive/spectate rejected: %s", exc)
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    try:
+        from app.models.competitive import CompetitiveMatch as _CompetitiveMatch
+
+        with next(_get_db_session()) as _db:
+            match = _db.get(_CompetitiveMatch, _UUID(match_id))
+            if match is None:
+                await websocket.close(code=4004, reason="Match not found")
+                return
+            settings_row = _db.get(PlatformSettings, True) or PlatformSettings()
+            # Phase 9 — a per-match override (e.g. set by a tournament's
+            # organizer) takes precedence over the platform-wide default.
+            max_spectators = match.max_spectators if match.max_spectators is not None else settings_row.competitive_spectator_max_default
+            if max_spectators is not None and spectator_presence_service.get_count(match.id) >= max_spectators:
+                await websocket.close(code=4029, reason="Spectator capacity reached")
+                return
+    except Exception:
+        logger.exception("WS /competitive/spectate setup failed match_id=%s", match_id)
+        await websocket.close(code=1011, reason="Server error")
+        return
+
+    await websocket.accept()
+    send_queue = competitive_connections.register(f"spectate:{match_id}")
+    stop_evt = asyncio.Event()
+
+    async def _sender():
+        while True:
+            data = await send_queue.get()
+            if data is None:
+                break
+            try:
+                await websocket.send_json(data)
+            except Exception:
+                break
+
+    async def _push_spectator_state():
+        try:
+            with next(_get_db_session()) as _db:
+                from app.models.competitive import CompetitiveMatch as _CM
+                m = _db.get(_CM, _UUID(match_id))
+                if m is None:
+                    return
+                count = spectator_presence_service.get_count(m.id)
+                state = gameplay_service.compute_spectator_state(_db, m, spectator_count=count)
+                await send_queue.put({"type": "spectator_state", "state": json.loads(state.model_dump_json())})
+        except Exception:
+            logger.debug("failed to push spectator state match=%s", match_id, exc_info=True)
+
+    async def _redis_subscriber():
+        import redis.asyncio as aioredis
+
+        url = get_settings().redis_url
+        while not stop_evt.is_set():
+            r = None
+            try:
+                r = aioredis.Redis.from_url(url, decode_responses=True)
+                ps = r.pubsub()
+                await ps.subscribe(spectator_channel(match_id))
+                while not stop_evt.is_set():
+                    raw = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if raw is None:
+                        continue
+                    if raw.get("type") == "message":
+                        try:
+                            payload = json.loads(raw["data"])
+                            if payload.get("type") == "spectator_update":
+                                await _push_spectator_state()
+                            else:
+                                # chat_message/chat_deleted/reaction/
+                                # prediction_summary/timeline_event/
+                                # spectator_count relay as-is.
+                                await send_queue.put(payload)
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("spectator redis subscriber error match=%s: %s — reconnecting", match_id, exc)
+                await asyncio.sleep(2.0)
+            finally:
+                if r:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
+
+    sender_task = asyncio.create_task(_sender())
+    sub_task = asyncio.create_task(_redis_subscriber())
+
+    try:
+        with next(_get_db_session()) as _db:
+            spectator_service.record_spectator_join(_db, match_id=_UUID(match_id), user_id=_UUID(user_id))
+    except Exception:
+        logger.debug("record_spectator_join failed match=%s user=%s", match_id, user_id, exc_info=True)
+    new_count = spectator_presence_service.add_viewer(_UUID(match_id), _UUID(user_id))
+    publish_spectator_event(match_id, {"type": "spectator_count", "count": new_count})
+    logger.info("WS /competitive/spectate connected: user=%s match=%s count=%s", user_id, match_id, new_count)
+
+    await _push_spectator_state()
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    send_queue.put_nowait({"type": "pong"})
+            except json.JSONDecodeError:
+                send_queue.put_nowait({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        stop_evt.set()
+        sub_task.cancel()
+        competitive_connections.unregister(f"spectate:{match_id}", send_queue)
+        sender_task.cancel()
+        try:
+            with next(_get_db_session()) as _db:
+                spectator_service.record_spectator_leave(_db, match_id=_UUID(match_id), user_id=_UUID(user_id))
+        except Exception:
+            logger.debug("record_spectator_leave failed match=%s user=%s", match_id, user_id, exc_info=True)
+        left_count = spectator_presence_service.remove_viewer(_UUID(match_id), _UUID(user_id))
+        publish_spectator_event(match_id, {"type": "spectator_count", "count": left_count})
+        logger.info("WS /competitive/spectate disconnected: user=%s match=%s count=%s", user_id, match_id, left_count)
+
+
+@app.websocket("/ws/competitive/tournaments/{tournament_id}")
+async def websocket_competitive_tournament(websocket: WebSocket, tournament_id: str, token: str = ""):
+    """Tournament System real-time channel (Phase 9 Part B). Connect with
+    `?token=<jwt>`. Any authenticated user may connect — no participant/
+    capacity check, unlike the player/spectator gameplay channels: a
+    tournament bracket is fully public data with no hidden-information
+    concern.
+
+    Unlike those other two channels, this one is SIGNAL-ONLY — it never
+    computes/pushes a full bracket state (that payload is comparatively
+    large/complex); it just relays the small set of typed events published
+    by tournament_service (bracket_updated/round_started/round_completed/
+    match_created/participant_advanced/tournament_completed) as-is, and the
+    frontend refetches GET /api/competitive/tournaments/{id}/bracket
+    whenever one arrives."""
+    import asyncio
+    from uuid import UUID as _UUID
+
+    from app.core.tournament_ws import tournament_channel
+
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /competitive/tournaments rejected: %s", exc)
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    try:
+        _UUID(tournament_id)
+    except ValueError:
+        await websocket.close(code=4004, reason="Invalid tournament id")
+        return
+
+    await websocket.accept()
+    send_queue = competitive_connections.register(f"tournament:{tournament_id}")
+    stop_evt = asyncio.Event()
+
+    async def _sender():
+        while True:
+            data = await send_queue.get()
+            if data is None:
+                break
+            try:
+                await websocket.send_json(data)
+            except Exception:
+                break
+
+    async def _redis_subscriber():
+        import redis.asyncio as aioredis
+
+        url = get_settings().redis_url
+        while not stop_evt.is_set():
+            r = None
+            try:
+                r = aioredis.Redis.from_url(url, decode_responses=True)
+                ps = r.pubsub()
+                await ps.subscribe(tournament_channel(tournament_id))
+                while not stop_evt.is_set():
+                    raw = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if raw is None:
+                        continue
+                    if raw.get("type") == "message":
+                        try:
+                            await send_queue.put(json.loads(raw["data"]))
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("tournament redis subscriber error tournament=%s: %s — reconnecting", tournament_id, exc)
+                await asyncio.sleep(2.0)
+            finally:
+                if r:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
+
+    sender_task = asyncio.create_task(_sender())
+    sub_task = asyncio.create_task(_redis_subscriber())
+    logger.info("WS /competitive/tournaments connected: user=%s tournament=%s", user_id, tournament_id)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    send_queue.put_nowait({"type": "pong"})
+            except json.JSONDecodeError:
+                send_queue.put_nowait({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        stop_evt.set()
+        sub_task.cancel()
+        competitive_connections.unregister(f"tournament:{tournament_id}", send_queue)
+        sender_task.cancel()
+        logger.info("WS /competitive/tournaments disconnected: user=%s tournament=%s", user_id, tournament_id)
+
+
+@app.websocket("/ws/club/{club_id}")
+async def websocket_club(websocket: WebSocket, club_id: str, token: str = ""):
+    """Clash Club real-time channel (Phase 11, Part B) — chat send/pin/
+    unpin/delete. Connect with `?token=<jwt>`. Members-only (unlike the
+    public tournament bracket channel this otherwise mirrors) — a club's
+    chat is private to its roster, same gating club_chat_service already
+    applies on every REST mutation. Signal-only, same shape as
+    /ws/competitive/tournaments/{id}: REST endpoints
+    (app/routers/club/chat.py) call publish_club_event() directly, this
+    handler just relays it to every connected member."""
+    import asyncio
+    from uuid import UUID as _UUID
+
+    from app.core.club_ws import club_channel
+    from app.database import get_session as _get_db_session
+    from app.models.club import ClubMember as _ClubMember
+
+    try:
+        user_id, _email = await _resolve_ws_user(token)
+    except ValueError as exc:
+        logger.info("WS /club rejected: %s", exc)
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    try:
+        with next(_get_db_session()) as _db:
+            from sqlmodel import select as _select
+            membership = _db.exec(
+                _select(_ClubMember).where(_ClubMember.club_id == _UUID(club_id))
+                .where(_ClubMember.user_id == _UUID(user_id)).where(_ClubMember.status == "active")
+            ).first()
+            if membership is None:
+                await websocket.close(code=4003, reason="Forbidden")
+                return
+    except Exception:
+        logger.exception("WS /club setup failed club_id=%s", club_id)
+        await websocket.close(code=1011, reason="Server error")
+        return
+
+    await websocket.accept()
+    send_queue = club_connections.register(club_id)
+    stop_evt = asyncio.Event()
+
+    async def _sender():
+        while True:
+            data = await send_queue.get()
+            if data is None:
+                break
+            try:
+                await websocket.send_json(data)
+            except Exception:
+                break
+
+    async def _redis_subscriber():
+        import redis.asyncio as aioredis
+
+        url = get_settings().redis_url
+        while not stop_evt.is_set():
+            r = None
+            try:
+                r = aioredis.Redis.from_url(url, decode_responses=True)
+                ps = r.pubsub()
+                await ps.subscribe(club_channel(club_id))
+                while not stop_evt.is_set():
+                    raw = await ps.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                    if raw is None:
+                        continue
+                    if raw.get("type") == "message":
+                        try:
+                            await send_queue.put(json.loads(raw["data"]))
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                logger.warning("club redis subscriber error club=%s: %s — reconnecting", club_id, exc)
+                await asyncio.sleep(2.0)
+            finally:
+                if r:
+                    try:
+                        await r.aclose()
+                    except Exception:
+                        pass
+
+    sender_task = asyncio.create_task(_sender())
+    sub_task = asyncio.create_task(_redis_subscriber())
+    logger.info("WS /club connected: user=%s club=%s", user_id, club_id)
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "ping":
+                    send_queue.put_nowait({"type": "pong"})
+            except json.JSONDecodeError:
+                send_queue.put_nowait({"type": "error", "message": "Invalid JSON"})
+    except WebSocketDisconnect:
+        pass
+    finally:
+        stop_evt.set()
+        sub_task.cancel()
+        club_connections.unregister(club_id, send_queue)
+        sender_task.cancel()
+        logger.info("WS /club disconnected: user=%s club=%s", user_id, club_id)
 
 
 async def _chat_redis_subscriber(user_id: str, send_queue: "asyncio.Queue", stop: "asyncio.Event"):

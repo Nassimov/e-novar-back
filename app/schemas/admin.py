@@ -117,6 +117,61 @@ class PlatformPricingSettings(BaseModel):
         return v
 
 
+class CompetitiveArenaSettings(BaseModel):
+    """Phase 7's MMR Calculator knobs (shipped in migration 082, but never
+    exposed via an admin endpoint until now — league/season CRUD existed,
+    the raw MMR tuning knobs didn't) folded together with Phase 8's
+    spectator/prediction/reaction/chat knobs (migration 083) into one
+    section, mirroring app/routers/admin/settings.py's existing
+    _serialize/GET/PUT pattern (e.g. /pricing)."""
+
+    # Phase 7 — MMR Calculator (app/services/competitive/ranking_service.py)
+    competitive_mmr_initial_rating: int = Field(ge=0, le=5000)
+    competitive_mmr_k_factor: int = Field(ge=1, le=200)
+    competitive_mmr_streak_bonus_per_win: int = Field(ge=0, le=50)
+    competitive_mmr_streak_bonus_max: int = Field(ge=0, le=500)
+    competitive_mmr_floor: int = Field(ge=0, le=5000)
+    competitive_mmr_inflation_dampening_threshold: int = Field(ge=0, le=10000)
+    competitive_mmr_inflation_dampening_factor: float = Field(ge=0, le=1)
+    competitive_season_default_reset_strategy: str
+    competitive_season_default_reset_percentage: int = Field(ge=0, le=100)
+
+    # Phase 8 — Spectator Mode, Live Reactions & Predictions
+    competitive_spectator_max_default: Optional[int] = Field(default=None, ge=0)
+    competitive_prediction_lock_before_position: int = Field(ge=0, le=100)
+    competitive_prediction_reward_arena_xp: int = Field(ge=0, le=1000)
+    competitive_prediction_reward_spectator_xp: int = Field(ge=0, le=1000)
+    competitive_reaction_rate_limit_per_10s: int = Field(ge=1, le=100)
+    competitive_chat_rate_limit_per_10s: int = Field(ge=1, le=100)
+
+    # Phase 9 — Tournament System scheduling knobs
+    competitive_tournament_match_start_delay_seconds: int = Field(ge=0, le=3600)
+    competitive_tournament_round_advance_grace_minutes: int = Field(ge=0, le=1440)
+
+    # Phase 11 — Clash Club (Club vs Club) config knobs
+    competitive_club_creation_cost_ep: int = Field(ge=0, le=100000)
+    competitive_club_min_level: Optional[int] = Field(default=None, ge=0, le=100)
+    competitive_club_min_rating: Optional[int] = Field(default=None, ge=0, le=5000)
+    competitive_club_min_account_age_days: Optional[int] = Field(default=None, ge=0, le=3650)
+    competitive_club_default_max_members: int
+    competitive_club_name_min_length: int = Field(ge=1, le=100)
+    competitive_club_name_max_length: int = Field(ge=1, le=200)
+
+    @field_validator("competitive_club_default_max_members")
+    @classmethod
+    def _valid_club_default_max_members(cls, v: int) -> int:
+        if v not in (20, 50, 100, 250, 500):
+            raise ValueError("competitive_club_default_max_members must be one of 20|50|100|250|500")
+        return v
+
+    @field_validator("competitive_season_default_reset_strategy")
+    @classmethod
+    def _valid_reset_strategy(cls, v: str) -> str:
+        if v not in ("soft", "hard", "percentage"):
+            raise ValueError("competitive_season_default_reset_strategy must be one of soft|hard|percentage")
+        return v
+
+
 class BankTransferSettings(BaseModel):
     bank_beneficiary_name: str = Field(min_length=1, max_length=200)
     platform_rib_cib: Optional[str] = Field(default=None, pattern=r"^\d{20}$")

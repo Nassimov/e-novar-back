@@ -2,10 +2,10 @@ from __future__ import annotations
 
 """Competitive Arena — Invitations API (Phase 1)."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlmodel import Session
 
 from app.dependencies import get_current_user, get_db
@@ -33,6 +33,15 @@ def create_invitation(
     db: Session = Depends(get_db),
 ):
     inviter_id = UUID(current_user["id"])
+
+    from app.core.rate_limiter import check_rate_limit
+    from app.models.admin import PlatformSettings
+    settings_row = db.get(PlatformSettings, True) or PlatformSettings()
+    check_rate_limit(
+        key=f"arena_rl:invitation_create:{inviter_id}", limit=settings_row.rate_limit_invitation_create_per_10s,
+        message="Trop d'invitations envoyées. Merci de patienter.",
+    )
+
     match = match_service.get_match_or_404(db, payload.match_id)
     invitation = invitation_service.create_invitation(
         db, match, inviter_id=inviter_id, opponent_code=payload.opponent_code
@@ -51,6 +60,26 @@ def list_invitations(
     return {
         "received": [_to_invitation_response(db, i) for i in received],
         "sent": [_to_invitation_response(db, i) for i in sent],
+    }
+
+
+@router.get("/invitations/history")
+def list_invitation_history(
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=100),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Full paginated inbox — every status, newest first (spec: 'History
+    must be paginated. Newest first.')."""
+    user_id = UUID(current_user["id"])
+    items, total = invitation_service.list_history(db, user_id, status_filter=status_filter, page=page, size=size)
+    return {
+        "items": [_to_invitation_response(db, i) for i in items],
+        "total": total,
+        "page": page,
+        "size": size,
     }
 
 

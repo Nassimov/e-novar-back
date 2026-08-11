@@ -30,6 +30,35 @@ os.environ.setdefault("ONESIGNAL_REST_API_KEY", "test-rest-key")
 os.environ.setdefault("RESEND_API_KEY", "test-resend-key")
 os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:3000")
 
+# Import app.main (transitively every router, every model module) BEFORE any
+# fixture runs SQLModel.metadata.create_all() — otherwise the metadata is
+# still empty and create_all() silently creates zero tables.
+import app.main  # noqa: E402,F401
+
+
+def _register_sqlite_compile_shims() -> None:
+    """Phase 16 — the full SQLModel.metadata spans every model in the app
+    (not just the ones a given test touches), and several existing models
+    (predating this phase) use PostgreSQL-only column types (JSONB, ARRAY)
+    that SQLite's DDL compiler has no rendering for at all — create_all()
+    fails immediately without this, for ANY test, before Phase 16. Test-
+    infrastructure-only: registers a DDL-compile-time fallback so SQLite
+    can create the tables; never touches production model files or the
+    real Postgres schema."""
+    from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+    from sqlalchemy.ext.compiler import compiles
+
+    @compiles(JSONB, "sqlite")
+    def _compile_jsonb_sqlite(element, compiler, **kw):
+        return "JSON"
+
+    @compiles(ARRAY, "sqlite")
+    def _compile_array_sqlite(element, compiler, **kw):
+        return "JSON"
+
+
+_register_sqlite_compile_shims()
+
 
 @pytest.fixture(scope="session")
 def engine():
@@ -45,8 +74,19 @@ def engine():
 
 @pytest.fixture
 def db_session(engine) -> Generator[Session, None, None]:
-    """Provide a transactional database session for each test."""
-    with Session(engine) as session:
+    """Provide a transactional database session for each test.
+
+    expire_on_commit=False: SQLite (unlike the real Postgres/timestamptz
+    backend) does not round-trip timezone-aware datetimes — a value
+    written as tz-aware comes back naive on the next SELECT. Without this
+    flag, SQLAlchemy's default post-commit expiry forces exactly that
+    reload on the next attribute access, so any code under test comparing
+    a freshly-committed row's datetime against datetime.now(timezone.utc)
+    would hit "can't compare offset-naive and offset-aware datetimes" —
+    a test-DB artifact, not a real bug. With it, a still-in-session object
+    keeps the Python values it was given until truly re-queried.
+    """
+    with Session(engine, expire_on_commit=False) as session:
         yield session
         session.rollback()
 

@@ -21,7 +21,14 @@ from app.models.competitive import CompetitiveMatch, CompetitiveMatchParticipant
 #: Legal status transitions. Terminal statuses (completed/cancelled/expired/
 #: abandoned/disconnected) map to an empty set — nothing may leave them.
 TRANSITIONS: dict[str, set[str]] = {
-    "draft": {"waiting_for_opponent", "cancelled", "expired"},
+    # "waiting_room" was added as a DIRECT target from "draft" in Phase 10
+    # (Battle Royale) — an open-lobby match type has no inviter/invitee, so
+    # it never goes through "waiting_for_opponent"/"accepted"/"scheduled"
+    # (see app/services/competitive/battle_royale_service.py's
+    # create_battle_royale_match). "waiting_room" was already a legal
+    # CompetitiveMatch.status value since Phase 1 — only the transition
+    # GRAPH needed widening, not the status enum itself.
+    "draft": {"waiting_for_opponent", "waiting_room", "cancelled", "expired"},
     "waiting_for_opponent": {"accepted", "draft", "cancelled", "expired"},
     "accepted": {"scheduled", "waiting_room", "cancelled"},
     "scheduled": {"waiting_room", "cancelled"},
@@ -60,8 +67,16 @@ def create_match(
     question_count: int,
     visibility: str,
     scheduled_at: Optional[datetime],
+    is_ranked: bool = True,
 ) -> CompetitiveMatch:
+    from app.services.competitive import ranking_service
+
     max_players = {"duel": 2, "club_battle": 10, "battle_royale": 20, "tournament": 8}.get(match_type, 2)
+    # Phase 13 — a caller may ASK for ranked, but the admin-configured
+    # allowed-modes list is always authoritative (never trust the frontend
+    # for anything that moves Arena Rating); a caller may always downgrade
+    # to casual (is_ranked=False) even for an allowed mode.
+    resolved_is_ranked = is_ranked and ranking_service.is_match_type_ranked_eligible(db, match_type)
     match = CompetitiveMatch(
         match_type=match_type,
         creator_id=creator_id,
@@ -73,6 +88,7 @@ def create_match(
         visibility=visibility,
         max_players=max_players,
         scheduled_at=scheduled_at,
+        is_ranked=resolved_is_ranked,
     )
     db.add(match)
     db.commit()
@@ -82,6 +98,52 @@ def create_match(
     participant = CompetitiveMatchParticipant(match_id=match.id, user_id=creator_id)
     db.add(participant)
     db.commit()
+    return match
+
+
+def create_matched_pair(
+    db: Session,
+    *,
+    player_a_id: UUID,
+    player_b_id: UUID,
+    subject_id: UUID,
+    school_level_id: UUID,
+    difficulty: str,
+    question_count: int,
+    is_ranked: bool = True,
+) -> CompetitiveMatch:
+    """Matchmaking-specific creation path (Phase 6). Unlike create_match's
+    single-sided invitation flow (creator, then a separate invitee-accepts
+    step), both players here have ALREADY mutually consented — both
+    explicitly accepted the matchmaking proposal — so the match is created
+    with BOTH participants at once and lands directly in 'accepted',
+    skipping 'waiting_for_opponent' entirely."""
+    from app.services.competitive import ranking_service
+
+    resolved_is_ranked = is_ranked and ranking_service.is_match_type_ranked_eligible(db, "duel")
+    match = CompetitiveMatch(
+        match_type="duel",
+        creator_id=player_a_id,
+        created_by=player_a_id,
+        subject_ids=[subject_id],
+        school_level_id=school_level_id,
+        difficulty=difficulty,
+        question_count=question_count,
+        visibility="private",
+        max_players=2,
+        is_ranked=resolved_is_ranked,
+    )
+    db.add(match)
+    db.commit()
+    db.refresh(match)
+
+    db.add(CompetitiveMatchParticipant(match_id=match.id, user_id=player_a_id))
+    db.add(CompetitiveMatchParticipant(match_id=match.id, user_id=player_b_id))
+    transition(match, "waiting_for_opponent")
+    transition(match, "accepted")
+    db.add(match)
+    db.commit()
+    db.refresh(match)
     return match
 
 
@@ -131,6 +193,28 @@ def cancel_match(db: Session, match: CompetitiveMatch, *, user_id: UUID, reason:
     transition(match, "cancelled")
     match.cancelled_at = datetime.now(timezone.utc)
     match.cancelled_reason = reason
+    db.add(match)
+    db.commit()
+    db.refresh(match)
+    return match
+
+
+def enter_waiting_room(db: Session, match: CompetitiveMatch, *, user_id: UUID) -> CompetitiveMatch:
+    """Either the 'Immediate Match' choice right after acceptance (from
+    'accepted'), or manually joining once a 'Scheduled Match' 's slot is at
+    hand (from 'scheduled') — Phase 2 has no automated countdown-triggered
+    entry yet, a future phase can add that once the gameplay engine needs
+    precise timing."""
+    if match.status not in ("accepted", "scheduled"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ce match n'est pas prêt à passer en salle d'attente.",
+        )
+    participants = get_participants(db, match.id)
+    if user_id not in [p.user_id for p in participants]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tu ne participes pas à ce match.")
+
+    transition(match, "waiting_room")
     db.add(match)
     db.commit()
     db.refresh(match)

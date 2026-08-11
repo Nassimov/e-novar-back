@@ -195,6 +195,48 @@ def generate_progress_report(student_data: Dict[str, Any]) -> str:
     return message.content[0].text
 
 
+def generate_match_analysis(match_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Competitive Arena Phase 4 — educational report for a completed duel.
+
+    Every number in match_data is already real (computed by
+    app/services/competitive/analysis_service.py) — Claude only turns them
+    into an encouraging, constructive narrative; it never invents a
+    statistic. Returns a dict matching AiAnalysisResponse's fields
+    (overall_summary/strengths/weaknesses/behavior_notes/mastery_level/
+    confidence) — raises on API/parse failure so the caller can fall back to
+    a deterministic template report."""
+    client = get_client()
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=1200,
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "You are an encouraging, constructive educational coach analyzing a student's "
+                    "competitive quiz duel. Base your analysis ONLY on the data below — never invent "
+                    "numbers. Never be discouraging, always constructive, in French.\n\n"
+                    f"{json.dumps(match_data, ensure_ascii=False, indent=2)}\n\n"
+                    "Return ONLY valid JSON with this exact structure:\n"
+                    '{\n  "overall_summary": "2-3 sentence summary of the match performance",\n'
+                    '  "strengths": ["short strength 1", "short strength 2"],\n'
+                    '  "weaknesses": ["short area to improve 1", "short area to improve 2"],\n'
+                    '  "behavior_notes": "1-2 sentences on how they played (speed, consistency, comeback, etc.)",\n'
+                    '  "mastery_level": "debutant|intermediaire|avance|expert",\n'
+                    '  "confidence": "high|medium|low"\n}\n'
+                    "No extra text, just the JSON object."
+                ),
+            }
+        ],
+    )
+    text = message.content[0].text.strip()
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        text = text[start:end]
+    return json.loads(text)
+
+
 def generate_session_summary(session_data: Dict[str, Any]) -> str:
     """Generate a markdown summary of a tutoring session."""
     client = get_client()

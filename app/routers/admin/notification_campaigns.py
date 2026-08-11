@@ -25,7 +25,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.core.redis import get_redis_client
 from app.dependencies import get_admin_user, get_db
 from app.models.notification import (
     NotificationCampaign,
@@ -82,18 +81,11 @@ class CampaignUpdate(BaseModel):
 
 
 def _rate_limit_campaign_send(admin_email: str) -> None:
-    try:
-        r = get_redis_client()
-        key = f"campaign:rate:{admin_email}"
-        n = r.incr(key)
-        if n == 1:
-            r.expire(key, _RATE_WINDOW)
-        if n > _RATE_MAX:
-            raise HTTPException(status_code=429, detail="Trop de campagnes envoyées cette heure. Réessayez plus tard.")
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+    from app.core.rate_limiter import check_rate_limit
+    check_rate_limit(
+        key=f"campaign:rate:{admin_email}", limit=_RATE_MAX, window_seconds=_RATE_WINDOW,
+        message="Trop de campagnes envoyées cette heure. Réessayez plus tard.",
+    )
 
 
 # ─── Targeting resolution ──────────────────────────────────────────────────────

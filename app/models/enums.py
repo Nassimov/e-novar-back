@@ -160,6 +160,7 @@ class KpSource(str, Enum):
     homework = "homework"
     evaluation = "evaluation"
     promo = "promo"
+    competitive = "competitive"
 
 
 class BadgeTier(str, Enum):

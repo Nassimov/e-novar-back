@@ -104,6 +104,214 @@ class PlatformSettings(SQLModel, table=True):
     # task_expire_unconfirmed_manual_payments.
     manual_payment_expiry_hours: int = Field(default=48)
 
+    # Competitive Arena Phase 2 — Duel lifecycle, all admin-configurable per
+    # the spec's explicit "do not hardcode" requirements. See
+    # app/services/competitive/ for where each is actually read.
+    competitive_question_count_options: List[int] = Field(
+        default=[5, 10, 15, 20, 30],
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=False, server_default="'{5,10,15,20,30}'"),
+    )
+    competitive_invitation_expiry_minutes: int = Field(default=15)
+    competitive_max_scheduling_days: int = Field(default=60)
+    competitive_disconnect_grace_minutes: int = Field(default=5)
+    competitive_disconnect_policy: str = Field(default="cancel")  # cancel|forfeit
+    competitive_reminder_minutes_before: List[int] = Field(
+        default=[1440, 60, 15],
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=False, server_default="'{1440,60,15}'"),
+    )
+    competitive_max_invitations_per_day: int = Field(default=20)
+    competitive_max_pending_invitations: int = Field(default=5)
+    competitive_invitation_cooldown_seconds: int = Field(default=30)
+
+    # Competitive Arena Phase 3 — Gameplay Engine timings, all admin-
+    # configurable per the spec. Per-question ANSWER time deliberately
+    # reuses questions.estimated_time_sec (same value solo practice already
+    # uses) rather than a new global — see app/services/competitive/
+    # gameplay_service.py.
+    competitive_match_countdown_seconds: int = Field(default=3)
+    competitive_reading_time_seconds: int = Field(default=4)
+    competitive_transition_time_seconds: int = Field(default=3)
+    competitive_points_per_correct: int = Field(default=100)
+
+    # Competitive Arena Phase 5 — Live Match Engine hardening. Speed bonus
+    # was explicitly deferred in Phase 3 ("prepare architecture only"); this
+    # is that future phase. In-game disconnect grace is deliberately
+    # separate from (and much shorter than) Phase 2's waiting-room grace —
+    # a mid-question disconnect can't wait minutes.
+    competitive_speed_bonus_enabled: bool = Field(default=True)
+    competitive_speed_bonus_max_points: int = Field(default=50)
+    competitive_ingame_disconnect_grace_seconds: int = Field(default=60)
+    competitive_heartbeat_timeout_seconds: int = Field(default=45)
+
+    # Competitive Arena Phase 6 — Matchmaking & Queue Engine. Initial MMR is
+    # read from here (not hardcoded) whenever a fresh CompetitiveStatistics
+    # row is created — see app/services/competitive/statistics_service.py.
+    # Expansion seconds/radius are parallel arrays: after
+    # expansion_seconds[i] elapsed, the search radius becomes
+    # expansion_radius[i] (spec example: ±50 at 20s, ±100 at 40s, ±150 at 60s).
+    competitive_mmr_initial_rating: int = Field(default=1000)
+    competitive_mmr_expansion_seconds: List[int] = Field(
+        default=[20, 40, 60],
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=False, server_default="'{20,40,60}'"),
+    )
+    competitive_mmr_expansion_radius: List[int] = Field(
+        default=[50, 100, 150],
+        sa_column=sa.Column(ARRAY(sa.Integer), nullable=False, server_default="'{50,100,150}'"),
+    )
+    competitive_matchmaking_accept_seconds: int = Field(default=15)
+    competitive_min_match_quality_score: int = Field(default=40)
+    competitive_language_fallback_seconds: int = Field(default=30)
+    competitive_queue_default_wait_estimate_sec: int = Field(default=60)
+
+    # Competitive Arena Phase 7 — Ranking System, Seasons & Leagues. MMR
+    # Calculator knobs (see app/services/competitive/ranking_service.py):
+    # k_factor is the classic Elo K-factor (max rating swing per match
+    # before streak/inflation adjustments); streak_bonus rewards a hot
+    # streak on top of the base Elo delta (win-only, capped); floor is the
+    # rating never-goes-below clamp; inflation dampening shrinks *gains*
+    # once a player is already above the threshold (spec: "rating inflation
+    # protection"). Season defaults are used whenever a
+    # CompetitiveSeason.reset_percentage is left NULL.
+    competitive_mmr_k_factor: int = Field(default=32)
+    competitive_mmr_streak_bonus_per_win: int = Field(default=1)
+    competitive_mmr_streak_bonus_max: int = Field(default=10)
+    competitive_mmr_floor: int = Field(default=0)
+    competitive_mmr_inflation_dampening_threshold: int = Field(default=2000)
+    competitive_mmr_inflation_dampening_factor: float = Field(default=0.5)
+    competitive_season_default_reset_strategy: str = Field(default="soft")
+    competitive_season_default_reset_percentage: int = Field(default=50)
+    competitive_season_ending_soon_hours: int = Field(default=72)
+
+    # Competitive Arena Phase 8 — Spectator Mode, Live Reactions & Predictions.
+    # Migration 083 already added these columns to platform_settings and
+    # app/routers/admin/settings.py's _serialize_competitive() already reads
+    # them, but the SQLModel class itself never declared them — a model/
+    # migration drift bug that made GET /api/admin/settings/competitive 500.
+    # Fixed here (found while building Phase 11 Part A, unrelated to Clash
+    # Club, but a one-line-per-field fix worth closing immediately).
+    competitive_spectator_max_default: Optional[int] = Field(default=None)
+    competitive_prediction_lock_before_position: int = Field(default=3)
+    competitive_prediction_reward_arena_xp: int = Field(default=10)
+    competitive_prediction_reward_spectator_xp: int = Field(default=5)
+    competitive_reaction_rate_limit_per_10s: int = Field(default=5)
+    competitive_chat_rate_limit_per_10s: int = Field(default=3)
+
+    # Competitive Arena Phase 9 — Tournament System scheduling knobs. Match
+    # start delay is the grace period between a round starting and matches
+    # auto-beginning (gives players time to see they've advanced); round
+    # advance grace is how long to wait for a disconnected/no-show player
+    # before the round can be force-progressed — see app/services/
+    # competitive/tournament_service.py (Part B consumes both).
+    competitive_tournament_match_start_delay_seconds: int = Field(default=30)
+    competitive_tournament_round_advance_grace_minutes: int = Field(default=5)
+
+    # Competitive Arena Phase 11 — Clash Club (Club vs Club), Part A config
+    # knobs. Unlike tournament/battle royale's entry_cost_ep (reserved-only
+    # in V1), club creation cost IS actually spent here — see
+    # app/services/club/club_service.py's create_club (reuses
+    # app/services/kp.py's spend_kp). min_level/min_rating/min_account_age_
+    # days are nullable = no requirement; competitive_club_default_max_
+    # members is the fallback a club's own max_members resolves to when not
+    # explicitly chosen at creation (from the fixed menu — see
+    # app/models/club.py's CLUB_MAX_MEMBERS_OPTIONS, mirrors Battle
+    # Royale's BATTLE_ROYALE_MAX_PLAYERS_OPTIONS pattern).
+    competitive_club_creation_cost_ep: int = Field(default=0)
+    competitive_club_min_level: Optional[int] = Field(default=None)
+    competitive_club_min_rating: Optional[int] = Field(default=None)
+    competitive_club_min_account_age_days: Optional[int] = Field(default=None)
+    competitive_club_default_max_members: int = Field(default=50)
+    competitive_club_name_min_length: int = Field(default=3)
+    competitive_club_name_max_length: int = Field(default=40)
+
+    # Phase 11, Part B — Club Reputation gain amounts (migration 090).
+    competitive_club_reputation_battle_win: int = Field(default=10)
+    competitive_club_reputation_activity_daily: int = Field(default=1)
+    competitive_club_reputation_achievement: int = Field(default=15)
+    competitive_club_reputation_abuse_report: int = Field(default=-25)
+
+    # Phase 11, Part C — Club Battle / Club Rating Engine config (migration
+    # 091). Victory gain/defeat loss are flat amounts (not full Elo, per
+    # spec's own "Victory gain / Defeat loss" wording) — protection_battles
+    # halves defeat_loss for a club's first N battles (spec: "Protection").
+    competitive_club_battle_team_size_default: int = Field(default=3)
+    competitive_club_battle_challenge_expiry_hours: int = Field(default=48)
+    competitive_club_rating_victory_gain: int = Field(default=25)
+    competitive_club_rating_defeat_loss: int = Field(default=20)
+    competitive_club_rating_protection_battles: int = Field(default=5)
+    competitive_club_rating_floor: int = Field(default=100)
+    competitive_club_battle_ep_reward_winner: int = Field(default=0)
+    competitive_club_battle_ep_reward_participation: int = Field(default=0)
+    competitive_club_battle_xp_reward_winner: int = Field(default=20)
+    competitive_club_battle_xp_reward_participation: int = Field(default=5)
+
+    # Phase 12 — Replay System & AI Match Analysis V2 (migration 092).
+    # Grade thresholds are accuracy-% cutoffs (descending) — see
+    # app/services/competitive/analysis_service.py's compute_match_grade.
+    competitive_grade_a_plus_min_accuracy: int = Field(default=95)
+    competitive_grade_a_min_accuracy: int = Field(default=85)
+    competitive_grade_b_plus_min_accuracy: int = Field(default=75)
+    competitive_grade_b_min_accuracy: int = Field(default=65)
+    competitive_grade_c_min_accuracy: int = Field(default=50)
+    competitive_grade_d_min_accuracy: int = Field(default=35)
+    competitive_replay_default_visibility: str = Field(default="private")
+
+    # Phase 13 — Ranked Ladder V2 (migration 093).
+    competitive_placement_matches_required: int = Field(default=10)
+    competitive_placement_k_factor_multiplier: float = Field(default=2.0)
+    competitive_ranked_match_types: str = Field(default="duel,battle_royale,tournament")
+    competitive_casual_ep_reward_winner: int = Field(default=15)
+    competitive_casual_ep_reward_participation: int = Field(default=5)
+    competitive_fair_play_disconnect_penalty: int = Field(default=-5)
+    competitive_fair_play_report_penalty: int = Field(default=-10)
+    competitive_fair_play_afk_penalty: int = Field(default=-8)
+    competitive_fair_play_clean_match_bonus: int = Field(default=1)
+    competitive_fair_play_min_for_ranked: int = Field(default=30)
+    competitive_inactivity_decay_enabled: bool = Field(default=False)
+    competitive_inactivity_decay_after_days: int = Field(default=30)
+    competitive_inactivity_decay_amount: int = Field(default=25)
+    competitive_inactivity_decay_floor: int = Field(default=800)
+    competitive_ranked_min_account_age_days: int = Field(default=0)
+    competitive_ranked_require_onboarding: bool = Field(default=False)
+    competitive_ranked_min_ep_balance: int = Field(default=0)
+    competitive_ranked_require_phone_verified: bool = Field(default=False)
+    competitive_ranked_require_email_verified: bool = Field(default=False)
+    competitive_promotion_series_enabled: bool = Field(default=False)
+
+    # Phase 14 — Achievements, Titles, Cosmetics & Player Progression (migration 094).
+    competitive_badge_showcase_max: int = Field(default=6)
+    competitive_sticker_showcase_max: int = Field(default=6)
+    competitive_achievement_showcase_max: int = Field(default=3)
+
+    # Phase 15 — Events, Missions, Daily Challenges & Live Operations (migration 095).
+    competitive_daily_missions_count: int = Field(default=3)
+    competitive_weekly_missions_count: int = Field(default=3)
+    competitive_monthly_missions_count: int = Field(default=2)
+    competitive_mission_free_rerolls_daily: int = Field(default=1)
+    competitive_mission_free_rerolls_weekly: int = Field(default=1)
+    competitive_login_streak_grace_hours: int = Field(default=6)
+    competitive_login_calendar_length: int = Field(default=30)
+    competitive_event_ending_soon_hours: int = Field(default=24)
+    competitive_happy_hour_starting_soon_minutes: int = Field(default=30)
+    competitive_mission_almost_done_pct: int = Field(default=80)
+
+    # Phase 16 — Production Hardening: feature flags, rate limits, moderation.
+    feature_battle_royale_enabled: bool = Field(default=True)
+    feature_tournament_enabled: bool = Field(default=True)
+    feature_replay_enabled: bool = Field(default=True)
+    feature_ai_analysis_enabled: bool = Field(default=True)
+    feature_ranked_enabled: bool = Field(default=True)
+    feature_liveops_enabled: bool = Field(default=True)
+    feature_clubs_enabled: bool = Field(default=True)
+    feature_spectator_enabled: bool = Field(default=True)
+    rate_limit_match_creation_per_10s: int = Field(default=5)
+    rate_limit_answer_submit_per_10s: int = Field(default=20)
+    rate_limit_replay_request_per_10s: int = Field(default=20)
+    rate_limit_leaderboard_refresh_per_10s: int = Field(default=10)
+    rate_limit_report_submit_per_10s: int = Field(default=3)
+    rate_limit_invitation_create_per_10s: int = Field(default=5)
+    moderation_default_mute_hours: int = Field(default=24)
+    moderation_default_suspension_days: int = Field(default=7)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -237,6 +445,18 @@ class Report(SQLModel, table=True):
     reason: Optional[str] = Field(default=None)
     status: str = Field(default="open")                  # public.report_status
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    # Phase 16 (Competitive Arena) — migration 096. Widened so this ONE
+    # moderation queue also serves Arena reports (cheating, harassment,
+    # offensive username/club, ...) instead of a parallel arena_reports
+    # table — category/evidence are Arena-specific but harmless no-ops for
+    # the pre-existing review-report flow (which never sets them).
+    category: Optional[str] = Field(default=None)
+    evidence: Any = Field(default_factory=list, sa_column=sa.Column(JSONB, nullable=False, server_default="'[]'::jsonb"))
+    reviewed_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    reviewed_at: Optional[datetime] = Field(default=None)
+    resolution_note: Optional[str] = Field(default=None)
+    merged_into_id: Optional[UUID] = Field(default=None, foreign_key="reports.id")
 
 
 class Invitation(SQLModel, table=True):

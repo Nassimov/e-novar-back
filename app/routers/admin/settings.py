@@ -8,7 +8,12 @@ from sqlmodel import Session
 
 from app.dependencies import get_admin_user, get_db
 from app.models.admin import PlatformSettings
-from app.schemas.admin import BankTransferSettings, BookingPolicySettings, PlatformPricingSettings
+from app.schemas.admin import (
+    BankTransferSettings,
+    BookingPolicySettings,
+    CompetitiveArenaSettings,
+    PlatformPricingSettings,
+)
 from app.services.pricing import get_platform_settings
 
 router = APIRouter(tags=["admin-settings"])
@@ -138,3 +143,65 @@ async def update_bank_transfer_settings(
     db.commit()
     db.refresh(settings)
     return _serialize_bank_transfer(settings)
+
+
+def _serialize_competitive(s: PlatformSettings) -> dict:
+    return {
+        "competitive_mmr_initial_rating": s.competitive_mmr_initial_rating,
+        "competitive_mmr_k_factor": s.competitive_mmr_k_factor,
+        "competitive_mmr_streak_bonus_per_win": s.competitive_mmr_streak_bonus_per_win,
+        "competitive_mmr_streak_bonus_max": s.competitive_mmr_streak_bonus_max,
+        "competitive_mmr_floor": s.competitive_mmr_floor,
+        "competitive_mmr_inflation_dampening_threshold": s.competitive_mmr_inflation_dampening_threshold,
+        "competitive_mmr_inflation_dampening_factor": s.competitive_mmr_inflation_dampening_factor,
+        "competitive_season_default_reset_strategy": s.competitive_season_default_reset_strategy,
+        "competitive_season_default_reset_percentage": s.competitive_season_default_reset_percentage,
+        "competitive_spectator_max_default": s.competitive_spectator_max_default,
+        "competitive_prediction_lock_before_position": s.competitive_prediction_lock_before_position,
+        "competitive_prediction_reward_arena_xp": s.competitive_prediction_reward_arena_xp,
+        "competitive_prediction_reward_spectator_xp": s.competitive_prediction_reward_spectator_xp,
+        "competitive_reaction_rate_limit_per_10s": s.competitive_reaction_rate_limit_per_10s,
+        "competitive_chat_rate_limit_per_10s": s.competitive_chat_rate_limit_per_10s,
+        "competitive_tournament_match_start_delay_seconds": s.competitive_tournament_match_start_delay_seconds,
+        "competitive_tournament_round_advance_grace_minutes": s.competitive_tournament_round_advance_grace_minutes,
+        "competitive_club_creation_cost_ep": s.competitive_club_creation_cost_ep,
+        "competitive_club_min_level": s.competitive_club_min_level,
+        "competitive_club_min_rating": s.competitive_club_min_rating,
+        "competitive_club_min_account_age_days": s.competitive_club_min_account_age_days,
+        "competitive_club_default_max_members": s.competitive_club_default_max_members,
+        "competitive_club_name_min_length": s.competitive_club_name_min_length,
+        "competitive_club_name_max_length": s.competitive_club_name_max_length,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/competitive")
+async def get_competitive_settings(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Phase 7's MMR Calculator knobs (migration 082 — shipped without an
+    admin endpoint until now, only league/season CRUD existed) folded
+    together with Phase 8's spectator/prediction/reaction/chat knobs
+    (migration 083) into one section — see CompetitiveArenaSettings'
+    docstring for why they're combined rather than split into a separate
+    /competitive-mmr section."""
+    return _serialize_competitive(get_platform_settings(db))
+
+
+@router.put("/competitive")
+async def update_competitive_settings(
+    body: CompetitiveArenaSettings,
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    settings = db.get(PlatformSettings, True)
+    if settings is None:
+        settings = PlatformSettings(id=True)
+        db.add(settings)
+    for field, value in body.model_dump().items():
+        setattr(settings, field, value)
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settings)
+    return _serialize_competitive(settings)

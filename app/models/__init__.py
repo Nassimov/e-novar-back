@@ -148,10 +148,39 @@ from app.models.admin import (  # noqa: F401
     Report,
 )
 
-# Competitive Arena (Phase 1 — foundation & architecture)
+# Competitive Arena (Phase 1 — foundation; Phase 2 — duel lifecycle;
+# Phase 3 — gameplay engine; Phase 4 — replay & AI analysis;
+# Phase 5 — live match engine hardening; Phase 6 — matchmaking;
+# Phase 7 — ranking system, seasons & leagues)
 from app.models.competitive import (  # noqa: F401
     CompetitiveInvitation,
+    CompetitiveLeague,
+    CompetitiveLearningRoadmapStep,
     CompetitiveMatch,
+    CompetitiveMatchAiAnalysis,
+    CompetitiveMatchConnection,
+    CompetitiveMatchEvent,
     CompetitiveMatchParticipant,
+    CompetitiveMatchPlayerStats,
+    CompetitiveMatchQuestion,
+    CompetitiveMatchReplay,
+    CompetitiveQueueEntry,
+    CompetitiveQueueEvent,
+    CompetitiveQuestionAttempt,
+    CompetitiveRatingHistory,
+    CompetitiveRecommendation,
+    CompetitiveRewardGrant,
+    CompetitiveScheduleProposal,
+    CompetitiveSeason,
+    CompetitiveSeasonReward,
+    CompetitiveSeasonStats,
     CompetitiveStatistics,
 )
+
+# Clash Club — Competitive Arena Phase 11, Part A (foundation: club entity,
+# membership, invitations). Deliberately its own module, not folded into
+# app.models.competitive — see app/models/club.py's module docstring.
+from app.models.club import Club, ClubInvitation, ClubMember  # noqa: F401
+
+# Generic social primitives
+from app.models.social import UserBlock  # noqa: F401

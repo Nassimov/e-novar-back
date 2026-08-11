@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
 
@@ -37,6 +38,24 @@ class Badge(SQLModel, table=True):
 
     # migration 058 — scopes a badge to student / teacher / both audiences
     audience: str = Field(default="student")
+
+    # Phase 14 (Competitive Arena) — migration 094. rarity/is_hidden satisfy
+    # spec's "Rarity"/"Hidden Rewards" sections for ANY badge, not just Arena
+    # ones (a legacy tutoring/homework badge could be marked rare too).
+    # reward_config is the multi-reward-type list beyond the existing single
+    # ep_reward int (e.g. a badge can ALSO grant a title/frame) — see
+    # reward_service.grant_reward's Phase 14 extension. event_key/
+    # available_from/available_until support spec's "Special Events" —
+    # temporary, campaign-scoped achievements.
+    rarity: str = Field(default="common")
+    is_hidden: bool = Field(default=False)
+    reward_config: Any = Field(
+        default_factory=list,
+        sa_column=sa.Column(JSONB, nullable=False, server_default="'[]'::jsonb"),
+    )
+    event_key: Optional[str] = Field(default=None)
+    available_from: Optional[datetime] = Field(default=None)
+    available_until: Optional[datetime] = Field(default=None)
 
 
 class UserBadge(SQLModel, table=True):
