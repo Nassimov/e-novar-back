@@ -31,6 +31,7 @@ from app.services.notification_engine import emit
 
 
 def _get_settings(db: Session) -> PlatformSettings:
+
     return db.get(PlatformSettings, True) or PlatformSettings()
 
 
