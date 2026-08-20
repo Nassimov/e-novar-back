@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 from sqlmodel import Session
 
 from app.config import get_settings
+from app.core.rate_limit import check_rate_limit, get_client_ip
 from app.dependencies import get_current_user, get_db
 from app.schemas.auth import (
     ForgotPasswordRequest,
@@ -27,9 +28,78 @@ router = APIRouter(tags=["auth"])
 settings = get_settings()
 
 
+# ── rate limiting helpers ────────────────────────────────────────────────────
+# Fixed-window limits via app.core.rate_limit (plain Redis INCR+EXPIRE).
+# Fail-open: a Redis outage must never take down login/register for regular
+# users — see app/core/rate_limit.py::check_rate_limit.
+
+def _guard_login_rate_limit(request: Request, email: str) -> None:
+    """Shared by /login and /signin (email path) — same key namespace so an
+    attacker can't dodge the limit by switching endpoints."""
+    ip = get_client_ip(request)
+    email_norm = (email or "").strip().lower()
+    # Per IP+account: stops credential stuffing against one account.
+    check_rate_limit(
+        f"ratelimit:login:ipacct:{ip}:{email_norm}",
+        limit=10,
+        window_seconds=5 * 60,
+        detail="Too many login attempts for this account. Please try again in a few minutes.",
+    )
+    # Per IP overall (harsher): stops one IP hammering many accounts.
+    check_rate_limit(
+        f"ratelimit:login:ip:{ip}",
+        limit=20,
+        window_seconds=60 * 60,
+        detail="Too many login attempts from this network. Please try again later.",
+    )
+
+
+def _guard_register_rate_limit(request: Request) -> None:
+    ip = get_client_ip(request)
+    check_rate_limit(
+        f"ratelimit:register:ip:{ip}",
+        limit=10,
+        window_seconds=60 * 60,
+        detail="Too many registration attempts from this network. Please try again later.",
+    )
+
+
+def _guard_otp_verify_rate_limit(request: Request, email: str) -> None:
+    ip = get_client_ip(request)
+    email_norm = (email or "").strip().lower()
+    check_rate_limit(
+        f"ratelimit:otp_verify:ipacct:{ip}:{email_norm}",
+        limit=5,
+        window_seconds=10 * 60,
+        detail="Too many OTP verification attempts. Please request a new code and try again later.",
+    )
+
+
+def _guard_forgot_password_rate_limit(request: Request, email: str) -> None:
+    ip = get_client_ip(request)
+    email_norm = (email or "").strip().lower()
+    check_rate_limit(
+        f"ratelimit:forgot_password:ipacct:{ip}:{email_norm}",
+        limit=5,
+        window_seconds=60 * 60,
+        detail="Too many password reset requests for this account. Please try again later.",
+    )
+
+
+def _guard_reset_password_rate_limit(request: Request) -> None:
+    ip = get_client_ip(request)
+    check_rate_limit(
+        f"ratelimit:reset_password:ip:{ip}",
+        limit=10,
+        window_seconds=60 * 60,
+        detail="Too many password reset attempts from this network. Please try again later.",
+    )
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+async def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     """Register a new user via Supabase Auth and create local profile."""
+    _guard_register_rate_limit(request)
     try:
         result = auth_service.register_user_in_supabase(
             email=payload.email,
@@ -85,8 +155,9 @@ async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, db: Session = Depends(get_db)):
+async def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """Sign in with email and password via Supabase Auth."""
+    _guard_login_rate_limit(request, payload.email)
     try:
         result = auth_service.login_with_supabase(payload.email, payload.password)
     except Exception as exc:
@@ -259,15 +330,17 @@ async def update_role(
 
 
 @router.post("/forgot-password")
-async def forgot_password(payload: ForgotPasswordRequest):
+async def forgot_password(payload: ForgotPasswordRequest, request: Request):
     """Send a password reset email."""
+    _guard_forgot_password_rate_limit(request, payload.email)
     auth_service.send_password_reset(payload.email)
     return {"message": "If that email is registered, you will receive a reset link"}
 
 
 @router.post("/verify-otp")
-async def verify_otp(payload: OtpVerifyRequest):
+async def verify_otp(payload: OtpVerifyRequest, request: Request):
     """Verify an OTP code sent to an email."""
+    _guard_otp_verify_rate_limit(request, payload.email)
     success = auth_service.verify_otp(payload.email, payload.token)
     if not success:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP code")
@@ -275,8 +348,9 @@ async def verify_otp(payload: OtpVerifyRequest):
 
 
 @router.post("/reset-password")
-async def reset_password(payload: ResetPasswordRequest):
+async def reset_password(payload: ResetPasswordRequest, request: Request):
     """Reset password using token from email."""
+    _guard_reset_password_rate_limit(request)
     try:
         auth_service.reset_password_with_token(payload.token, payload.new_password)
     except Exception as exc:
@@ -398,7 +472,7 @@ async def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(
 
 
 @router.post("/signin", response_model=TokenResponse)
-async def signin(payload: SignInRequest, db: Session = Depends(get_db)):
+async def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_db)):
     """
     Unified sign-in endpoint — choose one method:
 
@@ -479,6 +553,7 @@ async def signin(payload: SignInRequest, db: Session = Depends(get_db)):
             status_code=422,
             detail="Provide 'email' + 'password', or 'provider' + 'access_token'",
         )
+    _guard_login_rate_limit(request, payload.email)
     try:
         result = auth_service.login_with_supabase(payload.email, payload.password)
     except Exception:

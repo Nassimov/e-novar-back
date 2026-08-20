@@ -537,20 +537,43 @@ def admin_list_live_matches(
     total = len(matches)
     paged = matches[(page - 1) * size: page * size]
 
+    match_ids = [match.id for match in paged]
+    participants_by_match: Dict[UUID, List[Any]] = {mid: [] for mid in match_ids}
+    for p in match_service.get_participants_for_matches(db, match_ids):
+        participants_by_match[p.match_id].append(p)
+
+    profile_ids = {p.user_id for parts in participants_by_match.values() for p in parts}
+    profiles_by_id = {pr.id: pr for pr in db.exec(select(Profile).where(Profile.id.in_(profile_ids))).all()}
+
+    chat_counts = dict(
+        db.exec(
+            select(CompetitiveMatchChat.match_id, func.count())
+            .where(CompetitiveMatchChat.match_id.in_(match_ids))
+            .group_by(CompetitiveMatchChat.match_id)
+        ).all()
+    )
+    reaction_counts = dict(
+        db.exec(
+            select(CompetitiveMatchReaction.match_id, func.count())
+            .where(CompetitiveMatchReaction.match_id.in_(match_ids))
+            .group_by(CompetitiveMatchReaction.match_id)
+        ).all()
+    )
+
     items = []
     for match in paged:
-        participants = match_service.get_participants(db, match.id)
+        participants = participants_by_match[match.id]
         players = [
             LiveMatchParticipantOut(
                 user_id=p.user_id,
-                full_name=(db.get(Profile, p.user_id) or Profile(id=p.user_id)).full_name,
-                avatar_url=(db.get(Profile, p.user_id) or Profile(id=p.user_id)).avatar_url,
+                full_name=(profiles_by_id.get(p.user_id) or Profile(id=p.user_id)).full_name,
+                avatar_url=(profiles_by_id.get(p.user_id) or Profile(id=p.user_id)).avatar_url,
                 score=p.score,
             )
             for p in participants
         ]
-        chat_volume = db.exec(select(func.count()).select_from(CompetitiveMatchChat).where(CompetitiveMatchChat.match_id == match.id)).one()
-        reaction_volume = db.exec(select(func.count()).select_from(CompetitiveMatchReaction).where(CompetitiveMatchReaction.match_id == match.id)).one()
+        chat_volume = chat_counts.get(match.id, 0)
+        reaction_volume = reaction_counts.get(match.id, 0)
         spectator_count = spectator_presence_service.get_count(match.id)
         score_delta = abs(players[0].score - players[1].score) if len(players) == 2 else None
         item = LiveMatchOut(

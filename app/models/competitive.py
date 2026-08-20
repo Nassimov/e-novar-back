@@ -623,10 +623,10 @@ class CompetitiveSeasonStats(SQLModel, table=True):
     __tablename__ = "competitive_season_stats"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    season_id: UUID = Field(foreign_key="competitive_seasons.id")
+    season_id: UUID = Field(foreign_key="competitive_seasons.id", index=True)
     user_id: UUID = Field(foreign_key="profiles.id", index=True)
     mmr: int = Field()
-    league_id: Optional[UUID] = Field(default=None, foreign_key="competitive_leagues.id")
+    league_id: Optional[UUID] = Field(default=None, foreign_key="competitive_leagues.id", index=True)
     matches_played: int = Field(default=0)
     wins: int = Field(default=0)
     losses: int = Field(default=0)

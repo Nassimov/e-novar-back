@@ -189,6 +189,10 @@ def decline_proposal(db: Session, proposal: CompetitiveScheduleProposal, *, user
     if proposal.proposed_by == user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tu ne peux pas refuser ta propre proposition.")
 
+    participants = match_service.get_participants(db, proposal.match_id)
+    if user_id not in [p.user_id for p in participants]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tu ne participes pas à ce match.")
+
     proposal.status = "declined"
     proposal.responded_at = datetime.now(timezone.utc)
     db.add(proposal)

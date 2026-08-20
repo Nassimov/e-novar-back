@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field as PydField
 from sqlmodel import Session, func, select
 
+from app.core.cache import cache_invalidate
 from app.dependencies import get_admin_user, get_db
 from app.models.booking import TutoringSession
 from app.models.catalog import Level, Subject, TeacherSubjectPrice
@@ -143,6 +144,7 @@ async def create_subject(
     db.add(subject)
     db.commit()
     db.refresh(subject)
+    cache_invalidate("catalog:subjects")
     return _serialize_subject(subject, {}, {}, {})
 
 
@@ -175,6 +177,7 @@ async def update_subject(
     db.add(subject)
     db.commit()
     db.refresh(subject)
+    cache_invalidate("catalog:subjects")
     teachers, levels, sessions = _subject_stats(db)
     return _serialize_subject(subject, teachers, levels, sessions)
 
@@ -208,6 +211,7 @@ async def delete_subject(
 
     db.delete(subject)
     db.commit()
+    cache_invalidate("catalog:subjects")
     return None
 
 
@@ -249,6 +253,7 @@ async def create_level(
     db.add(level)
     db.commit()
     db.refresh(level)
+    cache_invalidate("catalog:levels")
     return {"id": str(level.id), "code": level.code, "label": level.label, "position": level.position}
 
 
@@ -281,6 +286,7 @@ async def update_level(
     db.add(level)
     db.commit()
     db.refresh(level)
+    cache_invalidate("catalog:levels")
     return {"id": str(level.id), "code": level.code, "label": level.label, "position": level.position}
 
 
@@ -313,6 +319,7 @@ async def delete_level(
 
     db.delete(level)
     db.commit()
+    cache_invalidate("catalog:levels")
     return None
 
 

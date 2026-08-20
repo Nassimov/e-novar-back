@@ -13,7 +13,6 @@ from app.models.scheduling import TeacherSlotSubject
 from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
 from app.models.profile import Profile
 from app.models.user import User
-from app.models.review import Review
 from app.services.pricing import compute_pack_prices, get_platform_settings
 from app.schemas.teacher import (
     BoostActivateRequest,
@@ -325,9 +324,21 @@ async def upload_diploma(
     db: Session = Depends(get_db),
 ):
     """Upload a diploma or certificate for the teacher."""
-    from app.services.storage import upload_file
+    from app.services.storage import (
+        DOCUMENT_CONTENT_TYPES, DOCUMENT_EXTENSIONS, DOCUMENT_MAX_SIZE,
+        UploadValidationError, upload_file, validate_upload,
+    )
 
     contents = await file.read()
+    try:
+        validate_upload(
+            filename=file.filename, content_type=file.content_type, size=len(contents),
+            allowed_content_types=DOCUMENT_CONTENT_TYPES, allowed_extensions=DOCUMENT_EXTENSIONS,
+            max_size=DOCUMENT_MAX_SIZE,
+        )
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     url = upload_file(contents, file.filename or "diploma.pdf", file.content_type, folder="diplomas")
 
     user = db.get(Profile, UUID(current_user["id"]))
@@ -1217,22 +1228,25 @@ async def list_evaluations(
     db: Session = Depends(get_db),
 ):
     """List evaluations written by the teacher."""
+    from app.models.evaluation import Evaluation
+
     user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    reviews = db.exec(
-        select(Review).where(Review.teacher_id == user.id)
+    evals = db.exec(
+        select(Evaluation).where(Evaluation.teacher_id == user.id)
     ).all()
     return [
         {
-            "id": str(r.id),
-            "student_id": str(r.student_id),
-            "rating": r.rating,
-            "comment": r.comment,
-            "created_at": r.created_at.isoformat(),
+            "id": str(e.id),
+            "student_id": str(e.student_id),
+            "session_id": str(e.session_id),
+            "rating": round((e.score_global or 0) / 4, 1),
+            "comment": e.comment,
+            "created_at": e.created_at.isoformat(),
         }
-        for r in reviews
+        for e in evals
     ]
 
 
@@ -1242,21 +1256,61 @@ async def create_evaluation(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Create a student evaluation."""
+    """Create a student evaluation.
+
+    Writes to the dedicated `evaluations` table (app.models.evaluation.Evaluation),
+    NOT `reviews` — the latter is student-authored feedback on a teacher and
+    feeds the recompute_teacher_rating() DB trigger that sets
+    teacher_profiles.rating_avg. Writing here previously used the `Review`
+    model with teacher_id=self, letting any teacher fabricate arbitrary
+    5-star "reviews" attributed to a real student they may never have
+    taught, directly inflating their own public rating_avg (and, since
+    Review.status defaults to 'visible', publishing the fake review on
+    their public profile). Requires an actual completed session with the
+    named student, one evaluation per session (matches the DB unique
+    constraint on evaluations.session_id).
+    """
+    from app.models.booking import TutoringSession
+    from app.models.evaluation import Evaluation
+
     user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    review = Review(
+    completed_sessions = db.exec(
+        select(TutoringSession)
+        .where(
+            TutoringSession.teacher_id == user.id,
+            TutoringSession.student_id == payload.student_id,
+            TutoringSession.status == "completed",
+        )
+        .order_by(TutoringSession.scheduled_at.desc())
+    ).all()
+    if not completed_sessions:
+        raise HTTPException(status_code=403, detail="Aucune séance complétée avec cet élève")
+
+    session_ids = [s.id for s in completed_sessions]
+    already_evaluated = {
+        e.session_id for e in db.exec(
+            select(Evaluation).where(Evaluation.session_id.in_(session_ids))
+        ).all()
+    }
+    session = next((s for s in completed_sessions if s.id not in already_evaluated), None)
+    if session is None:
+        raise HTTPException(status_code=409, detail="Toutes les séances avec cet élève ont déjà été évaluées")
+
+    evaluation = Evaluation(
+        session_id=session.id,
         teacher_id=user.id,
         student_id=payload.student_id,
-        rating=payload.rating,
+        score_global=payload.rating * 4,
         comment=payload.comment,
+        status="sent",
     )
-    db.add(review)
+    db.add(evaluation)
     db.commit()
-    db.refresh(review)
-    return {"id": str(review.id), "message": "Evaluation created"}
+    db.refresh(evaluation)
+    return {"id": str(evaluation.id), "message": "Evaluation created"}
 
 
 @router.put("/me/evaluations/{evaluation_id}")
@@ -1267,19 +1321,19 @@ async def update_evaluation(
     db: Session = Depends(get_db),
 ):
     """Update a student evaluation."""
-    from datetime import datetime
+    from app.models.evaluation import Evaluation
 
-    review = db.get(Review, evaluation_id)
-    if review is None:
+    evaluation = db.get(Evaluation, evaluation_id)
+    if evaluation is None:
         raise HTTPException(status_code=404, detail="Evaluation not found")
 
     user = db.get(Profile, UUID(current_user["id"]))
-    if user is None or review.teacher_id != user.id:
+    if user is None or evaluation.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    review.rating = payload.rating
-    review.comment = payload.comment
-    db.add(review)
+    evaluation.score_global = payload.rating * 4
+    evaluation.comment = payload.comment
+    db.add(evaluation)
     db.commit()
     return {"message": "Evaluation updated"}
 

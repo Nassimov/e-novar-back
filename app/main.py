@@ -272,9 +272,13 @@ _CORS_ORIGIN_REGEX = (
     r"^https?://localhost(:\d+)?$"                      # local dev (any port)
     r"|^https://e-novar\.com$"                          # production apex
     r"|^https://[a-z0-9-]+\.e-novar\.com$"              # preprod, recette, any branch
-    r"|^https://[a-z0-9-]+\.nacimmessi1010\.workers\.dev$"  # Cloudflare Workers dev
-    r"|^https://[a-z0-9-]+\.workers\.dev$"              # any Cloudflare Workers
-    r"|^https://[a-z0-9-]+\.pages\.dev$"                # any Cloudflare Pages
+    r"|^https://[a-z0-9-]+\.nacimmessi1010\.workers\.dev$"  # this project's Workers dev subdomain
+    # NOTE: intentionally NOT `[a-z0-9-]+\.workers\.dev` / `[a-z0-9-]+\.pages\.dev` —
+    # those are public suffixes anyone can register a free subdomain under, so with
+    # allow_credentials=True they'd let any attacker-owned *.pages.dev/*.workers.dev
+    # site be treated as a trusted CORS origin. Scoped to this project's own
+    # deployments only: e-novar.pages.dev (prod) and <preview-id>.e-novar.pages.dev.
+    r"|^https://(?:[a-z0-9-]+\.)?e-novar\.pages\.dev$"  # this project's Cloudflare Pages deployments
 )
 
 app.add_middleware(
@@ -620,14 +624,40 @@ async def _resolve_ws_user(token: str) -> tuple[str, str]:
     raise ValueError("invalid or expired token")
 
 
+def _extract_ws_token(websocket: WebSocket, token: str) -> str:
+    """Prefer the JWT carried as a WS subprotocol over the legacy `?token=`
+    query param.
+
+    The frontend now connects with `new WebSocket(url, ["access_token",
+    <jwt>])` — the browser sends that as the `Sec-WebSocket-Protocol` request
+    header during the handshake instead of putting the token in the URL.
+    Query strings routinely end up in reverse-proxy / uvicorn access logs;
+    handshake headers generally don't get logged the same way (though be
+    aware some proxies can be configured to log arbitrary headers too — this
+    reduces exposure, it doesn't guarantee zero exposure everywhere).
+
+    Falls back to the `token` query param so a browser tab still running the
+    previous frontend bundle (e.g. mid-deploy) keeps working, and so the
+    `wss://…?token=<jwt>` form documented for external/API consumers in the
+    OpenAPI docs keeps working too.
+    """
+    proto_header = websocket.headers.get("sec-websocket-protocol", "")
+    if proto_header:
+        parts = [p.strip() for p in proto_header.split(",") if p.strip()]
+        if len(parts) >= 2 and parts[0] == "access_token" and parts[1]:
+            return parts[1]
+    return token
+
+
 @app.websocket("/ws/messages")
 async def websocket_messages(websocket: WebSocket, token: str = ""):
-    """Real-time messaging channel. Connect with `?token=<jwt>`."""
+    """Real-time messaging channel. Connect with the JWT as a WS subprotocol
+    (`new WebSocket(url, ["access_token", jwt])`), or legacy `?token=<jwt>`."""
     import asyncio
     from app.core.connections import chat_connections
 
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /messages rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
@@ -739,8 +769,9 @@ async def websocket_messages(websocket: WebSocket, token: str = ""):
 async def websocket_classroom(websocket: WebSocket, session_id: str, token: str = ""):
     """Live classroom channel — whiteboard strokes, screen-share annotation,
     hand-raise, and REST-triggered chapter/quiz/file events (published by
-    app/routers/classroom.py via app.core.classroom_ws). Connect with
-    `?token=<jwt>`. Group lessons: every student has their own session_id
+    app/routers/classroom.py via app.core.classroom_ws). Connect with the JWT
+    as a WS subprotocol (preferred) or legacy `?token=<jwt>`. Group lessons:
+    every student has their own session_id
     but all resolve to the same broadcast room (see
     app.services.livekit_video.room_key_for_session)."""
     import asyncio
@@ -752,7 +783,7 @@ async def websocket_classroom(websocket: WebSocket, session_id: str, token: str 
     from app.services import livekit_video as _lk_video
 
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /classroom rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
@@ -856,7 +887,8 @@ async def websocket_classroom(websocket: WebSocket, session_id: str, token: str 
 @app.websocket("/ws/competitive/{match_id}")
 async def websocket_competitive(websocket: WebSocket, match_id: str, token: str = ""):
     """Competitive Arena real-time channel (Phase 2 lobby + Phase 5 live
-    gameplay push). Connect with `?token=<jwt>`. Mirrors /ws/classroom's
+    gameplay push). Connect with the JWT as a WS subprotocol (preferred) or
+    legacy `?token=<jwt>`. Mirrors /ws/classroom's
     per-match Redis-backed pub/sub room, one queue per connection.
 
     Phase 5: `gameplay_update` signals published via app.core.competitive_ws
@@ -875,7 +907,7 @@ async def websocket_competitive(websocket: WebSocket, match_id: str, token: str 
     from app.services.competitive import connection_service, gameplay_service, match_service, presence_service
 
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /competitive rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
@@ -1069,7 +1101,8 @@ async def websocket_competitive(websocket: WebSocket, match_id: str, token: str 
 @app.websocket("/ws/competitive/{match_id}/spectate")
 async def websocket_competitive_spectate(websocket: WebSocket, match_id: str, token: str = ""):
     """Competitive Arena Spectator Mode real-time channel (Phase 8). Connect
-    with `?token=<jwt>`. Structurally mirrors /ws/competitive/{match_id}
+    with the JWT as a WS subprotocol (preferred) or legacy `?token=<jwt>`.
+    Structurally mirrors /ws/competitive/{match_id}
     (the player channel just above) — same auth, same per-connection queue
     via competitive_connections (the same _ChatConnectionManager instance
     the player channel and /ws/chat both already share, just keyed by a
@@ -1100,7 +1133,7 @@ async def websocket_competitive_spectate(websocket: WebSocket, match_id: str, to
     from app.services.competitive import gameplay_service, spectator_presence_service, spectator_service
 
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /competitive/spectate rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
@@ -1234,7 +1267,8 @@ async def websocket_competitive_spectate(websocket: WebSocket, match_id: str, to
 @app.websocket("/ws/competitive/tournaments/{tournament_id}")
 async def websocket_competitive_tournament(websocket: WebSocket, tournament_id: str, token: str = ""):
     """Tournament System real-time channel (Phase 9 Part B). Connect with
-    `?token=<jwt>`. Any authenticated user may connect — no participant/
+    the JWT as a WS subprotocol (preferred) or legacy `?token=<jwt>`. Any
+    authenticated user may connect — no participant/
     capacity check, unlike the player/spectator gameplay channels: a
     tournament bracket is fully public data with no hidden-information
     concern.
@@ -1252,7 +1286,7 @@ async def websocket_competitive_tournament(websocket: WebSocket, tournament_id: 
     from app.core.tournament_ws import tournament_channel
 
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /competitive/tournaments rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
@@ -1335,7 +1369,8 @@ async def websocket_competitive_tournament(websocket: WebSocket, tournament_id: 
 @app.websocket("/ws/club/{club_id}")
 async def websocket_club(websocket: WebSocket, club_id: str, token: str = ""):
     """Clash Club real-time channel (Phase 11, Part B) — chat send/pin/
-    unpin/delete. Connect with `?token=<jwt>`. Members-only (unlike the
+    unpin/delete. Connect with the JWT as a WS subprotocol (preferred) or
+    legacy `?token=<jwt>`. Members-only (unlike the
     public tournament bracket channel this otherwise mirrors) — a club's
     chat is private to its roster, same gating club_chat_service already
     applies on every REST mutation. Signal-only, same shape as
@@ -1350,7 +1385,7 @@ async def websocket_club(websocket: WebSocket, club_id: str, token: str = ""):
     from app.models.club import ClubMember as _ClubMember
 
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /club rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")
@@ -1595,9 +1630,10 @@ def _handle_chat_typing(user_id: str, conv_id: str, is_typing: bool):
 
 @app.websocket("/ws/notifications")
 async def websocket_notifications(websocket: WebSocket, token: str = ""):
-    """Real-time notification channel. Connect with `?token=<jwt>`."""
+    """Real-time notification channel. Connect with the JWT as a WS
+    subprotocol (preferred) or legacy `?token=<jwt>`."""
     try:
-        user_id, _email = await _resolve_ws_user(token)
+        user_id, _email = await _resolve_ws_user(_extract_ws_token(websocket, token))
     except ValueError as exc:
         logger.info("WS /notifications rejected: %s", exc)
         await websocket.close(code=4001, reason="Unauthorized")

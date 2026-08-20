@@ -665,9 +665,13 @@ async def bulk_import(
     if not file.filename:
         raise HTTPException(status_code=422, detail="Fichier manquant.")
     fname = file.filename.lower()
+    if not fname.endswith((".csv", ".json", ".xlsx", ".xls")):
+        raise HTTPException(status_code=422, detail="Format non supporté (CSV, JSON ou XLSX attendu).")
     fmt = "csv" if fname.endswith(".csv") else "json" if fname.endswith(".json") else "xlsx"
 
     raw = await file.read()
+    if len(raw) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="Fichier trop volumineux (max 20 Mo).")
     uid = UUID(current_user["id"]) if current_user.get("id") else None
     now = datetime.utcnow()
 

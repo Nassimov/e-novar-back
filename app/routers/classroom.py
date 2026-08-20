@@ -525,6 +525,19 @@ async def upload_session_file(
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Fichier vide")
+
+    from app.services.storage import (
+        GENERAL_CONTENT_TYPES, GENERAL_EXTENSIONS, UploadValidationError, validate_upload,
+    )
+    try:
+        validate_upload(
+            filename=file.filename, content_type=file.content_type, size=len(raw),
+            allowed_content_types=GENERAL_CONTENT_TYPES, allowed_extensions=GENERAL_EXTENSIONS,
+            max_size=50 * 1024 * 1024,
+        )
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     url = upload_file(raw, file.filename or "fichier", file.content_type, folder=f"session-files/{session_id}")
 
     record = SessionFile(
@@ -631,9 +644,15 @@ async def list_quizzes(
     quizzes = db.exec(
         select(SessionQuiz).where(SessionQuiz.session_id == session_id).order_by(SessionQuiz.created_at)
     ).all()
+    quiz_ids = [q.id for q in quizzes]
+    answers_by_quiz: Dict[UUID, List[SessionQuizAnswer]] = {qid: [] for qid in quiz_ids}
+    if quiz_ids:
+        for a in db.exec(select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id.in_(quiz_ids))).all():
+            answers_by_quiz.setdefault(a.quiz_id, []).append(a)
+
     out: List[QuizOut] = []
     for q in quizzes:
-        all_answers = db.exec(select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id == q.id)).all()
+        all_answers = answers_by_quiz.get(q.id, [])
         my_answer = next((a for a in all_answers if a.student_id == uid), None)
         out.append(QuizOut(
             id=str(q.id), question=q.question, choices=q.choices, created_at=q.created_at.isoformat(),

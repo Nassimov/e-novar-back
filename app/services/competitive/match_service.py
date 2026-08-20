@@ -164,6 +164,19 @@ def get_participants(db: Session, match_id: UUID) -> List[CompetitiveMatchPartic
     )
 
 
+def get_participants_for_matches(db: Session, match_ids: List[UUID]) -> List[CompetitiveMatchParticipant]:
+    """Batched variant of get_participants for a list of match ids (avoids N+1 in list endpoints)."""
+    if not match_ids:
+        return []
+    return list(
+        db.exec(
+            select(CompetitiveMatchParticipant)
+            .where(CompetitiveMatchParticipant.match_id.in_(match_ids))
+            .where(CompetitiveMatchParticipant.left_at.is_(None))
+        ).all()
+    )
+
+
 def assert_can_view(match: CompetitiveMatch, participants: List[CompetitiveMatchParticipant], user_id: UUID) -> None:
     if match.visibility == "public":
         return

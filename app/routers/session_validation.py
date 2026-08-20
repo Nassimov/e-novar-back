@@ -312,11 +312,27 @@ async def dispute_session(
                 detail="Cette réservation n'est pas confirmée — impossible de signaler une absence dessus.",
             )
 
+    from app.services.storage import (
+        EVIDENCE_CONTENT_TYPES, EVIDENCE_EXTENSIONS, EVIDENCE_MAX_SIZE,
+        UploadValidationError, validate_upload,
+    )
+
+    if files and len(files) > 5:
+        raise HTTPException(status_code=400, detail="Maximum 5 fichiers de preuve autorisés")
+
     attachment_urls = []
     for f in files or []:
         raw = await f.read()
         if not raw:
             continue
+        try:
+            validate_upload(
+                filename=f.filename, content_type=f.content_type, size=len(raw),
+                allowed_content_types=EVIDENCE_CONTENT_TYPES, allowed_extensions=EVIDENCE_EXTENSIONS,
+                max_size=EVIDENCE_MAX_SIZE,
+            )
+        except UploadValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         url = upload_file(raw, f.filename or "attachment", f.content_type, folder=f"session-disputes/{session_id}")
         attachment_urls.append(url)
 

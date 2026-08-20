@@ -11,7 +11,7 @@ from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import text
 from sqlmodel import Session, select
 
-from app.dependencies import get_current_user, get_db, require_role
+from app.dependencies import get_admin_user, get_current_user, get_db, require_role
 from app.models.enums import StudentLessonFormat
 from app.models.parent_link import ParentStudentLink
 from app.models.payment import PaymentMethod
@@ -436,10 +436,18 @@ async def get_parent_profile(
         .where(ParentStudentLink.parent_id == uid)
         .where(ParentStudentLink.status == "accepted")
     ).all()
+    child_ids = [link.student_id for link in links]
+    profiles_by_id = {
+        p.id: p for p in db.exec(select(Profile).where(Profile.id.in_(child_ids)))
+    } if child_ids else {}
+    sp_by_user_id = {
+        sp.user_id: sp for sp in db.exec(select(StudentProfile).where(StudentProfile.user_id.in_(child_ids)))
+    } if child_ids else {}
+
     children: List[ParentChildLinkedResponse] = []
     for link in links:
-        child_profile = db.exec(select(Profile).where(Profile.id == link.student_id)).first()
-        child_sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == link.student_id)).first()
+        child_profile = profiles_by_id.get(link.student_id)
+        child_sp = sp_by_user_id.get(link.student_id)
         if child_profile is None:
             continue
         children.append(ParentChildLinkedResponse(
@@ -601,7 +609,7 @@ async def get_teacher_profile(
 @router.post("/teacher/{teacher_user_id}/approve", tags=["Admin — Teachers"])
 async def approve_teacher(
     teacher_user_id: UUID,
-    current_user: Dict[str, Any] = Depends(require_role("admin")),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Approve a teacher account: set status='approved' and award 50 EP."""
@@ -636,7 +644,7 @@ async def approve_teacher(
 @router.post("/teacher/{teacher_user_id}/reject", tags=["Admin — Teachers"])
 async def reject_teacher(
     teacher_user_id: UUID,
-    current_user: Dict[str, Any] = Depends(require_role("admin")),
+    current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
     """Reject a teacher account: delete from Supabase auth (cascades to all tables)."""

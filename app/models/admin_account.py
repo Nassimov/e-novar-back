@@ -27,7 +27,10 @@ class AdminAccount(SQLModel, table=True):
     totp_secret: Optional[str] = Field(default=None)
     role: str = Field(default="admin")           # 'super_admin' | 'admin'
     status: str = Field(default="invited")        # 'invited' | 'active' | 'suspended'
-    invited_by: Optional[UUID] = Field(default=None, foreign_key="admin_accounts.id")
+    invited_by: Optional[UUID] = Field(
+        default=None,
+        sa_column=sa.Column(sa.ForeignKey("admin_accounts.id", ondelete="SET NULL"), nullable=True),
+    )
     invite_token_hash: Optional[str] = Field(default=None)
     invite_expires_at: Optional[datetime] = Field(default=None)
     last_login_at: Optional[datetime] = Field(default=None)
@@ -39,9 +42,15 @@ class AdminAccountAuditLog(SQLModel, table=True):
     __tablename__ = "admin_account_audit_log"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    actor_admin_id: Optional[UUID] = Field(default=None, foreign_key="admin_accounts.id")
+    actor_admin_id: Optional[UUID] = Field(
+        default=None,
+        sa_column=sa.Column(sa.ForeignKey("admin_accounts.id", ondelete="SET NULL"), nullable=True),
+    )
     actor_label: Optional[str] = Field(default=None)
-    target_admin_id: Optional[UUID] = Field(default=None, foreign_key="admin_accounts.id")
+    target_admin_id: Optional[UUID] = Field(
+        default=None,
+        sa_column=sa.Column(sa.ForeignKey("admin_accounts.id", ondelete="SET NULL"), nullable=True),
+    )
     action: str = Field()
     metadata_: Optional[Any] = Field(default=None, sa_column=sa.Column("metadata", JSONB, nullable=True))
     created_at: datetime = Field(default_factory=datetime.utcnow)

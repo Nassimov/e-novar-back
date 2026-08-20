@@ -6,6 +6,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Depends
 from sqlmodel import Session
 
+from app.core.cache import cache_invalidate
 from app.dependencies import get_admin_user, get_db
 from app.models.admin import PlatformSettings
 from app.schemas.admin import (
@@ -67,6 +68,7 @@ async def update_pricing_settings(
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)
+    cache_invalidate("public:pricing")
     return _serialize(settings)
 
 
@@ -100,6 +102,7 @@ async def update_booking_policy_settings(
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)
+    cache_invalidate("public:booking-policy")
     return _serialize_booking_policy(settings)
 
 
@@ -142,6 +145,7 @@ async def update_bank_transfer_settings(
     settings.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(settings)
+    cache_invalidate("public:bank-transfer-info")
     return _serialize_bank_transfer(settings)
 
 

@@ -1089,12 +1089,40 @@ async def book_teacher_slot(
     else:
         _gate_one(slot_id, booking_date, slot_time, body.subject_id, body.level_id)
 
-    # Resolve the authoritative single-lesson price — slot-level price takes
-    # priority when the teacher set one for this specific slot, else the
-    # teacher's default rate. The client never supplies or influences this.
+    # Resolve the authoritative single-lesson price. Priority:
+    #   1. slot-level price, when the teacher set one for this specific slot
+    #   2. the teacher's per-subject/level price (TeacherSubjectPrice) — this
+    #      is what the student was actually shown on the teacher profile /
+    #      payment preview page (student.teacher.$teacherId.tsx's `combo.price`),
+    #      so it MUST be consulted here too, otherwise a "book without picking
+    #      a slot" flow silently falls through to price_per_session (a
+    #      separate, often-unset/stale field defaulting to 0) and the Stripe
+    #      Checkout Session ends up floored to the 50-cent minimum instead of
+    #      the amount actually previewed to the student.
+    #   3. the teacher's generic default rate, as a last resort.
+    # The client never supplies or influences this.
     resolved_slot = db.get(TeacherSlot, slot_id) if slot_id else None
     slot_price = getattr(resolved_slot, "price", 0) if resolved_slot else 0
-    price_single = slot_price if slot_price > 0 else tp.price_per_session
+
+    pricing_subject_id = body.subject_id
+    pricing_level_id = body.level_id
+    if pricing_subject_id is None and pricing_level_id is None and body.pack_sessions:
+        pricing_subject_id = body.pack_sessions[0].subject_id
+        pricing_level_id = body.pack_sessions[0].level_id
+
+    subject_price = 0
+    if not resolved_slot and pricing_subject_id is not None and pricing_level_id is not None:
+        tsp = db.exec(
+            select(TeacherSubjectPrice).where(
+                TeacherSubjectPrice.teacher_id == teacher_id,
+                TeacherSubjectPrice.subject_id == pricing_subject_id,
+                TeacherSubjectPrice.level_id == pricing_level_id,
+                TeacherSubjectPrice.active == True,  # noqa: E712
+            )
+        ).first()
+        subject_price = tsp.price_single if tsp else 0
+
+    price_single = slot_price if slot_price > 0 else (subject_price if subject_price > 0 else tp.price_per_session)
 
     pack_prices = compute_pack_prices(price_single, get_platform_settings(db))
     # A group ("collective") session is always priced lower than an
@@ -1279,6 +1307,25 @@ async def book_teacher_slot(
             detail="Vous avez déjà une réservation en attente ou confirmée pour cette date et cette heure avec ce professeur.",
         )
     db.refresh(booking)
+
+    # Notify the teacher that a booking is waiting for their confirmation —
+    # this was previously only fired for the edahabia webhook / manual cash
+    # approval paths, so the default cib (Stripe) flow never told the
+    # teacher anything (no dashboard badge, nothing in their pending list
+    # felt "new"). lesson_booked already has a seeded template (deep_link
+    # /teacher/sessions) — see docs/migrations/071_notification_templates_seed.sql.
+    from app.services.notification_engine import emit
+    student_profile_row = db.get(Profile, student_id)
+    emit(
+        db, event_type="lesson_booked", user_id=teacher_id,
+        context={
+            "student_name": student_profile_row.full_name if student_profile_row else "Un élève",
+            "date": str(booking.booking_date),
+            "time": booking.slot_time.strftime("%H:%M") if booking.slot_time else "",
+        },
+        data={"booking_id": str(booking.id)},
+        dedup_key=f"lesson_booked:{booking.id}",
+    )
 
     return {
         "booking_id": str(booking.id),

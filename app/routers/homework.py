@@ -110,9 +110,25 @@ async def create_homework(
     db: Session = Depends(get_db),
 ):
     """Create a homework assignment (teacher only)."""
+    from app.models.booking import TutoringSession
+
     teacher = db.get(Profile, UUID(current_user["id"]))
     if teacher is None:
         raise HTTPException(status_code=404, detail="Teacher not found")
+
+    has_relationship = db.exec(
+        select(TutoringSession)
+        .where(
+            TutoringSession.teacher_id == teacher.id,
+            TutoringSession.student_id == payload.student_id,
+        )
+        .limit(1)
+    ).first()
+    if has_relationship is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Vous ne pouvez assigner un devoir qu'à un élève avec qui vous avez une séance.",
+        )
 
     hw = Homework(
         teacher_id=teacher.id,
@@ -240,7 +256,10 @@ async def grade_homework(
     if hw.status != HomeworkStatus.submitted:
         raise HTTPException(status_code=400, detail="Homework has not been submitted yet")
 
-    kp_to_award = payload.kp_awarded if payload.kp_awarded is not None else hw.kp_reward
+    # Never let a teacher-supplied kp_awarded exceed the reward promised at
+    # assignment time — otherwise grading is an unbounded EP mint (EP is
+    # redeemable for real store items, see app/routers/store.py).
+    kp_to_award = min(payload.kp_awarded, hw.kp_reward) if payload.kp_awarded is not None else hw.kp_reward
     # Scale KP by score (20 = max)
     kp_earned = int(kp_to_award * (payload.score / 20.0))
 

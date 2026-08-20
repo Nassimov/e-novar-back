@@ -198,9 +198,14 @@ async def get_leaderboard(
         ).all()
         score_field = "total_earned"
 
+    user_ids = [account.user_id for account in accounts]
+    users_by_id = {
+        u.id: u for u in db.exec(select(User).where(User.id.in_(user_ids))).all()
+    }
+
     result = []
     for rank, account in enumerate(accounts, 1):
-        user = db.get(User, account.user_id)
+        user = users_by_id.get(account.user_id)
         if user:
             score = account.week_earned if period == "week" else account.total_earned
             result.append(LeaderboardEntry(

@@ -695,7 +695,19 @@ async def upload_attachment(
     if len(content) > _MAX_FILE:
         raise HTTPException(status_code=413, detail="Fichier trop volumineux (max 10 Mo).")
 
-    from app.services.storage import upload_file
+    from app.services.storage import (
+        GENERAL_CONTENT_TYPES, GENERAL_EXTENSIONS, UploadValidationError,
+        upload_file, validate_upload,
+    )
+    try:
+        validate_upload(
+            filename=file.filename, content_type=file.content_type, size=len(content),
+            allowed_content_types=GENERAL_CONTENT_TYPES, allowed_extensions=GENERAL_EXTENSIONS,
+            max_size=_MAX_FILE,
+        )
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     filename = file.filename or "file"
     url = upload_file(
         content,

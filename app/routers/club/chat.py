@@ -14,7 +14,7 @@ from app.core.club_ws import publish_club_event
 from app.dependencies import get_current_user, get_db
 from app.schemas.club import ChatMessageOut, SendChatMessageRequest
 from app.services.club import chat_service
-from app.services.club.permission_service import get_club_or_404
+from app.services.club.permission_service import get_club_or_404, require_permission
 
 router = APIRouter(tags=["Clubs"])
 
@@ -40,6 +40,7 @@ def list_messages(
     current_user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     get_club_or_404(db, club_id)
+    require_permission(db, club_id, UUID(current_user["id"]), "chat")
     return chat_service.list_messages(db, club_id, before=before, limit=limit)
 
 
@@ -48,6 +49,7 @@ def list_pinned(
     club_id: UUID, current_user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db),
 ):
     get_club_or_404(db, club_id)
+    require_permission(db, club_id, UUID(current_user["id"]), "chat")
     return chat_service.list_pinned(db, club_id)
 
 

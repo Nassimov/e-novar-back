@@ -1,12 +1,20 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
 from sqlmodel import Session
 
+from app.core.cache import cached_json
 from app.dependencies import get_db
 
 router = APIRouter(tags=["catalogs"])
+
+# Reference data (subjects/levels/goals/wilayas) barely ever changes but is
+# hit on nearly every page (registration, booking, search filters) — cache
+# it so most requests never touch Postgres. Short-ish TTL keeps an admin
+# edit (app/routers/admin/content.py) visible within a few minutes without
+# needing explicit invalidation wiring.
+_CATALOG_TTL = 300
 
 # ── Fallback hardcoded data (used only if DB tables are empty) ────────────────
 
@@ -110,9 +118,7 @@ STORE_REWARDS = [
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@router.get("/subjects")
-def get_subjects(db: Session = Depends(get_db)):
-    """Return all subjects ordered by position."""
+def _load_subjects(db: Session):
     try:
         rows = db.execute(
             text("SELECT name FROM public.subjects ORDER BY position, name")
@@ -123,9 +129,14 @@ def get_subjects(db: Session = Depends(get_db)):
     return {"subjects": subjects, "total": len(subjects)}
 
 
-@router.get("/levels")
-def get_levels(db: Session = Depends(get_db)):
-    """Return school levels grouped by main category."""
+@router.get("/subjects")
+def get_subjects(response: Response, db: Session = Depends(get_db)):
+    """Return all subjects ordered by position."""
+    response.headers["Cache-Control"] = f"public, max-age={_CATALOG_TTL}"
+    return cached_json("catalog:subjects", _CATALOG_TTL, lambda: _load_subjects(db))
+
+
+def _load_levels(db: Session):
     try:
         rows = db.execute(
             text("SELECT label, main_group FROM public.levels ORDER BY position")
@@ -148,9 +159,14 @@ def get_levels(db: Session = Depends(get_db)):
     return {"levels": all_levels, "total": len(all_levels), "groups": groups}
 
 
-@router.get("/goals")
-def get_goals(db: Session = Depends(get_db)):
-    """Return learning goals ordered by position."""
+@router.get("/levels")
+def get_levels(response: Response, db: Session = Depends(get_db)):
+    """Return school levels grouped by main category."""
+    response.headers["Cache-Control"] = f"public, max-age={_CATALOG_TTL}"
+    return cached_json("catalog:levels", _CATALOG_TTL, lambda: _load_levels(db))
+
+
+def _load_goals(db: Session):
     try:
         rows = db.execute(
             text("SELECT id, label FROM public.goal_definitions ORDER BY position")
@@ -161,9 +177,14 @@ def get_goals(db: Session = Depends(get_db)):
     return {"goals": goals, "total": len(goals)}
 
 
-@router.get("/wilayas")
-def get_wilayas(db: Session = Depends(get_db)):
-    """Return all 58 Algerian wilayas ordered by code."""
+@router.get("/goals")
+def get_goals(response: Response, db: Session = Depends(get_db)):
+    """Return learning goals ordered by position."""
+    response.headers["Cache-Control"] = f"public, max-age={_CATALOG_TTL}"
+    return cached_json("catalog:goals", _CATALOG_TTL, lambda: _load_goals(db))
+
+
+def _load_wilayas(db: Session):
     try:
         rows = db.execute(
             text("SELECT code, name FROM public.wilayas ORDER BY code")
@@ -174,7 +195,15 @@ def get_wilayas(db: Session = Depends(get_db)):
     return {"wilayas": wilayas, "total": len(wilayas)}
 
 
+@router.get("/wilayas")
+def get_wilayas(response: Response, db: Session = Depends(get_db)):
+    """Return all 58 Algerian wilayas ordered by code."""
+    response.headers["Cache-Control"] = f"public, max-age={_CATALOG_TTL}"
+    return cached_json("catalog:wilayas", _CATALOG_TTL, lambda: _load_wilayas(db))
+
+
 @router.get("/store/rewards")
-async def get_store_rewards():
+async def get_store_rewards(response: Response):
     """Return KP store rewards (static catalogue)."""
+    response.headers["Cache-Control"] = f"public, max-age={_CATALOG_TTL}"
     return {"rewards": STORE_REWARDS, "total": len(STORE_REWARDS)}

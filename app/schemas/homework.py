@@ -15,7 +15,7 @@ class HomeworkCreate(BaseModel):
     statement: str
     hints: List[str] = []
     due_at: Optional[datetime] = None
-    kp_reward: int = Field(default=50, ge=0)
+    kp_reward: int = Field(default=50, ge=0, le=500)
 
 
 class HomeworkResponse(BaseModel):
@@ -44,4 +44,4 @@ class HomeworkSubmitRequest(BaseModel):
 class HomeworkGradeRequest(BaseModel):
     score: float = Field(ge=0.0, le=20.0)
     feedback: Optional[str] = None
-    kp_awarded: Optional[int] = None  # if None, use homework.kp_reward
+    kp_awarded: Optional[int] = Field(default=None, ge=0)  # if None, use homework.kp_reward

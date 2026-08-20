@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import mimetypes
 import uuid
-from typing import Optional
+from typing import Iterable, Optional
 
 from app.config import get_settings
 from app.database import get_supabase_service
@@ -14,6 +14,92 @@ _JUSTIF_FOLDER = "challenge-justifications"
 
 def _bucket():
     return get_supabase_service().storage.from_(settings.supabase_storage_bucket)
+
+
+# ── Server-side upload guards (extension + declared MIME allow-list, size cap) ──
+#
+# A client can lie about Content-Type, so every endpoint that accepts an
+# UploadFile must check BOTH the filename extension and the declared MIME
+# type against an allow-list, and cap the byte size, before the bytes are
+# ever handed to Supabase Storage. This does not sniff magic bytes (no
+# python-magic dependency in this project), so it is not a defense against a
+# maliciously-crafted file whose bytes don't match its declared type — but it
+# does close the "no check at all" gap where any extension/any content-type/
+# any size was accepted.
+
+# Documents: diplomas, CVs, teacher onboarding paperwork.
+DOCUMENT_CONTENT_TYPES = {
+    "application/pdf",
+    "image/jpeg", "image/png", "image/webp",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+DOCUMENT_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".doc", ".docx"}
+DOCUMENT_MAX_SIZE = 15 * 1024 * 1024  # 15 MB
+
+# Chat attachments and classroom session files: broader mix, same allow-list
+# used by app/routers/files.py's general-purpose /upload endpoint.
+GENERAL_CONTENT_TYPES = {
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+    "application/pdf",
+    "video/mp4", "video/webm",
+    "audio/mpeg", "audio/wav",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+GENERAL_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif",
+    ".pdf",
+    ".mp4", ".webm",
+    ".mp3", ".wav",
+    ".doc", ".docx", ".xls", ".xlsx",
+}
+
+# Dispute/evidence attachments: images, PDF, short video clips.
+EVIDENCE_CONTENT_TYPES = {
+    "image/jpeg", "image/png", "image/webp",
+    "application/pdf",
+    "video/mp4", "video/webm", "video/quicktime",
+}
+EVIDENCE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf", ".mp4", ".webm", ".mov"}
+EVIDENCE_MAX_SIZE = 20 * 1024 * 1024  # 20 MB
+
+
+class UploadValidationError(ValueError):
+    """Raised by validate_upload() — callers translate this into a 400."""
+
+
+def validate_upload(
+    *,
+    filename: Optional[str],
+    content_type: Optional[str],
+    size: int,
+    allowed_content_types: Iterable[str],
+    allowed_extensions: Iterable[str],
+    max_size: int,
+) -> None:
+    """Server-side allow-list + size guard for an uploaded file.
+
+    Both the filename extension AND the client-declared content-type must be
+    on their respective allow-lists — a client lying about one alone isn't
+    enough to smuggle a disallowed type through. Raises UploadValidationError
+    with a user-facing message on any violation; callers turn that into an
+    HTTPException(400).
+    """
+    if size <= 0:
+        raise UploadValidationError("Le fichier est vide")
+    if size > max_size:
+        raise UploadValidationError(f"Fichier trop volumineux (max {max_size // (1024 * 1024)} Mo)")
+
+    name = filename or ""
+    ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+    if ext not in set(allowed_extensions):
+        raise UploadValidationError(f"Extension de fichier '{ext or '(aucune)'}' non autorisée")
+
+    if content_type not in set(allowed_content_types):
+        raise UploadValidationError(f"Type de fichier '{content_type}' non autorisé")
 
 
 def upload_file(

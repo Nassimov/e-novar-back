@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 import stripe as stripe_lib
@@ -8,6 +9,7 @@ from app.config import get_settings
 
 settings = get_settings()
 stripe_lib.api_key = settings.stripe_secret_key
+logger = logging.getLogger(__name__)
 
 
 def create_payment_intent(
@@ -73,6 +75,16 @@ def dzd_to_eur_cents(amount_dzd: int, dzd_per_eur: float) -> int:
     if dzd_per_eur <= 0:
         dzd_per_eur = 145.00  # defensive fallback — should never happen, admin field has a DB default
     eur_cents = round((amount_dzd / dzd_per_eur) * 100)
+    if eur_cents < 50:
+        # This floor exists for genuinely tiny/promo prices, but it has also
+        # masked real pricing bugs before (a booking resolving to amount_dzd=0
+        # silently became a plausible-looking "0.50€" charge instead of an
+        # obvious error) — log it so a wrong upstream price is caught fast.
+        logger.warning(
+            "dzd_to_eur_cents: amount_dzd=%s at rate=%s converts to %sc, floored to 50c — "
+            "verify the caller resolved a real price, not a stale/zero default",
+            amount_dzd, dzd_per_eur, eur_cents,
+        )
     return max(50, eur_cents)
 
 

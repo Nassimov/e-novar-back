@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.config import get_settings
+from app.core.rate_limit import check_rate_limit, get_client_ip
 from app.core.redis import get_redis_client
 from app.core.security import create_admin_jwt, decode_admin_jwt
 from app.dependencies import get_db
@@ -33,13 +34,8 @@ _LOCKOUT_TTL = 900       # 15 min lockout after max failures
 _CHALLENGE_TTL = 300     # 5 min to enter TOTP after step-1
 
 # ── helpers ───────────────────────────────────────────────────────────────────
-
-def _ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return (request.client.host if request.client else "") or "unknown"
-
+# get_client_ip (X-Forwarded-For aware) lives in app.core.rate_limit — shared
+# with app/routers/auth.py so both files agree on how the client IP is derived.
 
 def _fail_key(ip: str) -> str:
     return f"admin:login_failures:{ip}"
@@ -96,10 +92,28 @@ async def admin_step1(
     The challenge token expires in 5 minutes and is stored exclusively in Redis,
     tagged with which identity it belongs to so step 2 checks the right TOTP secret.
     """
-    ip = _ip(request)
-    _guard_brute_force(ip)
-
+    ip = get_client_ip(request)
     email = payload.email.strip().lower()
+
+    # Admin login is a high-value target: fail CLOSED if Redis is unreachable
+    # rather than let rate limiting silently disappear (unlike the regular
+    # user-facing auth endpoints in app/routers/auth.py, which fail open).
+    check_rate_limit(
+        f"ratelimit:admin_login:ipacct:{ip}:{email}",
+        limit=10,
+        window_seconds=5 * 60,
+        fail_open=False,
+        detail="Too many login attempts for this account. Please try again in a few minutes.",
+    )
+    check_rate_limit(
+        f"ratelimit:admin_login:ip:{ip}",
+        limit=20,
+        window_seconds=60 * 60,
+        fail_open=False,
+        detail="Too many login attempts from this network. Please try again later.",
+    )
+
+    _guard_brute_force(ip)
 
     # Both checks run to prevent enumeration (don't short-circuit on email mismatch)
     bootstrap_email_ok = email == settings.admin_email.strip().lower()
@@ -146,7 +160,25 @@ async def admin_step2(
     """
     import pyotp
 
-    ip = _ip(request)
+    ip = get_client_ip(request)
+
+    # OTP/TOTP codes are short (6 digits) and brute-forceable if unbounded —
+    # limit by both IP and the specific challenge token being attacked.
+    check_rate_limit(
+        f"ratelimit:admin_step2:ip:{ip}",
+        limit=5,
+        window_seconds=10 * 60,
+        fail_open=False,
+        detail="Too many 2FA attempts from this network. Please try again later.",
+    )
+    check_rate_limit(
+        f"ratelimit:admin_step2:token:{payload.challenge_token}",
+        limit=5,
+        window_seconds=10 * 60,
+        fail_open=False,
+        detail="Too many 2FA attempts for this login attempt. Please start over.",
+    )
+
     _guard_brute_force(ip)
 
     redis = get_redis_client()

@@ -19,6 +19,7 @@ from app.dependencies import get_current_user, get_db
 from app.models.competitive import CompetitiveMatch
 from app.schemas.club import ChallengeOut, ClubBattleStateOut, CreateChallengeRequest, RespondChallengeRequest
 from app.services.club import battle_service
+from app.services.club.permission_service import require_permission
 from app.services.competitive import match_service
 
 router = APIRouter(tags=["Clubs"])
@@ -43,6 +44,7 @@ def list_challenges(
     club_id: UUID, direction: str = Query(default="incoming"), status_filter: Optional[str] = Query(default="pending", alias="status"),
     current_user: Dict[str, Any] = Depends(get_current_user), db: Session = Depends(get_db),
 ):
+    require_permission(db, club_id, UUID(current_user["id"]), "view_analytics")
     return battle_service.list_challenges(db, club_id, direction=direction, status_filter=status_filter)
 
 

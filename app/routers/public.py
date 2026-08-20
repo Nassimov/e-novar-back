@@ -4,20 +4,31 @@ These endpoints are rate-limited via the API gateway but require no token.
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel
 from sqlalchemy import func, distinct
 from sqlmodel import Session, select
 
+from app.core.cache import cached_json
 from app.dependencies import get_db
 from app.models.kp import KpBalance
 from app.models.profile import Profile, TeacherProfile, StudentProfile, UserRole
 from app.services.pricing import get_platform_settings
 
 router = APIRouter()
+
+# These are hit unauthenticated, often on the home page / pre-booking flow —
+# cache to spare Postgres a round trip per visitor. Settings-derived values
+# use a short TTL and are invalidated immediately on admin write (see
+# app/routers/admin/settings.py); stats/leaderboard just tolerate a small
+# staleness window since they're aggregate/ranking data, not something a
+# user notices being 60s old.
+_SETTINGS_TTL = 120
+_STATS_TTL = 60
+_LEADERBOARD_TTL = 60
 
 
 class PricingSettingsPublic(BaseModel):
@@ -27,14 +38,17 @@ class PricingSettingsPublic(BaseModel):
 
 
 @router.get("/pricing", response_model=PricingSettingsPublic)
-async def get_public_pricing(db: Session = Depends(get_db)):
+async def get_public_pricing(response: Response, db: Session = Depends(get_db)):
     """Current pack/group discount percentages — used to preview prices pre-auth."""
-    settings = get_platform_settings(db)
-    return PricingSettingsPublic(
-        pack5_discount_percent=settings.pack5_discount_percent,
-        pack10_discount_percent=settings.pack10_discount_percent,
-        group_discount_percent=settings.group_discount_percent,
-    )
+    response.headers["Cache-Control"] = f"public, max-age={_SETTINGS_TTL}"
+    def _load():
+        settings = get_platform_settings(db)
+        return {
+            "pack5_discount_percent": settings.pack5_discount_percent,
+            "pack10_discount_percent": settings.pack10_discount_percent,
+            "group_discount_percent": settings.group_discount_percent,
+        }
+    return PricingSettingsPublic(**cached_json("public:pricing", _SETTINGS_TTL, _load))
 
 
 class BookingPolicyPublic(BaseModel):
@@ -44,16 +58,19 @@ class BookingPolicyPublic(BaseModel):
 
 
 @router.get("/booking-policy", response_model=BookingPolicyPublic)
-async def get_public_booking_policy(db: Session = Depends(get_db)):
+async def get_public_booking_policy(response: Response, db: Session = Depends(get_db)):
     """Timing rules shown as countdowns to the user (teacher's pending
     request auto-cancel deadline, student's pending-validation window) —
     admin-configurable in app/routers/admin/settings.py."""
-    settings = get_platform_settings(db)
-    return BookingPolicyPublic(
-        booking_teacher_response_hours=settings.booking_teacher_response_hours,
-        in_person_dispute_auto_resolve_hours=settings.in_person_dispute_auto_resolve_hours,
-        manual_payment_expiry_hours=settings.manual_payment_expiry_hours,
-    )
+    response.headers["Cache-Control"] = f"public, max-age={_SETTINGS_TTL}"
+    def _load():
+        settings = get_platform_settings(db)
+        return {
+            "booking_teacher_response_hours": settings.booking_teacher_response_hours,
+            "in_person_dispute_auto_resolve_hours": settings.in_person_dispute_auto_resolve_hours,
+            "manual_payment_expiry_hours": settings.manual_payment_expiry_hours,
+        }
+    return BookingPolicyPublic(**cached_json("public:booking-policy", _SETTINGS_TTL, _load))
 
 
 class BankTransferInfoPublic(BaseModel):
@@ -67,17 +84,20 @@ class BankTransferInfoPublic(BaseModel):
 
 
 @router.get("/bank-transfer-info", response_model=BankTransferInfoPublic)
-async def get_bank_transfer_info(db: Session = Depends(get_db)):
+async def get_bank_transfer_info(response: Response, db: Session = Depends(get_db)):
     """Platform's own receiving RIBs, shown to a student who picks the RIB
     CIB / RIB Edahabia payment method at booking (see student.payment.tsx) —
     admin-configurable in app/routers/admin/settings.py."""
-    settings = get_platform_settings(db)
-    return BankTransferInfoPublic(
-        beneficiary_name=settings.bank_beneficiary_name,
-        rib_cib=settings.platform_rib_cib,
-        rib_edahabia=settings.platform_rib_edahabia,
-        dzd_per_eur=settings.dzd_per_eur,
-    )
+    response.headers["Cache-Control"] = f"public, max-age={_SETTINGS_TTL}"
+    def _load():
+        settings = get_platform_settings(db)
+        return {
+            "beneficiary_name": settings.bank_beneficiary_name,
+            "rib_cib": settings.platform_rib_cib,
+            "rib_edahabia": settings.platform_rib_edahabia,
+            "dzd_per_eur": settings.dzd_per_eur,
+        }
+    return BankTransferInfoPublic(**cached_json("public:bank-transfer-info", _SETTINGS_TTL, _load))
 
 
 # ─── Response schemas ─────────────────────────────────────────────────────────
@@ -137,19 +157,16 @@ def _build_teacher_entry(tp: TeacherProfile, p: Profile, kb: Optional[KpBalance]
     )
 
 
-def _fetch_profile(db: Session, user_id: UUID) -> Optional[Profile]:
-    return db.exec(select(Profile).where(Profile.id == user_id)).first()
-
-
-def _fetch_kp(db: Session, user_id: UUID) -> Optional[KpBalance]:
-    return db.exec(select(KpBalance).where(KpBalance.user_id == user_id)).first()
-
-
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=PlatformStats)
-def get_platform_stats(db: Session = Depends(get_db)):
+def get_platform_stats(response: Response, db: Session = Depends(get_db)):
     """Return platform-wide aggregate numbers shown on the home page."""
+    response.headers["Cache-Control"] = f"public, max-age={_STATS_TTL}"
+    return PlatformStats(**cached_json("public:stats", _STATS_TTL, lambda: _load_platform_stats(db)))
+
+
+def _load_platform_stats(db: Session) -> dict:
     verified_teachers: int = db.exec(
         select(func.count()).select_from(TeacherProfile)
         .where(TeacherProfile.status == "approved", TeacherProfile.verified == True)
@@ -171,19 +188,24 @@ def get_platform_stats(db: Session = Depends(get_db)):
         .where(UserRole.role == "student", Profile.onboarding_completed == True)
     ).one() or 0
 
-    return PlatformStats(
-        verified_teachers=verified_teachers,
-        wilayas_covered=wilayas_covered,
-        active_students=active_students,
-    )
+    return {
+        "verified_teachers": verified_teachers,
+        "wilayas_covered": wilayas_covered,
+        "active_students": active_students,
+    }
 
 
 @router.get("/leaderboard", response_model=LeaderboardResponse)
-def get_leaderboard(db: Session = Depends(get_db)):
+def get_leaderboard(response: Response, db: Session = Depends(get_db)):
     """
     Return this week's top teachers (by earnings & by rating) and
     top students (by weekly EP earned). Used on the home page hero.
     """
+    response.headers["Cache-Control"] = f"public, max-age={_LEADERBOARD_TTL}"
+    return LeaderboardResponse(**cached_json("public:leaderboard", _LEADERBOARD_TTL, lambda: _load_leaderboard(db)))
+
+
+def _load_leaderboard(db: Session) -> dict:
     # ── Top 3 teachers by wallet balance (total earnings held on platform) ──
     top_earning_tps = db.exec(
         select(TeacherProfile)
@@ -191,14 +213,6 @@ def get_leaderboard(db: Session = Depends(get_db)):
         .order_by(TeacherProfile.wallet_balance_dzd.desc())
         .limit(3)
     ).all()
-
-    top_by_earnings: List[TeacherLeaderEntry] = []
-    for tp in top_earning_tps:
-        p = _fetch_profile(db, tp.user_id)
-        if not p:
-            continue
-        kb = _fetch_kp(db, tp.user_id)
-        top_by_earnings.append(_build_teacher_entry(tp, p, kb, "earnings"))
 
     # ── Top 3 teachers by rating (minimum 3 reviews required) ──
     top_rating_tps = db.exec(
@@ -208,13 +222,34 @@ def get_leaderboard(db: Session = Depends(get_db)):
         .limit(3)
     ).all()
 
-    top_by_rating: List[TeacherLeaderEntry] = []
-    for tp in top_rating_tps:
-        p = _fetch_profile(db, tp.user_id)
+    # Batch-fetch profiles + KP balances for every teacher involved in either
+    # list in one round trip each, instead of two queries per teacher in a
+    # Python loop (was up to 12 extra queries on an unauthenticated,
+    # home-page-hero endpoint hit by every visitor).
+    teacher_ids = list({tp.user_id for tp in (*top_earning_tps, *top_rating_tps)})
+    profiles_by_id: Dict[UUID, Profile] = {}
+    kp_by_id: Dict[UUID, KpBalance] = {}
+    if teacher_ids:
+        profiles_by_id = {
+            p.id: p for p in db.exec(select(Profile).where(Profile.id.in_(teacher_ids))).all()
+        }
+        kp_by_id = {
+            kb.user_id: kb for kb in db.exec(select(KpBalance).where(KpBalance.user_id.in_(teacher_ids))).all()
+        }
+
+    top_by_earnings: List[TeacherLeaderEntry] = []
+    for tp in top_earning_tps:
+        p = profiles_by_id.get(tp.user_id)
         if not p:
             continue
-        kb = _fetch_kp(db, tp.user_id)
-        top_by_rating.append(_build_teacher_entry(tp, p, kb, "rating"))
+        top_by_earnings.append(_build_teacher_entry(tp, p, kp_by_id.get(tp.user_id), "earnings"))
+
+    top_by_rating: List[TeacherLeaderEntry] = []
+    for tp in top_rating_tps:
+        p = profiles_by_id.get(tp.user_id)
+        if not p:
+            continue
+        top_by_rating.append(_build_teacher_entry(tp, p, kp_by_id.get(tp.user_id), "rating"))
 
     # Featured = best rated teacher (most reviews as tiebreaker)
     featured_teacher = top_by_rating[0] if top_by_rating else (top_by_earnings[0] if top_by_earnings else None)
@@ -244,9 +279,9 @@ def get_leaderboard(db: Session = Depends(get_db)):
             wilaya=p.wilaya,
         ))
 
-    return LeaderboardResponse(
-        top_by_earnings=top_by_earnings,
-        top_by_rating=top_by_rating,
-        top_students=top_students,
-        featured_teacher=featured_teacher,
-    )
+    return {
+        "top_by_earnings": [e.model_dump() for e in top_by_earnings],
+        "top_by_rating": [e.model_dump() for e in top_by_rating],
+        "top_students": [e.model_dump() for e in top_students],
+        "featured_teacher": featured_teacher.model_dump() if featured_teacher else None,
+    }

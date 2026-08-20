@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from app.core.rate_limit import check_rate_limit, get_client_ip
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.booking import Booking, TutoringSession
 from app.models.catalog import Subject
@@ -162,11 +163,22 @@ async def parent_dashboard(
     children: list[ParentChild] = []
     total_today = 0
 
+    child_ids = [link.student_id for link in links]
+    profiles_by_id = {
+        p.id: p for p in db.exec(select(Profile).where(Profile.id.in_(child_ids)))
+    } if child_ids else {}
+    sp_by_user_id = {
+        sp.user_id: sp for sp in db.exec(select(StudentProfile).where(StudentProfile.user_id.in_(child_ids)))
+    } if child_ids else {}
+    kp_by_user_id = {
+        kp.user_id: kp for kp in db.exec(select(KpBalance).where(KpBalance.user_id.in_(child_ids)))
+    } if child_ids else {}
+
     for link in links:
         child_id = link.student_id
-        child_profile = db.exec(select(Profile).where(Profile.id == child_id)).first()
-        child_sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == child_id)).first()
-        child_kp = db.exec(select(KpBalance).where(KpBalance.user_id == child_id)).first()
+        child_profile = profiles_by_id.get(child_id)
+        child_sp = sp_by_user_id.get(child_id)
+        child_kp = kp_by_user_id.get(child_id)
 
         if not child_profile:
             continue
@@ -225,10 +237,18 @@ async def list_children(
         .where(ParentStudentLink.status == "accepted")
     ).all()
 
+    child_ids = [link.student_id for link in links]
+    profiles_by_id = {
+        p.id: p for p in db.exec(select(Profile).where(Profile.id.in_(child_ids)))
+    } if child_ids else {}
+    sp_by_user_id = {
+        sp.user_id: sp for sp in db.exec(select(StudentProfile).where(StudentProfile.user_id.in_(child_ids)))
+    } if child_ids else {}
+
     children = []
     for link in links:
-        p = db.exec(select(Profile).where(Profile.id == link.student_id)).first()
-        sp = db.exec(select(StudentProfile).where(StudentProfile.user_id == link.student_id)).first()
+        p = profiles_by_id.get(link.student_id)
+        sp = sp_by_user_id.get(link.student_id)
         if p:
             children.append({
                 "student_id": str(link.student_id),
@@ -244,9 +264,33 @@ class LinkChildRequest(BaseModel):
     student_code: str
 
 
+def _guard_link_child_rate_limit(request: Request, uid: UUID) -> None:
+    """student_code is a short, low-entropy code (e.g. "KRN-2025-1234" — only
+    ~9000 possible values) — the only thing standing between "any parent" and
+    "any child's account" is that this code isn't guessable in practice.
+    Without a limit here, an attacker could brute-force codes by hammering
+    this endpoint. Mirrors the OTP-verify guard in app/routers/auth.py
+    (per-account+IP and per-IP, fail-open on a Redis outage so a blip never
+    blocks legitimate parents from linking their own kids)."""
+    ip = get_client_ip(request)
+    check_rate_limit(
+        f"ratelimit:link_child:ipacct:{ip}:{uid}",
+        limit=8,
+        window_seconds=10 * 60,
+        detail="Trop de tentatives de liaison. Veuillez réessayer dans quelques minutes.",
+    )
+    check_rate_limit(
+        f"ratelimit:link_child:ip:{ip}",
+        limit=30,
+        window_seconds=60 * 60,
+        detail="Trop de tentatives de liaison depuis ce réseau. Veuillez réessayer plus tard.",
+    )
+
+
 @router.post("/children/link")
 async def link_child(
     payload: LinkChildRequest,
+    request: Request,
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
 ):
@@ -254,6 +298,7 @@ async def link_child(
     as the parent-onboarding batch link in app/routers/onboarding.py (by
     StudentProfile.student_code), just usable one child at a time afterwards."""
     uid = UUID(current_user["id"])
+    _guard_link_child_rate_limit(request, uid)
     code = payload.student_code.strip().upper()
 
     sp = db.exec(select(StudentProfile).where(StudentProfile.student_code == code)).first()

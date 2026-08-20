@@ -632,7 +632,10 @@ async def upload_teacher_document(
     CV uploads use a fixed path (overwrite on re-upload).
     Diploma uploads use a unique path per file.
     """
-    from app.services.storage import upload_file as _upload
+    from app.services.storage import (
+        DOCUMENT_CONTENT_TYPES, DOCUMENT_EXTENSIONS, DOCUMENT_MAX_SIZE,
+        UploadValidationError, upload_file as _upload, validate_upload,
+    )
     uid = current_user["id"]
 
     if not file.filename:
@@ -641,6 +644,15 @@ async def upload_teacher_document(
     file_bytes = await file.read()
     if len(file_bytes) == 0:
         raise HTTPException(status_code=400, detail="Empty file")
+
+    try:
+        validate_upload(
+            filename=file.filename, content_type=file.content_type, size=len(file_bytes),
+            allowed_content_types=DOCUMENT_CONTENT_TYPES, allowed_extensions=DOCUMENT_EXTENSIONS,
+            max_size=DOCUMENT_MAX_SIZE,
+        )
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     if doc_type == "cv":
         ext = (file.filename.rsplit(".", 1)[-1] if "." in file.filename else "pdf")
