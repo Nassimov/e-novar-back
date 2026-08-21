@@ -1018,6 +1018,38 @@ async def accept_booking(
         if slot and slot.teacher_id == teacher_id:
             slot.status = "booked"
             db.add(slot)
+    elif booking.formula == "single" and booking.slot_time is not None:
+        # Ad-hoc request — the student proposed a date/time with no
+        # published TeacherSlot behind it (see student.booking.schedule.tsx's
+        # manual-proposal fallback). Now that the teacher has accepted,
+        # materialize a real TeacherSlot so their calendar actually shows
+        # this time as occupied (previously nothing reflected it at all —
+        # another teacher-managed booking or a newly-published slot could
+        # silently collide with it).
+        import datetime as dt
+        from app.models.booking import TutoringSession
+
+        start_dt = dt.datetime.combine(booking.booking_date, booking.slot_time)
+        end_dt = start_dt + dt.timedelta(minutes=booking.duration_min)
+        new_slot = TeacherSlot(
+            teacher_id=teacher_id,
+            slot_date=booking.booking_date,
+            start_time=booking.slot_time,
+            end_time=end_dt.time(),
+            type=booking.session_type,
+            mode=booking.mode,
+            price=booking.amount,
+            status="booked",
+        )
+        db.add(new_slot)
+        db.flush()
+        session_row = db.exec(
+            select(TutoringSession).where(TutoringSession.booking_id == booking.id)
+        ).first()
+        if session_row and session_row.subject_id and session_row.level_id:
+            db.add(TeacherSlotSubject(slot_id=new_slot.id, subject_id=session_row.subject_id, level_id=session_row.level_id))
+        booking.slot_id = new_slot.id
+        db.add(booking)
 
     # Wallet crediting no longer happens here. Payout is per-lesson, not
     # per-booking: accepting a booking unlocks it for scheduling, but each

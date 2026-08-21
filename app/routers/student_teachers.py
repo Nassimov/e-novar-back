@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from datetime import date as dt_date, date, timedelta
@@ -22,6 +23,8 @@ from app.schemas.teacher import SlotSubjectLevelResponse
 from app.services import matching
 from app.services.boost import is_boost_active
 from app.services.tenure import experience_years_from
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Student"])
 
@@ -125,6 +128,48 @@ def _resolve_requested_subject_level(
 # teacher no-response auto-cancel — the last one lives in
 # app/workers/booking_tasks.py).
 
+def _release_if_abandoned_checkout(db: Session, booking: "Booking") -> bool:
+    """
+    A `cib` booking is created (and the slot/dedup-key claimed) BEFORE the
+    student ever reaches Stripe Checkout — necessary so a rejected request
+    never has payment-gateway side effects (see the comment above the
+    booking-safety gate). The flip side: clicking "Payer", abandoning the
+    Stripe page (e.g. browser back), then clicking "Payer" again used to
+    hit "Vous avez déjà réservé ce créneau." against that same still-pending,
+    never-paid booking — confusing, since the student never got anywhere
+    near completing a payment.
+
+    Called right before that 409 would fire: if the blocking booking is a
+    `cib` booking whose Stripe Checkout was genuinely never completed (no
+    PaymentIntent, or one that never reached requires_capture/succeeded —
+    payments here are auth-only via manual capture, see
+    app.services.stripe.create_checkout_session), cancel it on the spot and
+    let the new attempt through instead of making the student wait for the
+    24h Celery sweep (app.workers.booking_tasks.task_auto_cancel_unanswered_bookings).
+    Mutates `booking` and calls db.add() but does not commit — the caller's
+    existing transaction commits it together with the new booking, so the
+    cancellation and the new attempt are atomic.
+
+    Returns True if the booking was released (caller should NOT treat it as
+    blocking), False if it's still a legitimate active/paid booking (caller
+    should still 409).
+    """
+    if booking.payment_method != "cib" or not booking.stripe_cs_id or booking.status != "pending":
+        return False
+    try:
+        from app.services.stripe import get_checkout_session
+        cs = get_checkout_session(booking.stripe_cs_id)
+    except Exception:
+        logger.warning("could not check Stripe session %s for booking %s — treating as still active", booking.stripe_cs_id, booking.id, exc_info=True)
+        return False
+    if cs.get("payment_intent_status") in ("requires_capture", "succeeded"):
+        return False  # checkout was actually completed — this IS a real active booking
+    booking.status = "cancelled"
+    booking.cancelled_reason = "payment_never_completed"
+    db.add(booking)
+    return True
+
+
 def _claim_slot_or_409(db: Session, slot_id: UUID, student_id: UUID) -> TeacherSlot:
     """
     Atomically claim a seat on a TeacherSlot, correct for both individual
@@ -143,14 +188,14 @@ def _claim_slot_or_409(db: Session, slot_id: UUID, student_id: UUID) -> TeacherS
             status_code=409,
             detail="Ce créneau n'est plus disponible. Merci de rafraîchir et choisir un autre horaire.",
         )
-    already = db.exec(
-        select(sa_func.count()).select_from(Booking).where(
+    existing_own = db.exec(
+        select(Booking).where(
             Booking.slot_id == slot_id,
             Booking.student_id == student_id,
             Booking.status.in_(["pending", "confirmed"]),
         )
-    ).one()
-    if already:
+    ).all()
+    if any(not _release_if_abandoned_checkout(db, b) for b in existing_own):
         raise HTTPException(status_code=409, detail="Vous avez déjà réservé ce créneau.")
     active_count = db.exec(
         select(sa_func.count()).select_from(Booking).where(
@@ -183,7 +228,7 @@ def _check_no_slot_duplicate(
             Booking.status.in_(["pending", "confirmed"]),
         )
     ).first()
-    if existing:
+    if existing and not _release_if_abandoned_checkout(db, existing):
         raise HTTPException(
             status_code=409,
             detail="Vous avez déjà une réservation en attente ou confirmée pour cette date et cette heure avec ce professeur.",
