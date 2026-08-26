@@ -38,7 +38,12 @@ class Booking(SQLModel, table=True):
     booking_date: dt.date = Field(sa_column=sa.Column("date", sa.Date, nullable=False))
     slot_time: Optional[dt.time] = Field(default=None)
     duration_min: int = Field(default=90)
-    amount: int = Field(default=0)                       # DZD
+    # Smallest whole unit of `currency` (migration 100): whole DZD for a
+    # DZD-priced teacher (no real subunit in this business), EUR *cents* for
+    # a EUR-priced teacher (matches Stripe's own convention and
+    # TeacherProfile.price_per_session's unit for that currency) — never sum
+    # this across rows with different `currency` values without converting.
+    amount: int = Field(default=0)
     currency: str = Field(default="DZD")
     kp_reward: int = Field(default=0)
     status: str = Field(default="pending")               # public.booking_status

@@ -69,6 +69,7 @@ class AdminReviewItem(BaseModel):
     teacher_confirmed_at: Optional[datetime] = None
     scheduled_at: Optional[datetime] = None
     amount: Optional[int] = None
+    currency: str = "DZD"
     created_at: datetime
 
 

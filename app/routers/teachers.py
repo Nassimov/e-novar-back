@@ -14,6 +14,7 @@ from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDip
 from app.models.profile import Profile
 from app.models.user import User
 from app.services.pricing import compute_pack_prices, get_platform_settings
+from app.services.teacher_currency import currency_for_country
 from app.schemas.teacher import (
     BoostActivateRequest,
     BoostStatusResponse,
@@ -106,6 +107,8 @@ def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> T
         headline=profile.headline,
         subjects=_subjects_for(profile.user_id, db, settings),
         price_per_session=profile.price_per_session,
+        currency=profile.currency,
+        country=profile.country,
         delivery_options=_delivery_options_for(profile.user_id, db),
         rating=profile.rating_avg,
         reviews_count=profile.reviews_count,
@@ -249,12 +252,25 @@ async def update_my_teacher_profile(
         profile.bio_long = payload.bio
     if payload.price_per_session is not None:
         profile.price_per_session = payload.price_per_session
-    if payload.teaching_wilaya is not None:
-        profile.teaching_wilaya = payload.teaching_wilaya
-    if payload.teaching_wilayas is not None:
-        profile.teaching_wilayas = payload.teaching_wilayas
-    if payload.teaching_nationwide is not None:
-        profile.teaching_nationwide = payload.teaching_nationwide
+    if payload.country is not None:
+        profile.country = payload.country
+        # currency is always derived from country, never independently
+        # settable — see app/services/teacher_currency.py.
+        profile.currency = currency_for_country(profile.country)
+    if profile.country == "DZ":
+        if payload.teaching_wilaya is not None:
+            profile.teaching_wilaya = payload.teaching_wilaya
+        if payload.teaching_wilayas is not None:
+            profile.teaching_wilayas = payload.teaching_wilayas
+        if payload.teaching_nationwide is not None:
+            profile.teaching_nationwide = payload.teaching_nationwide
+    elif payload.country is not None:
+        # Just moved to "abroad" this request — a foreign teacher has no
+        # meaningful wilaya scoping, never trust the client to have omitted
+        # these itself (mirrors app/routers/onboarding.py's enforcement).
+        profile.teaching_wilaya = None
+        profile.teaching_wilayas = []
+        profile.teaching_nationwide = False
     if payload.languages is not None:
         profile.languages = payload.languages
     db.add(profile)
@@ -272,6 +288,11 @@ async def update_my_teacher_profile(
                 raise HTTPException(
                     status_code=422,
                     detail="Un cours 'chez l'élève' ne peut pas être en groupe (individuel uniquement).",
+                )
+            if profile.country != "DZ" and opt.mode != "online":
+                raise HTTPException(
+                    status_code=422,
+                    detail="A teacher based abroad can only offer online sessions.",
                 )
         # De-duplicate before checking emptiness, so callers can't sneak past the
         # at-least-one rule with repeated identical entries.
@@ -806,6 +827,7 @@ async def get_wallet(
     return WalletResponse(
         wallet_balance_dzd=tp.wallet_balance_dzd if tp else 0,
         total_earned_dzd=int(total_earned_dzd),
+        currency=tp.currency if tp else "DZD",
         payout_mode=tp.payout_mode if tp else "platform",
         ep_balance=kp.balance if kp else 0,
         ep_total_earned=kp.total_earned if kp else 0,
@@ -953,6 +975,7 @@ async def list_teacher_bookings(
             slot_time=str(b.slot_time)[:5] if b.slot_time else None,
             duration_min=b.duration_min,
             amount=b.amount,
+            currency=b.currency,
             status=b.status,
             stripe_cs_id=b.stripe_cs_id,
             stripe_pi_id=b.stripe_pi_id,

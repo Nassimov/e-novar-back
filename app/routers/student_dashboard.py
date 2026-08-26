@@ -48,6 +48,7 @@ class DashboardTeacher(BaseModel):
     avatar_url: Optional[str] = None
     headline: Optional[str] = None
     price_per_session: int
+    currency: str = "DZD"
     rating_avg: float
     kp_reward: int
     verified: bool
@@ -256,6 +257,7 @@ async def student_dashboard(
             avatar_url=p.avatar_url,
             headline=tp.headline,
             price_per_session=min_price_map.get(tp.user_id) or tp.price_per_session,
+            currency=tp.currency,
             rating_avg=round(tp.rating_avg or 0.0, 1),
             kp_reward=tp.kp_reward,
             verified=tp.verified,
@@ -302,6 +304,7 @@ class SessionListItem(BaseModel):
     mode: str
     status: str
     amount: int = 0
+    currency: str = "DZD"
     room_url: Optional[str] = None
     notes_teacher: Optional[str] = None
     summary: Optional[str] = None
@@ -399,6 +402,7 @@ async def student_session_list(
         tp = teachers_map.get(s.teacher_id)
         booking = bookings_map.get(s.booking_id) if s.booking_id else None
         amount = booking.amount if booking else 0
+        currency = booking.currency if booking else "DZD"
         duration = s.duration_min or (booking.duration_min if booking else None)
 
         can_cancel = False
@@ -420,6 +424,7 @@ async def student_session_list(
             mode=s.mode,
             status=s.status,
             amount=amount,
+            currency=currency,
             room_url=s.room_url,
             notes_teacher=s.notes_teacher,
             summary=s.summary,

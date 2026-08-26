@@ -794,6 +794,7 @@ async def get_parent_payments(
                 "formula": b.formula,
                 "mode": b.mode,
                 "amount": b.amount,
+                "currency": b.currency,
                 "payment_method": b.payment_method,
                 "status": b.status,
                 "date": b.booking_date.isoformat() if b.booking_date else None,

@@ -38,6 +38,18 @@ from app.models.notification import (
     NotificationQueue,
     NotificationTemplate,
 )
+from app.models.profile import UserRole
+
+# Mirrors app/routers/auth.py's GET /me role resolution exactly — a user may
+# hold multiple roles, this picks the one their frontend routes actually use.
+_ROLE_PRIORITY = {"admin": 4, "teacher": 3, "parent": 2, "student": 1}
+
+
+def _resolve_role(db: Session, user_id: UUID) -> Optional[str]:
+    rows = db.exec(select(UserRole).where(UserRole.user_id == user_id)).all()
+    if not rows:
+        return None
+    return max(rows, key=lambda r: _ROLE_PRIORITY.get(r.role, 0)).role
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +61,24 @@ def _render(template: str, context: Dict[str, Any]) -> str:
         # Missing placeholder in context — better to show the raw template
         # than to 500 the caller's request over a cosmetic string issue.
         return template
+
+
+def _render_deep_link(template: str, context: Dict[str, Any]) -> Optional[str]:
+    """Unlike _render (used for title/body, where a raw unrendered template
+    is a harmless cosmetic fallback), a deep_link with a missing placeholder
+    must never fall back to the raw template string — that produces a
+    literal, clickable-but-404ing URL like "/{role}/sessions" (see the
+    session_validation notification bug this was written to prevent). No
+    link at all is strictly better than a broken one; the notification
+    itself still renders, it just isn't clickable. Logged as an error
+    (not swallowed) since a missing placeholder here is a real bug, not
+    routine — most likely a template referencing a context key no caller
+    actually provides."""
+    try:
+        return template.format(**context)
+    except Exception:
+        logger.error("notification_engine: deep_link_template %r failed to render with context=%s", template, context)
+        return None
 
 
 def _category_prefs(db: Session, user_id: UUID) -> Dict[str, Dict[str, bool]]:
@@ -121,7 +151,17 @@ def _emit_inner(
     body_override: Optional[str] = None,
     deep_link_override: Optional[str] = None,
 ) -> Optional[Notification]:
-    context = context or {}
+    context = dict(context) if context else {}
+    # `{role}` is by far the most common deep_link_template placeholder
+    # (nearly every seeded template routes to "/{role}/..."). Auto-inject it
+    # so individual emit()/_notify() call sites never have to remember to —
+    # forgetting it isn't a cosmetic issue, it used to leave the raw
+    # "/{role}/sessions" literal in the rendered deep_link (see _render's
+    # fallback below), which 404s when a user clicks the notification.
+    if "role" not in context:
+        role = _resolve_role(db, user_id)
+        if role:
+            context["role"] = role
     template = db.exec(
         select(NotificationTemplate).where(NotificationTemplate.event_type == event_type)
     ).first()
@@ -139,7 +179,7 @@ def _emit_inner(
     title = title_override or _render(template.title_template, context)
     body = body_override or _render(template.body_template, context)
     deep_link = deep_link_override or (
-        _render(template.deep_link_template, context)
+        _render_deep_link(template.deep_link_template, context)
         if template and template.deep_link_template
         else None
     )

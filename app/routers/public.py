@@ -117,6 +117,7 @@ class TeacherLeaderEntry(BaseModel):
     reviews_count: int
     wallet_balance_dzd: int
     price_per_session: int
+    currency: str = "DZD"
     kp_balance: int
     badge: Optional[str] = None
     badge_type: str  # "earnings" | "rating"
@@ -151,6 +152,7 @@ def _build_teacher_entry(tp: TeacherProfile, p: Profile, kb: Optional[KpBalance]
         reviews_count=tp.reviews_count,
         wallet_balance_dzd=tp.wallet_balance_dzd,
         price_per_session=tp.price_per_session,
+        currency=tp.currency,
         kp_balance=kb.balance if kb else 0,
         badge=tp.badge,
         badge_type=badge_type,

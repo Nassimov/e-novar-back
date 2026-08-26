@@ -54,6 +54,7 @@ class BookingListItem(BaseModel):
     date: Optional[str]
     slot_time: Optional[str]
     amount: int
+    currency: str = "DZD"
     payment_method: Optional[str]
     payment_rib: Optional[str] = None
     subject: Optional[str]
@@ -95,6 +96,7 @@ async def list_bookings(
             date=b.booking_date.isoformat() if b.booking_date else None,
             slot_time=str(b.slot_time)[:5] if b.slot_time else None,
             amount=b.amount,
+            currency=b.currency,
             payment_method=b.payment_method,
             payment_rib=b.payment_rib,
             subject=b.subject,

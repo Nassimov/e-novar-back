@@ -56,11 +56,12 @@ class Payment(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     user_id: UUID = Field(foreign_key="profiles.id", index=True)
     booking_id: Optional[UUID] = Field(default=None, foreign_key="bookings.id")
-    amount: int = Field()                                # DZD
+    amount: int = Field()                                # smallest whole unit of `currency` — DZD has no subunit in practice, EUR is stored in cents (see app/services/stripe.py)
     currency: str = Field(default="DZD")
     method_id: Optional[UUID] = Field(default=None, foreign_key="payment_methods.id")
     method_type: Optional[str] = Field(default=None)    # public.payment_method_type
     status: str = Field(default="pending")               # public.payment_status
+    provider: Optional[str] = Field(default=None)        # "chargily" | "stripe" — migration 100
     provider_ref: Optional[str] = Field(default=None)
     paid_at: Optional[datetime] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -101,7 +102,12 @@ class TeacherPayout(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     teacher_id: UUID = Field(foreign_key="profiles.id", index=True)
     ep_amount: int = Field()                             # EP à convertir
-    dzd_amount: Optional[int] = Field(default=None)     # DZD fixé par l'admin
+    dzd_amount: Optional[int] = Field(default=None)     # fixé par l'admin — despite the name, denominates
+                                                          # whatever `currency` says (kept unrenamed, see
+                                                          # migration 100 — a live financial column rename
+                                                          # is a separate, riskier change with no functional
+                                                          # benefit right now)
+    currency: str = Field(default="DZD")                 # ISO 4217 — source of truth for dzd_amount's unit
     iban: str = Field()
     bank_holder: str = Field()
     status: str = Field(default="pending")               # public.withdrawal_status

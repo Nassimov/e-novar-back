@@ -295,6 +295,7 @@ class TeacherSearchItem(BaseModel):
     bio: Optional[str] = None
     headline: Optional[str] = None
     price_per_session: int
+    currency: str = "DZD"
     rating_avg: float
     reviews_count: int
     verified: bool
@@ -614,6 +615,7 @@ async def student_teachers_search(
             bio=tp.bio_long or p.bio,
             headline=tp.headline,
             price_per_session=teacher_min_price.get(tid) or tp.price_per_session,
+            currency=tp.currency,
             rating_avg=round(tp.rating_avg, 1),
             reviews_count=tp.reviews_count,
             verified=tp.verified,
@@ -665,6 +667,8 @@ class TeacherPublicProfile(BaseModel):
     headline: Optional[str] = None
     wilaya: Optional[str] = None
     price_per_session: int
+    currency: str = "DZD"
+    country: str = "DZ"
     kp_reward: int
     rating_avg: float
     reviews_count: int
@@ -760,6 +764,8 @@ async def get_teacher_profile(
         headline=tp.headline,
         wilaya=tp.teaching_wilaya or p.wilaya,
         price_per_session=tp.price_per_session,
+        currency=tp.currency,
+        country=tp.country,
         kp_reward=tp.kp_reward,
         rating_avg=round(tp.rating_avg, 1),
         reviews_count=tp.reviews_count,
@@ -1210,6 +1216,24 @@ async def book_teacher_slot(
     if body.pack_sessions:
         pack_sessions_json = json.dumps([s.model_dump() for s in body.pack_sessions])
 
+    # A non-DZ teacher is online-only by construction (see migration 100 /
+    # TeacherProfile.country) — never trust the frontend gating alone, this
+    # is the actual enforcement point for booking creation.
+    if tp.country != "DZ" and body.mode != "online":
+        raise HTTPException(
+            status_code=422,
+            detail="This teacher is based abroad and only offers online sessions.",
+        )
+
+    # Every other payment rail (Chargily/edahabia, cash, bank transfer,
+    # RIB manual transfer) is Algeria/DZD-specific — a non-DZD teacher can
+    # only be paid via the international card (Stripe) rail.
+    if tp.currency != "DZD" and body.payment_method != "cib":
+        raise HTTPException(
+            status_code=422,
+            detail="This teacher is priced in a foreign currency — only card payment is available.",
+        )
+
     # Determine booking status based on payment method
     # - cash: pending admin approval then teacher acceptance
     # - edahabia/transfer: pending (payment promise)
@@ -1228,6 +1252,7 @@ async def book_teacher_slot(
         slot_time=slot_time,
         duration_min=body.duration_min,
         amount=amount,
+        currency=tp.currency,
         kp_reward=tp.kp_reward,
         status=booking_status,
         payment_method=body.payment_method,
@@ -1242,20 +1267,36 @@ async def book_teacher_slot(
     checkout_url: Optional[str] = None
 
     if body.payment_method == "cib":
-        # Create Stripe Checkout Session
-        from app.services.stripe import create_checkout_session
+        # Create Stripe Checkout Session. A EUR-native teacher's `amount` is
+        # already real EUR cents (their own price_per_session) — charge it
+        # directly, no DZD reference to convert from. A DZD-priced teacher
+        # paid via international card still goes through the existing
+        # DZD->EUR conversion (admin-configured rate) — that path is
+        # unchanged.
         teacher_profile_row = db.get(Profile, teacher_id)
         teacher_name = teacher_profile_row.full_name if teacher_profile_row else "Professeur E-NOVAR"
         base_url = settings.frontend_url or "http://localhost:5173"
         try:
-            session = create_checkout_session(
-                amount_dzd=amount,
-                dzd_per_eur=platform_settings_for_gate.dzd_per_eur,
-                booking_id=str(booking.id),
-                teacher_name=teacher_name,
-                success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",
-                cancel_url=f"{base_url}/student/payment?cancelled=1",
-            )
+            if tp.currency != "DZD":
+                from app.services.stripe import create_checkout_session_native
+                session = create_checkout_session_native(
+                    amount_minor=amount,
+                    currency=tp.currency,
+                    booking_id=str(booking.id),
+                    teacher_name=teacher_name,
+                    success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",
+                    cancel_url=f"{base_url}/student/payment?cancelled=1",
+                )
+            else:
+                from app.services.stripe import create_checkout_session
+                session = create_checkout_session(
+                    amount_dzd=amount,
+                    dzd_per_eur=platform_settings_for_gate.dzd_per_eur,
+                    booking_id=str(booking.id),
+                    teacher_name=teacher_name,
+                    success_url=f"{base_url}/student/payment/process?session_id={{CHECKOUT_SESSION_ID}}&status=success",
+                    cancel_url=f"{base_url}/student/payment?cancelled=1",
+                )
             booking.stripe_cs_id = session["session_id"]
             checkout_url = session["url"]
         except Exception:

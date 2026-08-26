@@ -24,6 +24,7 @@ class FavoriteTeacher(BaseModel):
     subjects: List[str]
     rating_avg: float
     price_per_session: int
+    currency: str = "DZD"
 
 
 class FavoriteListResponse(BaseModel):
@@ -101,6 +102,7 @@ async def list_favorites(
             subjects=teacher_subjects.get(tid, []),
             rating_avg=round(tp.rating_avg, 1) if tp else 0.0,
             price_per_session=teacher_min_price.get(tid) or (tp.price_per_session if tp else 0),
+            currency=tp.currency if tp else "DZD",
         ))
 
     return FavoriteListResponse(items=items, total=len(items))

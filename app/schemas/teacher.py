@@ -63,6 +63,7 @@ class TeacherListItem(BaseModel):
     subjects: List[str] = []
     levels: List[str] = []
     price_per_session: int
+    currency: str = "DZD"
     modes: List[str] = []
     rating: float
     reviews_count: int
@@ -92,6 +93,8 @@ class TeacherDetailResponse(BaseModel):
     headline: Optional[str] = None
     subjects: List[TeacherSubjectItem] = []
     price_per_session: int
+    currency: str = "DZD"
+    country: str = "DZ"
     delivery_options: List[DeliveryOption] = []
     rating: float
     reviews_count: int
@@ -132,6 +135,11 @@ class TeacherProfileUpdate(BaseModel):
     # on E-NOVAR", computed live from Profile.created_at (see
     # app.services.tenure), never stored/edited.
     price_per_session: Optional[int] = None
+    # `country` is the only field the client sets — `currency` is always
+    # derived server-side from it (see _currency_for_country in
+    # app/routers/teachers.py), never independently settable, so the DB's
+    # chk_teacher_country_currency_pair constraint can never be violated.
+    country: Optional[str] = None
     teaching_wilaya: Optional[str] = None
     teaching_wilayas: Optional[List[str]] = None
     teaching_nationwide: Optional[bool] = None
@@ -213,6 +221,7 @@ class TeacherBookingItem(BaseModel):
     slot_time: Optional[str] = None
     duration_min: int
     amount: int
+    currency: str = "DZD"
     status: str
     stripe_cs_id: Optional[str] = None
     stripe_pi_id: Optional[str] = None
@@ -224,6 +233,10 @@ class WalletResponse(BaseModel):
     # Lifetime sum of every completed lesson's payout, since account
     # creation — never decreases on withdrawal, unlike wallet_balance_dzd.
     total_earned_dzd: int
+    # What wallet_balance_dzd/total_earned_dzd actually denominate — the
+    # field names stay DZD-suffixed (migration 100 didn't rename them, see
+    # TeacherProfile.currency's own comment), this is the real source of truth.
+    currency: str = "DZD"
     payout_mode: str
     ep_balance: int
     ep_total_earned: int

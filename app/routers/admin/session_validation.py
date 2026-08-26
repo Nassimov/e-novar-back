@@ -90,6 +90,7 @@ async def list_review_queue(
             teacher_confirmed_at=r.teacher_confirmed_at,
             scheduled_at=s.scheduled_at if s else None,
             amount=b.amount if b else None,
+            currency=b.currency if b else "DZD",
             created_at=r.created_at,
         ))
     return result

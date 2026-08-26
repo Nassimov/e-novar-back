@@ -20,11 +20,9 @@ class PaymentResponse(BaseModel):
     booking_id: Optional[UUID] = None
     amount: int
     currency: str
-    method: str
+    method_type: Optional[str] = None
     status: str
-    stripe_payment_intent_id: Optional[str] = None
-    reference: Optional[str] = None
-    invoice_url: Optional[str] = None
+    provider_ref: Optional[str] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

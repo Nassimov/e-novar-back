@@ -147,7 +147,10 @@ class TeacherProfile(SQLModel, table=True):
     headline: Optional[str] = Field(default=None)
     bio_long: Optional[str] = Field(default=None)
     experience_years: int = Field(default=0)
-    price_per_session: int = Field(default=0)             # DZD
+    # Smallest whole unit of `currency` below: whole DZD (no real subunit) for
+    # a DZD-priced teacher, EUR *cents* for a EUR-priced teacher — see
+    # migration 100 and Booking.amount's matching convention.
+    price_per_session: int = Field(default=0)
     verified: bool = Field(default=False)
     badge: Optional[str] = Field(default=None)            # public.teacher_badge
     sponsored: bool = Field(default=False)
@@ -163,6 +166,14 @@ class TeacherProfile(SQLModel, table=True):
     bank_last4: Optional[str] = Field(default=None)
     payout_rail: str = Field(default="bank")               # "bank" (IBAN/RIB) | "baridimob" (mobile wallet)
     payout_phone: Optional[str] = Field(default=None)      # baridimob only — Algerian mobile number
+    # International teacher support (migration 100). `currency` is the real
+    # source of truth for what `price_per_session`/`wallet_balance_dzd`
+    # actually denominate — country is enforced to pair with it (DZ<->DZD,
+    # everything else<->non-DZD) by a DB CHECK constraint, mirrored by
+    # server-side enforcement in app/routers/onboarding.py and
+    # app/routers/teachers.py (never trust the frontend gating alone).
+    country: str = Field(default="DZ")                     # ISO 3166-1 alpha-2
+    currency: str = Field(default="DZD")                   # ISO 4217 — "DZD" | "EUR"
     slug: Optional[str] = Field(
         default=None,
         sa_column=sa.Column(sa.Text, unique=True, nullable=True),

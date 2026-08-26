@@ -21,6 +21,7 @@ from app.models.enums import StudentLessonFormat
 from app.models.parent_link import ParentStudentLink
 from app.models.profile import ParentProfile, Profile, StudentProfile, TeacherProfile
 from app.schemas.teacher import DeliveryOption
+from app.services.teacher_currency import currency_for_country as _currency_for_country
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["onboarding"])
@@ -599,6 +600,12 @@ class TeacherOnboardingRequest(BaseModel):
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
     delivery_options: Optional[List[DeliveryOption]] = None
+    # Only "DZ" (default) is currently a fully at_home/at_student-capable
+    # country — anything else is treated as "abroad": online-only, EUR
+    # pricing (see _currency_for_country / migration 100). Not an exhaustive
+    # per-country currency table — extend the CHECK constraint + this helper
+    # together if a 3rd currency/country group is ever added.
+    country: Optional[str] = None
     teaching_wilaya: Optional[str] = None
     teaching_wilayas: Optional[List[str]] = None
     teaching_nationwide: Optional[bool] = None
@@ -760,12 +767,22 @@ async def complete_teacher_onboarding(
     tp.status = "pending"
     tp.headline = data.bio or ""
     tp.bio_long = data.bio or ""
-    if data.teaching_wilaya:
-        tp.teaching_wilaya = data.teaching_wilaya
-    if data.teaching_wilayas is not None:
-        tp.teaching_wilayas = data.teaching_wilayas
-    if data.teaching_nationwide is not None:
-        tp.teaching_nationwide = data.teaching_nationwide
+    if data.country:
+        tp.country = data.country
+    tp.currency = _currency_for_country(tp.country)
+    if tp.country == "DZ":
+        if data.teaching_wilaya:
+            tp.teaching_wilaya = data.teaching_wilaya
+        if data.teaching_wilayas is not None:
+            tp.teaching_wilayas = data.teaching_wilayas
+        if data.teaching_nationwide is not None:
+            tp.teaching_nationwide = data.teaching_nationwide
+    else:
+        # A foreign teacher has no meaningful wilaya scoping — never trust
+        # the client to have omitted these itself.
+        tp.teaching_wilaya = None
+        tp.teaching_wilayas = []
+        tp.teaching_nationwide = False
     if data.languages is not None:
         tp.languages = data.languages
     if cv_url:
@@ -809,6 +826,11 @@ async def complete_teacher_onboarding(
             if opt.mode not in _VALID_MODES or opt.type not in ("individual", "group"):
                 continue
             if opt.mode == "at_student" and opt.type == "group":
+                continue
+            # A foreign teacher is online-only — silently drop any
+            # at_home/at_student rows a stale/malicious client still sends,
+            # same enforcement as the country/wilaya fields above.
+            if tp.country != "DZ" and opt.mode != "online":
                 continue
             key = (opt.mode, opt.type)
             if key in seen:

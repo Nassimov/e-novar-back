@@ -9,7 +9,8 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
 from app.models.booking import Booking
-from app.models.payment import Payment, PaymentMethod, PaymentStatus
+from app.models.enums import PaymentMethodType
+from app.models.payment import Payment, PaymentStatus
 from app.models.profile import Profile
 from app.models.user import User
 from app.schemas.payment import (
@@ -48,7 +49,7 @@ async def initiate_payment(
         booking_id=payload.booking_id,
         amount=payload.amount,
         currency=payload.currency,
-        method=PaymentMethod(payload.method),
+        method_type=PaymentMethodType(payload.method),
     )
     db.add(payment)
     db.commit()
@@ -64,7 +65,8 @@ async def pay_with_cib(
 ):
     """Process a CIB card payment via Stripe."""
     from datetime import datetime
-    from app.services.stripe import create_payment_intent
+    from app.models.admin import PlatformSettings
+    from app.services.stripe import create_payment_intent, dzd_to_eur_cents
 
     user = db.get(Profile, UUID(current_user["id"]))
     if user is None:
@@ -74,9 +76,14 @@ async def pay_with_cib(
     if booking is None:
         raise HTTPException(status_code=404, detail="Booking not found")
 
+    if booking.student_id != user.id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    settings_row = db.get(PlatformSettings, True) or PlatformSettings()
+
     try:
         intent = create_payment_intent(
-            amount_cents=booking.amount_dzd * 100,  # convert to cents if using EUR/USD proxy
+            amount_cents=dzd_to_eur_cents(booking.amount, settings_row.dzd_per_eur),
             currency="eur",
             metadata={"booking_id": str(booking.id), "user_id": str(user.id)},
         )
@@ -86,11 +93,11 @@ async def pay_with_cib(
     payment = Payment(
         user_id=user.id,
         booking_id=payload.booking_id,
-        amount=booking.amount_dzd,
+        amount=booking.amount,
         currency="DZD",
-        method=PaymentMethod.cib,
+        method_type=PaymentMethodType.cib,
         status=PaymentStatus.pending,
-        stripe_payment_intent_id=intent["id"],
+        provider_ref=intent["id"],
     )
     db.add(payment)
     db.commit()

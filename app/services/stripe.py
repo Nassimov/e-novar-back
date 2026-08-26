@@ -120,6 +120,41 @@ def create_checkout_session(
     return {"session_id": session.id, "url": session.url}
 
 
+def create_checkout_session_native(
+    amount_minor: int,
+    currency: str,
+    booking_id: str,
+    teacher_name: str,
+    success_url: str,
+    cancel_url: str,
+) -> Dict[str, Any]:
+    """Create a Stripe Checkout Session for an amount ALREADY denominated in
+    `currency`'s minor unit (e.g. a EUR-native teacher's own price_per_session,
+    stored in cents — see TeacherProfile.price_per_session / migration 100).
+
+    Unlike create_checkout_session() above, this never runs dzd_to_eur_cents —
+    there's no DZD reference price to convert from, the teacher's price *is*
+    the real charge amount. Used when Booking.currency != "DZD"."""
+    session = stripe_lib.checkout.Session.create(
+        line_items=[
+            {
+                "price_data": {
+                    "currency": currency.lower(),
+                    "product_data": {"name": f"Séance avec {teacher_name}"},
+                    "unit_amount": amount_minor,
+                },
+                "quantity": 1,
+            }
+        ],
+        mode="payment",
+        payment_intent_data={"capture_method": "manual"},
+        metadata={"booking_id": booking_id, "amount_minor": str(amount_minor), "currency": currency},
+        success_url=success_url,
+        cancel_url=cancel_url,
+    )
+    return {"session_id": session.id, "url": session.url}
+
+
 def get_checkout_session(session_id: str) -> Dict[str, Any]:
     """Retrieve a Checkout Session, including its PaymentIntent ID and status.
 
