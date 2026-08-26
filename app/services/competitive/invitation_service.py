@@ -78,6 +78,7 @@ def _check_anti_spam(db: Session, inviter_id: UUID) -> None:
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Nombre maximal de défis envoyés aujourd'hui atteint.",
             )
+
     except HTTPException:
         raise
     except Exception:
