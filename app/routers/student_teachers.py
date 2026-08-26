@@ -167,6 +167,25 @@ def _release_if_abandoned_checkout(db: Session, booking: "Booking") -> bool:
     booking.status = "cancelled"
     booking.cancelled_reason = "payment_never_completed"
     db.add(booking)
+
+    # The abandoned booking's TutoringSession row was already materialized
+    # as status="scheduled" at creation time (before Stripe was ever
+    # reached) — cancel it too, or it keeps showing as a real upcoming
+    # session to the student even though the booking itself is now
+    # cancelled and a fresh retry is about to create a new one for the same
+    # slot (this used to be the most common way a student would see what
+    # looks like the same session listed twice: the abandoned attempt's
+    # phantom "upcoming" entry next to the new, real one).
+    from datetime import datetime as _datetime
+    from app.models.booking import TutoringSession as _TutoringSession
+    for s in db.exec(select(_TutoringSession).where(_TutoringSession.booking_id == booking.id)).all():
+        if s.status not in ("completed", "cancelled"):
+            s.status = "cancelled"
+            s.cancelled_at = _datetime.utcnow()
+            s.cancellation_reason = "payment_never_completed"
+            s.refund_percentage = 100
+            db.add(s)
+
     return True
 
 

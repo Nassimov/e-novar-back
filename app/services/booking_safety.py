@@ -61,6 +61,14 @@ def apply_cancellation_side_effects(db: Session, booking: Booking, reason: str) 
       bookable again — safe for group slots too, since the capacity-aware
       claim in student_teachers.py._claim_slot_or_409 re-closes it once
       actually full again.
+    - Cancels every TutoringSession row tied to this booking (status was
+      still "scheduled" from creation-time — see student_teachers.py's
+      book_teacher_slot — since nothing else ever touched it once the
+      booking itself got rejected before acceptance). Without this, a
+      refused/timed-out booking kept showing up as a real upcoming session
+      to the student (only Booking.status was checked to gate the
+      pending-vs-upcoming split in student_dashboard.py's /sessions list),
+      even though the teacher never confirmed it.
     - Records one BookingRefusal row per distinct (subject, weekday, time)
       combo among this booking's TutoringSession rows (a pack can span
       several) — this is what student_teachers.py._check_refusal_block
@@ -75,8 +83,16 @@ def apply_cancellation_side_effects(db: Session, booking: Booking, reason: str) 
     sessions = db.exec(
         select(TutoringSession).where(TutoringSession.booking_id == booking.id)
     ).all()
+    now_utc = datetime.utcnow()
     seen: set[tuple[Optional[UUID], int, object]] = set()
     for s in sessions:
+        if s.status not in ("completed", "cancelled"):
+            s.status = "cancelled"
+            s.cancelled_at = now_utc
+            s.cancellation_reason = reason
+            s.refund_percentage = 100
+            db.add(s)
+
         key = (s.subject_id, s.scheduled_at.weekday(), s.scheduled_at.time())
         if key in seen:
             continue

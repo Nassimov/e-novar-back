@@ -525,7 +525,7 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
 
     from app.database import get_engine
     from app.models.admin import PlatformSettings
-    from app.models.booking import Booking
+    from app.models.booking import Booking, TutoringSession
     from app.models.profile import UserRole
     from app.models.scheduling import TeacherSlot
     from app.services.notification_engine import emit
@@ -556,6 +556,24 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
                 if slot is not None and slot.status == "booked":
                     slot.status = "open"
                     db.add(slot)
+
+            # The linked TutoringSession row(s) were already materialized as
+            # status="scheduled" at booking time — cancel them too, or they
+            # keep showing up as real upcoming sessions to the student even
+            # though the payment was never confirmed (see
+            # app/services/booking_safety.py's apply_cancellation_side_effects
+            # for the equivalent fix on the teacher-refusal/no-response paths).
+            linked_sessions = db.exec(
+                select(TutoringSession).where(TutoringSession.booking_id == booking.id)
+            ).all()
+            for s in linked_sessions:
+                if s.status not in ("completed", "cancelled"):
+                    s.status = "cancelled"
+                    s.cancelled_at = datetime.utcnow()
+                    s.cancellation_reason = "manual_payment_expired"
+                    s.refund_percentage = 100
+                    db.add(s)
+
             db.commit()
 
             emit(

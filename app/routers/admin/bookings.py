@@ -207,6 +207,33 @@ async def reject_manual_payment(
     booking.status = "cancelled"
     db.add(booking)
 
+    from datetime import datetime as _datetime
+    from app.models.scheduling import TeacherSlot
+
+    if booking.slot_id:
+        slot = db.get(TeacherSlot, booking.slot_id)
+        if slot is not None and slot.status == "booked":
+            slot.status = "open"
+            db.add(slot)
+
+    # The linked TutoringSession row(s) were already materialized as
+    # status="scheduled" at booking time (see student_teachers.py's
+    # book_teacher_slot) — never the teacher's fault here (they never got a
+    # chance to accept/refuse a manual-payment booking pending admin
+    # review), so no BookingRefusal/strike, just cancel them so they stop
+    # showing as real upcoming sessions to the student.
+    linked_sessions = db.exec(
+        select(TutoringSession).where(TutoringSession.booking_id == booking.id)
+    ).all()
+    now_utc = _datetime.utcnow()
+    for s in linked_sessions:
+        if s.status not in ("completed", "cancelled"):
+            s.status = "cancelled"
+            s.cancelled_at = now_utc
+            s.cancellation_reason = "manual_payment_rejected"
+            s.refund_percentage = 100
+            db.add(s)
+
     db.commit()
 
     from app.services.notification_engine import emit
