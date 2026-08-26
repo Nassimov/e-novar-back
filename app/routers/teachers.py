@@ -1527,3 +1527,88 @@ async def get_my_students_overview(
 
     result.sort(key=lambda r: r["full_name"])
     return result
+
+
+@router.get("/me/students/{student_id}")
+async def get_my_student_detail(
+    student_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Real per-student detail page for the teacher (replaces the
+    SAMPLES/hardcoded-arrays mock previously on the frontend at
+    src/routes/teacher.student.$studentId.tsx — every real student showed
+    the exact same fake bio/sessions/homework regardless of who was
+    clicked). 404s if this teacher has never actually had a session with
+    this student — same access-scoping as students-overview above, just
+    narrowed to one student instead of the whole roster."""
+    from collections import Counter
+
+    from app.models.booking import TutoringSession
+    from app.models.parent_link import ParentStudentLink
+    from app.models.profile import StudentProfile
+
+    teacher_id = UUID(current_user["id"])
+
+    profile = db.get(Profile, student_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    sessions = db.exec(
+        select(TutoringSession)
+        .where(
+            TutoringSession.teacher_id == teacher_id,
+            TutoringSession.student_id == student_id,
+            TutoringSession.status != "cancelled",
+        )
+        .order_by(TutoringSession.scheduled_at.desc())
+    ).all()
+    if not sessions:
+        raise HTTPException(status_code=404, detail="No sessions with this student")
+
+    student_profile = db.get(StudentProfile, student_id)
+
+    subject_ids = list({s.subject_id for s in sessions if s.subject_id})
+    subjects = db.exec(select(Subject).where(Subject.id.in_(subject_ids))).all() if subject_ids else []
+    subject_map = {s.id: s for s in subjects}
+    subject_names = sorted({s.name for s in subjects})
+
+    level_ids = list({s.level_id for s in sessions if s.level_id})
+    levels = db.exec(select(Level).where(Level.id.in_(level_ids))).all() if level_ids else []
+    level_map = {lv.id: lv for lv in levels}
+    top_level_id = Counter(s.level_id for s in sessions if s.level_id).most_common(1)
+    level_label = (
+        level_map[top_level_id[0][0]].label if top_level_id and top_level_id[0][0] in level_map
+        else (student_profile.level_detail or student_profile.level_main if student_profile else None)
+    )
+
+    parent_link = db.exec(
+        select(ParentStudentLink).where(
+            ParentStudentLink.student_id == student_id,
+            ParentStudentLink.status == "accepted",
+        )
+    ).first()
+    parent_profile = db.get(Profile, parent_link.parent_id) if parent_link else None
+
+    return {
+        "student_id": str(student_id),
+        "full_name": profile.full_name or "—",
+        "avatar_url": profile.avatar_url,
+        "level": level_label,
+        "wilaya": profile.wilaya,
+        "city": profile.city,
+        "since": min(s.scheduled_at for s in sessions).isoformat(),
+        "subjects": subject_names,
+        "parent_name": parent_profile.full_name if parent_profile else None,
+        "parent_phone": parent_profile.phone if parent_profile else None,
+        "student_phone": profile.phone,
+        "sessions": [
+            {
+                "id": str(s.id),
+                "scheduled_at": s.scheduled_at.isoformat(),
+                "subject_name": subject_map[s.subject_id].name if s.subject_id in subject_map else None,
+                "status": s.status,
+            }
+            for s in sessions[:10]
+        ],
+    }

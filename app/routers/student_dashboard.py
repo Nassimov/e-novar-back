@@ -148,7 +148,15 @@ async def student_dashboard(
     kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
 
     # ── Upcoming sessions ─────────────────────────────────────────────────────────
-    upcoming_raw = db.exec(
+    # A TutoringSession row is materialized (status="scheduled") the moment
+    # the student books/pays — see student_teachers.py's booking-creation
+    # flow — but the underlying Booking still starts out "pending" until the
+    # teacher explicitly accepts it (bookingsApi.acceptBooking ->
+    # booking.status = "confirmed"). Showing it here before that point reads
+    # as "your session is on" when it may still be refused — so exclude any
+    # session whose booking hasn't been confirmed yet. Sessions with no
+    # booking_id at all (legacy/admin-created) are left as-is.
+    upcoming_raw_all = db.exec(
         select(TutoringSession)
         .where(TutoringSession.student_id == uid)
         .where(TutoringSession.scheduled_at >= now_utc)
@@ -156,6 +164,15 @@ async def student_dashboard(
         .order_by(TutoringSession.scheduled_at)
         .limit(20)
     ).all()
+    booking_ids = {s.booking_id for s in upcoming_raw_all if s.booking_id}
+    pending_booking_ids: set = set()
+    if booking_ids:
+        pending_booking_ids = {
+            b.id for b in db.exec(
+                select(Booking).where(Booking.id.in_(booking_ids), Booking.status != "confirmed")
+            ).all()
+        }
+    upcoming_raw = [s for s in upcoming_raw_all if s.booking_id not in pending_booking_ids]
 
     sessions_today = sum(
         1 for s in upcoming_raw

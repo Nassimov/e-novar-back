@@ -65,6 +65,21 @@ def _group_sessions(db: Session, slot_id: UUID) -> List[TutoringSession]:
     return lk_video.group_sessions(db, slot_id)
 
 
+def _group_session_ids(db: Session, session: TutoringSession) -> List[UUID]:
+    """Every TutoringSession id sharing this session's live-classroom room —
+    just [session.id] for an individual lesson, every enrolled student's own
+    row for a group one. Live quizzes are dispatched/broadcast class-wide
+    (see quiz_dispatched's room_key-based publish below) from whichever
+    single session_id the teacher's own view happens to be bound to, so
+    reading them back must resolve across the whole group too — otherwise a
+    student whose own session_id differs from the one the teacher used never
+    sees a quiz that was, from the teacher's side, clearly sent."""
+    slot_id = _group_slot_id(db, session)
+    if not slot_id:
+        return [session.id]
+    return [s.id for s in _group_sessions(db, slot_id)]
+
+
 def _display_name(profile: Optional[Profile]) -> str:
     return (profile.full_name if profile else None) or "Utilisateur"
 
@@ -117,7 +132,16 @@ async def get_classroom_room(
     now = datetime.now(timezone.utc)
     grace_end = scheduled_end + timedelta(minutes=45)
 
-    can_join = join_opens_at <= now <= grace_end
+    # Once either participant has formally ended the session (the "Terminer
+    # la séance" action, distinct from just disconnecting/hanging up), the
+    # room is no longer rejoinable regardless of the time window — this is
+    # what actually enforces "tant qu'un des deux n'a pas mis fin à la
+    # séance, on peut la rejoindre" from the other side: ending it is what
+    # closes that door, not merely leaving the call.
+    from app.services.session_validation import get_or_create_validation as _get_or_create_validation
+    sv = _get_or_create_validation(db, session)
+    db.commit()
+    can_join = (join_opens_at <= now <= grace_end) and sv.status == "scheduled"
     if not can_join:
         return RoomResponse(
             livekit_url="", room_name="", token="", is_owner=False,
@@ -642,7 +666,9 @@ async def list_quizzes(
     is_teacher = uid == session.teacher_id or current_user.get("role") == "admin"
 
     quizzes = db.exec(
-        select(SessionQuiz).where(SessionQuiz.session_id == session_id).order_by(SessionQuiz.created_at)
+        select(SessionQuiz)
+        .where(SessionQuiz.session_id.in_(_group_session_ids(db, session)))
+        .order_by(SessionQuiz.created_at)
     ).all()
     quiz_ids = [q.id for q in quizzes]
     answers_by_quiz: Dict[UUID, List[SessionQuizAnswer]] = {qid: [] for qid in quiz_ids}
@@ -679,7 +705,7 @@ async def answer_quiz(
         raise HTTPException(status_code=403, detail="L'enseignant ne répond pas à son propre quiz")
 
     quiz = db.get(SessionQuiz, quiz_id)
-    if quiz is None or quiz.session_id != session_id:
+    if quiz is None or quiz.session_id not in _group_session_ids(db, session):
         raise HTTPException(status_code=404, detail="Quiz not found")
     existing = db.exec(
         select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id == quiz_id, SessionQuizAnswer.student_id == uid)

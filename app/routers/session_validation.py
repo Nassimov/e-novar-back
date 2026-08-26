@@ -78,7 +78,12 @@ def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatu
         session_id=session.id,
         booking_id=session.booking_id,
         status=sv.status,
-        can_teacher_end=(sv.status == "scheduled" and datetime.now(timezone.utc) >= scheduled_end),
+        # Either participant can end the session once it has actually
+        # started — no longer gated on the full scheduled duration having
+        # elapsed (a class legitimately finishing early is normal, not
+        # fraud; the downstream code-validation + dispute/trust-score
+        # workflow is what actually guards against abuse here).
+        can_end_session=(sv.status == "scheduled" and datetime.now(timezone.utc) >= session.scheduled_at),
         can_view_token=token_window_open(sv, session, settings) and sv.status in ("scheduled", "awaiting_student_validation"),
         token_visible_at=token_visible_at,
         scheduled_end_at=scheduled_end,
@@ -110,43 +115,52 @@ async def get_validation_status(
 
 
 @router.post("/{session_id}/validation/end")
-async def teacher_end_session(
+async def end_session(
     session_id: UUID,
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Teacher marks the lesson as over. This never credits payment directly —
-    it only opens the student-validation window (spec: clicking this button
-    must never trigger payout on its own)."""
-    session, sv, _, is_teacher = _load(db, session_id, current_user)
-    if not is_teacher and current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Only the session's teacher can end it")
+    """Either participant marks the lesson as over — this is the formal
+    "Terminer la séance" action, distinct from simply disconnecting/hanging
+    up (which leaves the live call rejoinable; see the classroom room-join
+    gate, which now checks this row's status). Never credits payment
+    directly — it only opens the code-based validation window (spec:
+    clicking this button must never trigger payout on its own). Whoever
+    didn't click it gets kicked out of the live call in real time via the
+    `session_ended` classroom WS event and notified to go validate."""
+    session, sv, is_student, is_teacher = _load(db, session_id, current_user)
+    if not is_student and not is_teacher and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Access denied")
     if sv.status != "scheduled":
         raise HTTPException(status_code=409, detail=f"Cannot end a session in status '{sv.status}'")
-
-    scheduled_end = session.scheduled_at + timedelta(minutes=session.duration_min or 90)
-    if datetime.now(timezone.utc) < scheduled_end:
-        raise HTTPException(
-            status_code=409,
-            detail="La séance ne peut être terminée qu'après son heure de fin prévue.",
-        )
+    if datetime.now(timezone.utc) < session.scheduled_at:
+        raise HTTPException(status_code=409, detail="La séance n'a pas encore commencé.")
 
     now = datetime.now(timezone.utc)
     sv.teacher_ended_at = now
     sv.status = "awaiting_student_validation"
     sv.updated_at = now
     db.add(sv)
+    ender_uid = UUID(current_user["id"]) if current_user.get("id") else None
     log_audit(db, session_id=session.id, booking_id=session.booking_id,
-              actor_user_id=UUID(current_user["id"]) if current_user.get("id") else None,
-              actor_ip=_client_ip(request), action="teacher_ended_session")
+              actor_user_id=ender_uid, actor_ip=_client_ip(request), action="session_ended")
 
     from app.services.session_validation import _notify
-    _notify(db, session.student_id, "📝 Séance terminée — validation requise",
-            "Votre professeur a indiqué que la séance est terminée. Merci de la valider dans l'application.",
+    other_party_id = session.student_id if ender_uid == session.teacher_id else session.teacher_id
+    _notify(db, other_party_id, "📝 Séance terminée — validation requise",
+            "La séance a été marquée comme terminée. Merci de la valider dans l'application.",
             {"session_id": str(session.id)})
 
     db.commit()
+
+    from app.core.classroom_ws import publish_classroom_event
+    from app.services import livekit_video as lk_video
+    publish_classroom_event(
+        lk_video.room_key_for_session(db, session),
+        {"type": "session_ended", "by": str(ender_uid) if ender_uid else None},
+    )
+
     return {"status": sv.status}
 
 

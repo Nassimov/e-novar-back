@@ -11,7 +11,7 @@ class SessionValidationStatus(BaseModel):
     session_id: UUID
     booking_id: Optional[UUID] = None
     status: str
-    can_teacher_end: bool
+    can_end_session: bool
     can_view_token: bool
     token_visible_at: Optional[datetime] = None
     scheduled_end_at: Optional[datetime] = None
