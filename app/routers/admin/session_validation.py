@@ -35,6 +35,7 @@ def _trust_settings_dict(s: PlatformSettings) -> dict:
         "trust_manual_review_threshold": s.trust_manual_review_threshold,
         "token_visible_minutes_before": s.token_visible_minutes_before,
         "student_validation_window_hours": s.student_validation_window_hours,
+        "teacher_confirmation_window_hours": s.teacher_confirmation_window_hours,
         "gps_proximity_threshold_meters": s.gps_proximity_threshold_meters,
     }
 

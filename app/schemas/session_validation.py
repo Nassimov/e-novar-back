@@ -88,4 +88,5 @@ class TrustScoreSettings(BaseModel):
     trust_manual_review_threshold: int
     token_visible_minutes_before: int
     student_validation_window_hours: int
+    teacher_confirmation_window_hours: int
     gps_proximity_threshold_meters: int

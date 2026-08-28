@@ -630,11 +630,11 @@ async def delete_session_file(
 class QuizIn(BaseModel):
     question: str
     choices: List[str]
-    correct_index: int
+    correct_indices: List[int]
 
 
 class QuizAnswerIn(BaseModel):
-    choice_index: int
+    choice_indices: List[int]
 
 
 class QuizOut(BaseModel):
@@ -642,9 +642,9 @@ class QuizOut(BaseModel):
     question: str
     choices: List[str]
     created_at: str
-    my_answer: Optional[int] = None
+    my_answers: Optional[List[int]] = None
     my_correct: Optional[bool] = None
-    correct_index: Optional[int] = None  # only revealed to the teacher, or after answering
+    correct_indices: Optional[List[int]] = None  # only revealed to the teacher, or after answering
     answers_count: Optional[int] = None
     correct_count: Optional[int] = None
 
@@ -660,18 +660,21 @@ async def create_quiz(
     uid = _authorize(session, current_user)
     if uid != session.teacher_id and current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Seul l'enseignant peut envoyer un quiz")
-    if len(payload.choices) < 2 or not (0 <= payload.correct_index < len(payload.choices)):
+    if len(payload.choices) < 2:
+        raise HTTPException(status_code=400, detail="Quiz invalide")
+    if not payload.correct_indices or any(not (0 <= i < len(payload.choices)) for i in payload.correct_indices):
         raise HTTPException(status_code=400, detail="Quiz invalide")
 
+    correct_sorted = sorted(set(payload.correct_indices))
     quiz = SessionQuiz(
         session_id=session_id, created_by=uid, question=payload.question,
-        choices=payload.choices, correct_index=payload.correct_index,
+        choices=payload.choices, correct_index=correct_sorted[0], correct_indices=correct_sorted,
     )
     db.add(quiz)
     db.commit()
     db.refresh(quiz)
 
-    # Broadcast a STUDENT-SAFE payload — never leak correct_index to the room.
+    # Broadcast a STUDENT-SAFE payload — never leak correct_indices to the room.
     publish_classroom_event(lk_video.room_key_for_session(db, session), {
         "type": "quiz_dispatched",
         "quiz": {"id": str(quiz.id), "question": quiz.question, "choices": quiz.choices,
@@ -679,7 +682,7 @@ async def create_quiz(
     })
     return QuizOut(
         id=str(quiz.id), question=quiz.question, choices=quiz.choices,
-        created_at=quiz.created_at.isoformat(), correct_index=quiz.correct_index,
+        created_at=quiz.created_at.isoformat(), correct_indices=quiz.correct_indices,
         answers_count=0, correct_count=0,
     )
 
@@ -711,9 +714,9 @@ async def list_quizzes(
         my_answer = next((a for a in all_answers if a.student_id == uid), None)
         out.append(QuizOut(
             id=str(q.id), question=q.question, choices=q.choices, created_at=q.created_at.isoformat(),
-            my_answer=my_answer.choice_index if my_answer else None,
+            my_answers=my_answer.choice_indices if my_answer else None,
             my_correct=my_answer.is_correct if my_answer else None,
-            correct_index=q.correct_index if (is_teacher or my_answer) else None,
+            correct_indices=q.correct_indices if (is_teacher or my_answer) else None,
             answers_count=len(all_answers) if is_teacher else None,
             correct_count=sum(1 for a in all_answers if a.is_correct) if is_teacher else None,
         ))
@@ -741,12 +744,18 @@ async def answer_quiz(
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Vous avez déjà répondu à ce quiz")
-    choice_index = payload.choice_index
-    if not (0 <= choice_index < len(quiz.choices)):
+    choice_indices = sorted(set(payload.choice_indices))
+    if not choice_indices or any(not (0 <= i < len(quiz.choices)) for i in choice_indices):
         raise HTTPException(status_code=400, detail="Réponse invalide")
 
-    is_correct = choice_index == quiz.correct_index
-    answer = SessionQuizAnswer(quiz_id=quiz_id, student_id=uid, choice_index=choice_index, is_correct=is_correct)
+    # Correct only if the student picked exactly the set of correct choices —
+    # no partial credit for a multi-answer question (picking 1 of 2 correct
+    # choices, or picking a correct one plus a wrong one, doesn't count).
+    is_correct = choice_indices == sorted(quiz.correct_indices)
+    answer = SessionQuizAnswer(
+        quiz_id=quiz_id, student_id=uid, choice_index=choice_indices[0],
+        choice_indices=choice_indices, is_correct=is_correct,
+    )
     db.add(answer)
     db.commit()
 
@@ -760,7 +769,7 @@ async def answer_quiz(
     answers_count = len(all_answers)
     correct_count = sum(1 for a in all_answers if a.is_correct)
 
-    # Teacher-only tally update (never broadcasts correct_index to students).
+    # Teacher-only tally update (never broadcasts correct_indices to students).
     publish_classroom_event(lk_video.room_key_for_session(db, session), {
         "type": "quiz_tally_update",
         "quiz_id": str(quiz_id), "answers_count": answers_count, "correct_count": correct_count,
@@ -768,6 +777,6 @@ async def answer_quiz(
 
     return QuizOut(
         id=str(quiz.id), question=quiz.question, choices=quiz.choices, created_at=quiz.created_at.isoformat(),
-        my_answer=choice_index, my_correct=is_correct, correct_index=quiz.correct_index,
+        my_answers=choice_indices, my_correct=is_correct, correct_indices=quiz.correct_indices,
         answers_count=answers_count, correct_count=correct_count,
     )

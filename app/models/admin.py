@@ -38,6 +38,13 @@ class PlatformSettings(SQLModel, table=True):
     trust_manual_review_threshold: int = Field(default=50)
     token_visible_minutes_before: int = Field(default=30)
     student_validation_window_hours: int = Field(default=24)
+    # A session left in "validated" (student done, waiting on the teacher's
+    # secondary confirm) with no bounded timeout would stall the payout AND
+    # the student's review eligibility forever if the teacher never clicks
+    # confirm — this window auto-finalizes it (same trust-score evaluation,
+    # just without the teacher_confirmation signal) once it elapses. See
+    # app/routers/session_validation.py's _check_expiry.
+    teacher_confirmation_window_hours: int = Field(default=48)
     gps_proximity_threshold_meters: int = Field(default=500)
 
     # Booking safety rules (see app/routers/student_teachers.py +

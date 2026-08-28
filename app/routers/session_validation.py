@@ -65,6 +65,22 @@ def _check_expiry(db: Session, session: TutoringSession, sv, settings) -> None:
                       actor_ip=None, action="validation_expired")
             db.commit()
             db.refresh(sv)
+            return
+
+    # The student validated but the teacher never called /validation/confirm
+    # — without a bounded timeout this stalls payout AND the student's
+    # review eligibility forever (both gated on evaluate_and_finalize having
+    # run at least once). Past the window, finalize automatically — same
+    # trust-score evaluation confirm() would have triggered, just without
+    # the teacher_confirmation signal since teacher_confirmed_at stays unset.
+    if sv.status == "validated" and sv.student_validated_at:
+        deadline = sv.student_validated_at + timedelta(hours=settings.teacher_confirmation_window_hours)
+        if datetime.now(timezone.utc) > deadline:
+            log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=None,
+                      actor_ip=None, action="teacher_confirmation_auto_finalized")
+            evaluate_and_finalize(db, session, sv, settings)
+            db.commit()
+            db.refresh(sv)
 
 
 def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatus:

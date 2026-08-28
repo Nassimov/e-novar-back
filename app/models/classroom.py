@@ -92,7 +92,8 @@ class SessionQuiz(SQLModel, table=True):
     created_by: UUID = Field(foreign_key="profiles.id")
     question: str = Field()
     choices: List[str] = Field(default_factory=list, sa_column=sa.Column(JSONB, nullable=False))
-    correct_index: int = Field()
+    correct_index: int = Field()  # deprecated — kept for old rows, see correct_indices
+    correct_indices: List[int] = Field(default_factory=list, sa_column=sa.Column(JSONB, nullable=False))
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -105,6 +106,7 @@ class SessionQuizAnswer(SQLModel, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     quiz_id: UUID = Field(foreign_key="session_quizzes.id", index=True)
     student_id: UUID = Field(foreign_key="profiles.id", index=True)
-    choice_index: int = Field()
+    choice_index: int = Field()  # deprecated — kept for old rows, see choice_indices
+    choice_indices: List[int] = Field(default_factory=list, sa_column=sa.Column(JSONB, nullable=False))
     is_correct: bool = Field()
     answered_at: datetime = Field(default_factory=datetime.utcnow)
