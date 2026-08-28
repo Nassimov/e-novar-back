@@ -226,6 +226,8 @@ class TeacherBookingItem(BaseModel):
     stripe_cs_id: Optional[str] = None
     stripe_pi_id: Optional[str] = None
     created_at: str
+    subject: Optional[str] = None
+    comment: Optional[str] = None
 
 
 class WalletResponse(BaseModel):

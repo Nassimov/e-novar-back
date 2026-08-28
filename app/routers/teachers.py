@@ -980,6 +980,8 @@ async def list_teacher_bookings(
             stripe_cs_id=b.stripe_cs_id,
             stripe_pi_id=b.stripe_pi_id,
             created_at=b.created_at.isoformat(),
+            subject=b.subject,
+            comment=b.comment,
         ))
     return result
 
@@ -1200,13 +1202,31 @@ async def request_dzd_withdrawal(
     if tp is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
+    # payout_rail defaults to "bank" even when nothing has actually been
+    # configured yet — the real signal of "a payout destination exists" is
+    # whether the rail's own required fields are actually filled in (see
+    # PUT /me/payout-info). Without this gate a teacher could withdraw to
+    # whatever iban/bank_holder they typed into THIS request, which is never
+    # cross-checked against anything — money would go wherever the request
+    # body says, not to a destination the teacher actually verified/saved.
+    has_payout_destination = (
+        bool(tp.payout_phone) if tp.payout_rail == "baridimob" else bool(tp.iban and tp.bank_holder)
+    )
+    if not has_payout_destination:
+        raise HTTPException(
+            status_code=403,
+            detail="Configurez d'abord votre moyen de paiement (RIB ou BaridiMob) dans votre profil avant de demander un retrait.",
+        )
+
     if tp.wallet_balance_dzd < payload.amount_dzd:
         raise HTTPException(
             status_code=400,
             detail=f"Solde insuffisant. Disponible : {tp.wallet_balance_dzd} DA",
         )
 
-    # Deduct from wallet (admin processes the transfer manually)
+    # Deduct from wallet (admin processes the transfer manually, to the
+    # PROFILE's saved/verified destination — not whatever this request body
+    # happened to contain).
     tp.wallet_balance_dzd -= payload.amount_dzd
     db.add(tp)
     db.commit()
@@ -1256,6 +1276,18 @@ async def request_withdrawal(
             detail="Au moins une séance complétée est requise avant de demander un retrait.",
         )
 
+    # Same payout-destination gate as request_dzd_withdrawal above — and the
+    # persisted payout record uses the PROFILE's own saved iban/bank_holder,
+    # never whatever this request body contains: trusting a per-request
+    # bank destination with zero validation would let anyone with a live
+    # session redirect a real payout to an arbitrary account.
+    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == uid)).first()
+    if tp is None or not (tp.iban and tp.bank_holder):
+        raise HTTPException(
+            status_code=403,
+            detail="Configurez d'abord votre RIB dans votre profil avant de demander un retrait.",
+        )
+
     # Check EP balance
     kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
     available = kp.balance if kp else 0
@@ -1268,8 +1300,8 @@ async def request_withdrawal(
     payout = TeacherPayout(
         teacher_id=uid,
         ep_amount=payload.ep_amount,
-        iban=payload.iban,
-        bank_holder=payload.bank_holder,
+        iban=tp.iban,
+        bank_holder=tp.bank_holder,
     )
     db.add(payout)
     db.commit()

@@ -117,6 +117,33 @@ async def list_sessions(
     query = query.order_by(SessionModel.scheduled_at.desc())
 
     sessions = db.exec(query).all()
+
+    # A TutoringSession row is materialized (status="scheduled") the moment
+    # the student books/pays — see student_teachers.py's booking-creation
+    # flow — but the underlying Booking still starts out "pending" until the
+    # teacher explicitly accepts it (accept_booking -> booking.status =
+    # "confirmed"). Surfacing a still-pending one here (dashboards/session
+    # lists on both sides) reads as "this session is on" when it may still
+    # be refused, so filter those out — but only for the still-open
+    # "scheduled"/"waiting"/"live" states; a "completed"/"cancelled"/
+    # "no_show" session obviously already happened regardless of booking
+    # status, so never exclude those. Sessions with no booking_id at all
+    # (legacy/admin-created) are left as-is.
+    pending_statuses = {"scheduled", "waiting", "live"}
+    pending_ids = [s.id for s in sessions if s.status in pending_statuses and s.booking_id]
+    if pending_ids:
+        booking_ids = {s.booking_id for s in sessions if s.id in pending_ids}
+        unconfirmed_booking_ids = {
+            b.id for b in db.exec(
+                select(Booking).where(Booking.id.in_(booking_ids), Booking.status != "confirmed")
+            ).all()
+        }
+        if unconfirmed_booking_ids:
+            sessions = [
+                s for s in sessions
+                if not (s.status in pending_statuses and s.booking_id in unconfirmed_booking_ids)
+            ]
+
     total = len(sessions)
     offset = (page - 1) * size
     paginated = sessions[offset: offset + size]

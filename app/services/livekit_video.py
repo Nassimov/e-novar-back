@@ -158,3 +158,31 @@ async def delete_room(room_name: str) -> None:
             await lkapi.room.delete_room(DeleteRoomRequest(room=room_name))
     except Exception:
         pass
+
+
+async def mute_participant_microphone(room_name: str, identity: str) -> bool:
+    """Server-enforced mute of one participant's microphone track (the
+    teacher moderation control) — this is a SFU-level mute via the LiveKit
+    server API, not something a remote client's own SDK can do to another
+    participant directly. Muting an already-muted/absent track is a no-op,
+    not an error. Returns True if a mic track was found and muted.
+
+    TrackType.AUDIO's protobuf enum value is 0 — compared numerically here
+    instead of importing the enum, since this server package's exact
+    re-export path for that specific enum isn't guaranteed stable across
+    livekit-api versions the way the already-used AccessToken/VideoGrants/
+    CreateRoomRequest top-level imports are."""
+    from livekit.api import ListParticipantsRequest, MuteRoomTrackRequest
+
+    async with LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret) as lkapi:
+        resp = await lkapi.room.list_participants(ListParticipantsRequest(room=room_name))
+        participant = next((p for p in resp.participants if p.identity == identity), None)
+        if not participant:
+            return False
+        mic_track = next((t for t in participant.tracks if t.type == 0), None)  # 0 == TrackType.AUDIO
+        if not mic_track:
+            return False
+        await lkapi.room.mute_published_track(MuteRoomTrackRequest(
+            room=room_name, identity=identity, track_sid=mic_track.sid, muted=True,
+        ))
+        return True

@@ -230,6 +230,35 @@ async def get_classroom_room(
     )
 
 
+@router.post("/{session_id}/mute/{target_user_id}")
+async def mute_participant(
+    session_id: UUID,
+    target_user_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher moderation control — mute a student's microphone mid-session.
+    Server-enforced via the LiveKit room API (the student's own client
+    can't refuse it), not a request the student can just ignore. Also
+    broadcasts a `participant_muted` classroom event so the muted
+    student's own UI reflects it (their local mic toggle shows muted) and
+    everyone else sees who was muted, without needing to poll LiveKit
+    participant state."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only the teacher can mute a participant")
+    if not lk_video.is_session_participant(db, session, target_user_id):
+        raise HTTPException(status_code=404, detail="Not a participant of this session")
+
+    room_key = lk_video.room_key_for_session(db, session)
+    room_name = lk_video.room_name_for_session(room_key)
+    muted = await lk_video.mute_participant_microphone(room_name, str(target_user_id))
+
+    publish_classroom_event(room_key, {"type": "participant_muted", "user_id": str(target_user_id)})
+    return {"muted": muted}
+
+
 @router.post("/{session_id}/dev-simulate-start")
 async def dev_simulate_session_start(
     session_id: UUID,
