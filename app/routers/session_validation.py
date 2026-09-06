@@ -94,6 +94,7 @@ def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatu
         session_id=session.id,
         booking_id=session.booking_id,
         status=sv.status,
+        mode=session.mode,
         # Either participant can end the session once it has actually
         # started — no longer gated on the full scheduled duration having
         # elapsed (a class legitimately finishing early is normal, not
@@ -119,7 +120,7 @@ def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatu
 
 
 @router.get("/{session_id}/validation", response_model=SessionValidationStatus)
-async def get_validation_status(
+def get_validation_status(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -131,7 +132,7 @@ async def get_validation_status(
 
 
 @router.post("/{session_id}/validation/end")
-async def end_session(
+def end_session(
     session_id: UUID,
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -153,35 +154,52 @@ async def end_session(
     if datetime.now(timezone.utc) < session.scheduled_at:
         raise HTTPException(status_code=409, detail="La séance n'a pas encore commencé.")
 
-    now = datetime.now(timezone.utc)
-    sv.teacher_ended_at = now
-    sv.status = "awaiting_student_validation"
-    sv.updated_at = now
-    db.add(sv)
-    ender_uid = UUID(current_user["id"]) if current_user.get("id") else None
-    log_audit(db, session_id=session.id, booking_id=session.booking_id,
-              actor_user_id=ender_uid, actor_ip=_client_ip(request), action="session_ended")
-
+    from app.services import livekit_video as lk_video
     from app.services.session_validation import _notify
-    other_party_id = session.student_id if ender_uid == session.teacher_id else session.teacher_id
-    _notify(db, other_party_id, "📝 Séance terminée — validation requise",
-            "La séance a été marquée comme terminée. Merci de la valider dans l'application.",
-            {"session_id": str(session.id)})
+
+    now = datetime.now(timezone.utc)
+    ender_uid = UUID(current_user["id"]) if current_user.get("id") else None
+
+    # A group lesson has one TutoringSession + SessionValidation row PER
+    # enrolled student — this endpoint is only ever called with ONE of them
+    # (whichever the teacher's browser happens to be anchored to). Every
+    # sibling still needs its own validation row flipped to
+    # awaiting_student_validation, or the other students land on their
+    # summary page (they DO get kicked out live, via the WS broadcast below,
+    # which already reaches the whole shared group room) but their widget
+    # still shows the pre-session state with no way to validate or dispute.
+    slot_id = lk_video.group_slot_id(db, session)
+    sessions_to_end = lk_video.group_sessions(db, slot_id) if slot_id else [session]
+
+    for sibling in sessions_to_end:
+        sibling_sv = sv if sibling.id == session.id else get_or_create_validation(db, sibling)
+        if sibling_sv.status != "scheduled":
+            continue  # already ended by a race with another sibling's own call, or invalid state — leave as-is
+        sibling_sv.teacher_ended_at = now
+        sibling_sv.status = "awaiting_student_validation"
+        sibling_sv.updated_at = now
+        db.add(sibling_sv)
+        log_audit(db, session_id=sibling.id, booking_id=sibling.booking_id,
+                  actor_user_id=ender_uid, actor_ip=_client_ip(request), action="session_ended")
+        other_party_id = sibling.student_id if ender_uid == sibling.teacher_id else sibling.teacher_id
+        _notify(db, other_party_id, "📝 Séance terminée — validation requise",
+                "La séance a été marquée comme terminée. Merci de la valider dans l'application.",
+                {"session_id": str(sibling.id)})
 
     db.commit()
 
     from app.core.classroom_ws import publish_classroom_event
-    from app.services import livekit_video as lk_video
     publish_classroom_event(
         lk_video.room_key_for_session(db, session),
         {"type": "session_ended", "by": str(ender_uid) if ender_uid else None},
     )
 
+    db.refresh(sv)
     return {"status": sv.status}
 
 
 @router.get("/{session_id}/validation/token", response_model=TokenViewResponse)
-async def view_token(
+def view_token(
     session_id: UUID,
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -211,7 +229,7 @@ async def view_token(
 
 
 @router.post("/{session_id}/validation/validate")
-async def validate_session(
+def validate_session(
     session_id: UUID,
     body: ValidateSessionRequest,
     request: Request,
@@ -262,7 +280,7 @@ async def validate_session(
 
 
 @router.post("/{session_id}/validation/confirm")
-async def teacher_confirm_session(
+def teacher_confirm_session(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -474,7 +492,7 @@ async def record_online_connect(
 
 
 @router.post("/{session_id}/validation/online-disconnect")
-async def record_online_disconnect(
+def record_online_disconnect(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -492,7 +510,7 @@ async def record_online_disconnect(
 
 
 @router.post("/{session_id}/validation/gps")
-async def submit_gps(
+def submit_gps(
     session_id: UUID,
     body: GpsSubmitRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),

@@ -216,7 +216,7 @@ def _set_choices(question_id: UUID, choices_in: list[ChoiceIn], db: Session) -> 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/", response_model=QuestionListResponse)
-async def list_questions(
+def list_questions(
     page:       int = Query(1, ge=1),
     size:       int = Query(25, ge=1, le=100),
     search:     Optional[str]  = Query(None),
@@ -295,7 +295,7 @@ async def list_questions(
 
 
 @router.get("/analytics", response_model=AnalyticsResponse)
-async def get_analytics(
+def get_analytics(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -358,7 +358,7 @@ async def get_analytics(
 
 
 @router.get("/import-batches")
-async def list_import_batches(
+def list_import_batches(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=50),
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -392,7 +392,7 @@ async def list_import_batches(
 
 
 @router.get("/catalog", response_model=CatalogResponse)
-async def get_question_catalog(
+def get_question_catalog(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -406,7 +406,7 @@ async def get_question_catalog(
 
 
 @router.get("/{question_id}", response_model=QuestionOut)
-async def get_question(
+def get_question(
     question_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -431,7 +431,7 @@ async def get_question(
 
 
 @router.post("/", response_model=QuestionOut, status_code=201)
-async def create_question(
+def create_question(
     payload: QuestionCreateIn,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -472,7 +472,7 @@ async def create_question(
 
 
 @router.put("/{question_id}", response_model=QuestionOut)
-async def update_question(
+def update_question(
     question_id: str,
     payload: QuestionUpdateIn,
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -520,7 +520,7 @@ async def update_question(
 
 
 @router.delete("/{question_id}", status_code=204)
-async def soft_delete_question(
+def soft_delete_question(
     question_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -543,7 +543,7 @@ async def soft_delete_question(
 
 
 @router.post("/{question_id}/restore", response_model=QuestionOut)
-async def restore_question(
+def restore_question(
     question_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -574,7 +574,7 @@ async def restore_question(
 
 
 @router.post("/{question_id}/validate", response_model=QuestionOut)
-async def validate_question(
+def validate_question(
     question_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -608,7 +608,7 @@ async def validate_question(
 
 
 @router.post("/{question_id}/reject", response_model=QuestionOut)
-async def reject_question(
+def reject_question(
     question_id: str,
     payload: RejectIn,
     current_user: Dict[str, Any] = Depends(get_admin_user),

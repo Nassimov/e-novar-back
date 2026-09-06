@@ -264,7 +264,7 @@ class OnboardingStatusResponse(BaseModel):
 # ─────────────────────────── student complete ─────────────────────────────────
 
 @router.post("/student/complete")
-async def complete_student_onboarding(
+def complete_student_onboarding(
     payload: StudentOnboardingRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -448,7 +448,7 @@ async def complete_student_onboarding(
 # ─────────────────────────── find parent by code ─────────────────────────────
 
 @router.get("/student/find-parent/{code}")
-async def find_parent_by_code(
+def find_parent_by_code(
     code: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -468,7 +468,7 @@ class LinkParentRequest(BaseModel):
 
 
 @router.post("/student/link-parent")
-async def link_parent_post_onboarding(
+def link_parent_post_onboarding(
     payload: LinkParentRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -522,7 +522,7 @@ async def link_parent_post_onboarding(
 # ─────────────────────────── find student by code ────────────────────────────
 
 @router.get("/parent/find-student/{code}")
-async def find_student_by_code(
+def find_student_by_code(
     code: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -540,7 +540,7 @@ async def find_student_by_code(
 # ─────────────────────────── status ──────────────────────────────────────────
 
 @router.get("/status", response_model=OnboardingStatusResponse)
-async def get_onboarding_status(
+def get_onboarding_status(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -686,7 +686,7 @@ async def upload_teacher_document(
 # ─────────────────────────── teacher complete ─────────────────────────────────
 
 @router.post("/teacher/complete")
-async def complete_teacher_onboarding(
+def complete_teacher_onboarding(
     payload: TeacherOnboardingRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -962,7 +962,7 @@ class ParentOnboardingRequest(BaseModel):
 # ─────────────────────────── parent complete ──────────────────────────────────
 
 @router.post("/parent/complete")
-async def complete_parent_onboarding(
+def complete_parent_onboarding(
     payload: ParentOnboardingRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1144,7 +1144,7 @@ async def complete_parent_onboarding(
 # ─────────────────────────── legacy no-op ────────────────────────────────────
 
 @router.post("/complete")
-async def complete_onboarding_legacy(
+def complete_onboarding_legacy(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     role = current_user.get("role", "student")

@@ -89,7 +89,7 @@ class CodeRequest(BaseModel):
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/")
-async def list_active_promos(
+def list_active_promos(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -133,7 +133,7 @@ async def list_active_promos(
 
 
 @router.post("/validate")
-async def validate_code(
+def validate_code(
     payload: CodeRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -170,7 +170,7 @@ async def validate_code(
 
 
 @router.post("/apply")
-async def apply_code(
+def apply_code(
     payload: CodeRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -246,7 +246,7 @@ async def apply_code(
 
 
 @router.get("/my-redemptions")
-async def my_redemptions(
+def my_redemptions(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

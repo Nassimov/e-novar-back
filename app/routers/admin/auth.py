@@ -79,7 +79,7 @@ class Step2Request(BaseModel):
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/step1", summary="Admin login — step 1: email + password")
-async def admin_step1(
+def admin_step1(
     payload: Step1Request,
     request: Request,
     db: Session = Depends(get_db),
@@ -148,7 +148,7 @@ async def admin_step1(
 
 
 @router.post("/step2", summary="Admin login — step 2: TOTP verification")
-async def admin_step2(
+def admin_step2(
     payload: Step2Request,
     request: Request,
     db: Session = Depends(get_db),
@@ -249,7 +249,7 @@ async def admin_step2(
 
 
 @router.post("/logout", summary="Admin logout — invalidate session")
-async def admin_logout(request: Request) -> Dict[str, str]:
+def admin_logout(request: Request) -> Dict[str, str]:
     """
     Invalidate the admin session by removing the JTI from Redis.
     Accepts the token from the Authorization header.

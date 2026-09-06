@@ -44,7 +44,7 @@ _REVIEW_STATUSES = ("disputed", "admin_review", "expired")
 
 
 @router.get("/", response_model=List[AdminReviewItem])
-async def list_review_queue(
+def list_review_queue(
     status_filter: Optional[str] = Query(None, alias="status"),
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -106,7 +106,7 @@ def _get_sv(db: Session, validation_id: UUID) -> SessionValidation:
 
 
 @router.post("/{validation_id}/approve")
-async def approve_validation(
+def approve_validation(
     validation_id: UUID,
     body: AdminDecisionRequest,
     admin: Dict[str, Any] = Depends(get_admin_user),
@@ -147,7 +147,7 @@ async def approve_validation(
 
 
 @router.post("/{validation_id}/reject")
-async def reject_validation(
+def reject_validation(
     validation_id: UUID,
     body: AdminDecisionRequest,
     admin: Dict[str, Any] = Depends(get_admin_user),
@@ -233,7 +233,7 @@ async def reject_validation(
 
 
 @router.post("/{validation_id}/regenerate-token")
-async def admin_regenerate_token(
+def admin_regenerate_token(
     validation_id: UUID,
     admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -259,7 +259,7 @@ async def admin_regenerate_token(
 
 
 @router.get("/settings/trust-score", response_model=TrustScoreSettings)
-async def get_trust_score_settings(
+def get_trust_score_settings(
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -267,7 +267,7 @@ async def get_trust_score_settings(
 
 
 @router.put("/settings/trust-score", response_model=TrustScoreSettings)
-async def update_trust_score_settings(
+def update_trust_score_settings(
     body: TrustScoreSettings,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

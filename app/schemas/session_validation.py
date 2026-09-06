@@ -11,6 +11,7 @@ class SessionValidationStatus(BaseModel):
     session_id: UUID
     booking_id: Optional[UUID] = None
     status: str
+    mode: str = "online"  # "online" | "at_home" | "at_student" — see TutoringSession.mode
     can_end_session: bool
     can_view_token: bool
     token_visible_at: Optional[datetime] = None

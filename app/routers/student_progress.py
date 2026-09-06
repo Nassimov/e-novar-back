@@ -320,7 +320,7 @@ def _generate_recommendations(
 # ─── Endpoint ─────────────────────────────────────────────────────────────────
 
 @router.get("/progress", response_model=ProgressReportResponse)
-async def get_student_progress(
+def get_student_progress(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

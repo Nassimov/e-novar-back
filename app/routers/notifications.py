@@ -23,7 +23,7 @@ class ReadByTypeIn(BaseModel):
 
 
 @router.get("/unread-summary")
-async def get_unread_summary(
+def get_unread_summary(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -51,7 +51,7 @@ async def get_unread_summary(
 
 
 @router.patch("/read-by-type")
-async def mark_notifications_read_by_type(
+def mark_notifications_read_by_type(
     payload: ReadByTypeIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -78,7 +78,7 @@ async def mark_notifications_read_by_type(
 
 
 @router.get("/", response_model=Dict)
-async def list_notifications(
+def list_notifications(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     unread_only: bool = Query(False),
@@ -134,7 +134,7 @@ async def list_notifications(
 
 
 @router.patch("/{notification_id}/archive")
-async def archive_notification(
+def archive_notification(
     notification_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -155,7 +155,7 @@ async def archive_notification(
 
 
 @router.patch("/{notification_id}/unarchive")
-async def unarchive_notification(
+def unarchive_notification(
     notification_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -174,7 +174,7 @@ async def unarchive_notification(
 
 
 @router.delete("/{notification_id}", status_code=204)
-async def delete_notification(
+def delete_notification(
     notification_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -191,7 +191,7 @@ async def delete_notification(
 
 
 @router.patch("/{notification_id}/read")
-async def mark_notification_read(
+def mark_notification_read(
     notification_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -211,7 +211,7 @@ async def mark_notification_read(
 
 
 @router.patch("/read-all")
-async def mark_all_notifications_read(
+def mark_all_notifications_read(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -232,7 +232,7 @@ async def mark_all_notifications_read(
 
 
 @router.get("/preferences")
-async def get_notification_preferences(
+def get_notification_preferences(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -245,7 +245,7 @@ async def get_notification_preferences(
 
 
 @router.patch("/preferences/category")
-async def toggle_category_preference(
+def toggle_category_preference(
     payload: CategoryPrefToggle,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -273,7 +273,7 @@ async def toggle_category_preference(
 
 
 @router.put("/preferences")
-async def update_notification_preferences(
+def update_notification_preferences(
     payload: NotificationPrefsUpdate,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

@@ -21,7 +21,7 @@ CATEGORY_ORDER = ["powerups", "digital", "physical", "services", "travel"]
 
 
 @router.get("/items")
-async def list_store_items(
+def list_store_items(
     category: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
@@ -51,7 +51,7 @@ async def list_store_items(
 
 
 @router.post("/items/{item_id}/redeem", status_code=status.HTTP_201_CREATED)
-async def redeem_store_item(
+def redeem_store_item(
     item_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -93,7 +93,7 @@ async def redeem_store_item(
 
 
 @router.get("/claims")
-async def list_my_claims(
+def list_my_claims(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -142,7 +142,7 @@ async def list_my_claims(
 
 
 @router.get("/entitlements")
-async def list_my_entitlements(
+def list_my_entitlements(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -178,7 +178,7 @@ async def list_my_entitlements(
 
 
 @router.get("/entitlements/pdf-pack/files")
-async def get_pdf_pack_files(
+def get_pdf_pack_files(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -232,7 +232,7 @@ async def get_pdf_pack_files(
 
 
 @router.get("/entitlements/stickers/files")
-async def get_sticker_files(
+def get_sticker_files(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -288,7 +288,7 @@ class _StickerActivateBody(BaseModel):
 
 
 @router.patch("/entitlements/stickers/activate")
-async def activate_sticker(
+def activate_sticker(
     body: _StickerActivateBody,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

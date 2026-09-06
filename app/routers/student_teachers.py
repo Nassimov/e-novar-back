@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from datetime import date as dt_date, date, timedelta
+from dataclasses import asdict, dataclass
+from datetime import date as dt_date, date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from sqlalchemy import func as sa_func, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from app.core.cache import cache_invalidate, cached_json
 from app.dependencies import get_current_user, get_db
 from app.models.booking import Booking, BookingRefusal, TutoringSession
 from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
@@ -67,6 +69,87 @@ def _resolve_teacher(db: Session, teacher_ref: str) -> TeacherProfile:
     if tp is None or tp.status not in ("approved",):
         raise HTTPException(status_code=404, detail="Teacher not found")
     return tp
+
+
+# ─── Search corpus cache ───────────────────────────────────────────────────────
+# `student_teachers_search` used to re-scan the ENTIRE approved-teacher table
+# on every single call, regardless of filters — the biggest DB cost on the
+# highest-traffic student-facing read in the app. This caches just that one
+# base fetch (student-independent — ranking/personalization stays live, see
+# `student_lesson_format` below) for a short TTL. Deliberately a SLIM DTO,
+# not the raw `TeacherProfile` row: the real model carries iban/bank_holder/
+# bank_last4/cv_url/cover_letter, none of which search needs — caching those
+# in Redis would be pointless sensitive-data exposure (see perf audit §7/§31).
+TEACHER_SEARCH_CACHE_KEY = "teacher-search:approved-profiles"
+TEACHER_SEARCH_CACHE_TTL = 30  # seconds — semi-dynamic tier: a rare admin/price edit can lag this long
+
+TEACHER_PROFILE_CACHE_TTL = 60  # seconds
+
+
+def teacher_profile_cache_key(teacher_id: UUID) -> str:
+    return f"teacher-profile:{teacher_id}"
+
+
+@dataclass
+class _SearchTeacherRow:
+    """Only the fields `student_teachers_search` actually reads off `TeacherProfile`."""
+    user_id: str
+    status: str
+    price_per_session: int
+    currency: str
+    rating_avg: float
+    reviews_count: int
+    verified: bool
+    headline: Optional[str]
+    bio_long: Optional[str]
+    sponsored: bool
+    boost_expires_at: Optional[str]
+    teaching_wilaya: Optional[str]
+    teaching_wilayas: Optional[List[str]]
+    teaching_nationwide: bool
+    languages: Optional[List[str]]
+    badge: Optional[str]
+    kp_reward: int
+    slug: Optional[str]
+
+
+def _load_approved_teacher_rows(db: Session) -> List[dict]:
+    rows = db.exec(select(TeacherProfile).where(TeacherProfile.status == "approved")).all()
+    return [
+        asdict(_SearchTeacherRow(
+            user_id=str(tp.user_id),
+            status=tp.status,
+            price_per_session=tp.price_per_session,
+            currency=tp.currency,
+            rating_avg=tp.rating_avg,
+            reviews_count=tp.reviews_count,
+            verified=tp.verified,
+            headline=tp.headline,
+            bio_long=tp.bio_long,
+            sponsored=tp.sponsored,
+            boost_expires_at=tp.boost_expires_at.isoformat() if tp.boost_expires_at else None,
+            teaching_wilaya=tp.teaching_wilaya,
+            teaching_wilayas=tp.teaching_wilayas,
+            teaching_nationwide=tp.teaching_nationwide,
+            languages=tp.languages,
+            badge=tp.badge,
+            kp_reward=tp.kp_reward,
+            slug=tp.slug,
+        ))
+        for tp in rows
+    ]
+
+
+def _get_cached_approved_teacher_rows(db: Session) -> List[_SearchTeacherRow]:
+    raw = cached_json(TEACHER_SEARCH_CACHE_KEY, TEACHER_SEARCH_CACHE_TTL, lambda: _load_approved_teacher_rows(db))
+    rows = []
+    for row in raw:
+        row = dict(row)
+        row["user_id"] = UUID(row["user_id"])
+        if row["boost_expires_at"]:
+            row["boost_expires_at"] = datetime.fromisoformat(row["boost_expires_at"])
+        rows.append(_SearchTeacherRow(**row))
+    return rows
 
 
 def _fetch_absences_for_range(db: Session, teacher_id: UUID, date_from: date, date_to: date) -> List[TeacherAbsence]:
@@ -352,7 +435,7 @@ class TeacherSearchResponse(BaseModel):
 
 
 @router.get("/teachers/search", response_model=TeacherSearchResponse)
-async def student_teachers_search(
+def student_teachers_search(
     q: Optional[str] = Query(None),
     subject: Optional[str] = Query(None),
     wilaya: Optional[str] = Query(None),
@@ -381,12 +464,12 @@ async def student_teachers_search(
     except Exception:
         pass
 
-    all_tp = db.exec(select(TeacherProfile).where(TeacherProfile.status == "approved")).all()
+    all_tp = _get_cached_approved_teacher_rows(db)
     if not all_tp:
         return TeacherSearchResponse(items=[], total=0)
 
     teacher_ids: list[UUID] = [tp.user_id for tp in all_tp]
-    tp_map: dict[UUID, TeacherProfile] = {tp.user_id: tp for tp in all_tp}
+    tp_map: dict[UUID, _SearchTeacherRow] = {tp.user_id: tp for tp in all_tp}
 
     if mode:
         mode_rows = db.exec(
@@ -742,83 +825,92 @@ class TeacherSlotItem(BaseModel):
 
 
 @router.get("/teachers/{teacher_ref}", response_model=TeacherPublicProfile)
-async def get_teacher_profile(
+def get_teacher_profile(
     teacher_ref: str,
     db: Session = Depends(get_db),
     _: Dict[str, Any] = Depends(get_current_user),
 ):
-    tp = _resolve_teacher(db, teacher_ref)
+    tp = _resolve_teacher(db, teacher_ref)  # always live — resolves ref + gates on approved status
     teacher_id = tp.user_id
 
-    p = db.get(Profile, teacher_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    def _compute() -> dict:
+        p = db.get(Profile, teacher_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
 
-    sp_rows = db.exec(
-        select(TeacherSubjectPrice, Subject, Level)
-        .join(Subject, Subject.id == TeacherSubjectPrice.subject_id)
-        .join(Level, Level.id == TeacherSubjectPrice.level_id)
-        .where(TeacherSubjectPrice.teacher_id == teacher_id)
-        .where(TeacherSubjectPrice.active == True)  # noqa: E712
-    ).all()
-    subjects = [
-        TeacherSubjectItem(
-            subject_id=str(subj.id),
-            level_id=str(lvl.id),
-            name=subj.name,
-            level=lvl.label,
-            price=tsp.price_single,
+        sp_rows = db.exec(
+            select(TeacherSubjectPrice, Subject, Level)
+            .join(Subject, Subject.id == TeacherSubjectPrice.subject_id)
+            .join(Level, Level.id == TeacherSubjectPrice.level_id)
+            .where(TeacherSubjectPrice.teacher_id == teacher_id)
+            .where(TeacherSubjectPrice.active == True)  # noqa: E712
+        ).all()
+        subjects = [
+            TeacherSubjectItem(
+                subject_id=str(subj.id),
+                level_id=str(lvl.id),
+                name=subj.name,
+                level=lvl.label,
+                price=tsp.price_single,
+            )
+            for tsp, subj, lvl in sp_rows
+        ]
+
+        delivery_rows = db.exec(
+            select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id == teacher_id)
+        ).all()
+        modes = list({d.mode for d in delivery_rows})
+        session_types = list({d.type for d in delivery_rows})
+
+        diploma_rows = db.exec(select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)).all()
+        diplomas = [
+            TeacherDiplomaItem(
+                id=str(d.id), name=d.name, file_url=d.file_url,
+                file_type=d.file_type, verified=d.verified,
+            )
+            for d in diploma_rows
+        ]
+
+        profile = TeacherPublicProfile(
+            id=str(teacher_id),
+            slug=_get_or_make_slug(tp, p),
+            first_name=p.first_name or "",
+            last_name=p.last_name or "",
+            full_name=p.full_name or "",
+            avatar_url=p.avatar_url,
+            active_sticker_url=p.active_sticker_url,
+            bio=tp.bio_long or p.bio,
+            headline=tp.headline,
+            wilaya=tp.teaching_wilaya or p.wilaya,
+            price_per_session=tp.price_per_session,
+            currency=tp.currency,
+            country=tp.country,
+            kp_reward=tp.kp_reward,
+            rating_avg=round(tp.rating_avg, 1),
+            reviews_count=tp.reviews_count,
+            verified=tp.verified,
+            badge=tp.badge,
+            experience_years=experience_years_from(tp.created_at),
+            success_rate=tp.success_rate,
+            students_count=tp.students_count,
+            hours_taught=tp.hours_taught,
+            subjects=subjects,
+            modes=modes if modes else ["online"],
+            session_types=session_types if session_types else ["individual"],
+            diplomas=diplomas,
         )
-        for tsp, subj, lvl in sp_rows
-    ]
+        return profile.model_dump(mode="json")
 
-    delivery_rows = db.exec(
-        select(TeacherDeliveryOption).where(TeacherDeliveryOption.teacher_id == teacher_id)
-    ).all()
-    modes = list({d.mode for d in delivery_rows})
-    session_types = list({d.type for d in delivery_rows})
-
-    diploma_rows = db.exec(select(TeacherDiploma).where(TeacherDiploma.teacher_id == teacher_id)).all()
-    diplomas = [
-        TeacherDiplomaItem(
-            id=str(d.id), name=d.name, file_url=d.file_url,
-            file_type=d.file_type, verified=d.verified,
-        )
-        for d in diploma_rows
-    ]
-
-    return TeacherPublicProfile(
-        id=str(teacher_id),
-        slug=_get_or_make_slug(tp, p),
-        first_name=p.first_name or "",
-        last_name=p.last_name or "",
-        full_name=p.full_name or "",
-        avatar_url=p.avatar_url,
-        active_sticker_url=p.active_sticker_url,
-        bio=tp.bio_long or p.bio,
-        headline=tp.headline,
-        wilaya=tp.teaching_wilaya or p.wilaya,
-        price_per_session=tp.price_per_session,
-        currency=tp.currency,
-        country=tp.country,
-        kp_reward=tp.kp_reward,
-        rating_avg=round(tp.rating_avg, 1),
-        reviews_count=tp.reviews_count,
-        verified=tp.verified,
-        badge=tp.badge,
-        experience_years=experience_years_from(tp.created_at),
-        success_rate=tp.success_rate,
-        students_count=tp.students_count,
-        hours_taught=tp.hours_taught,
-        subjects=subjects,
-        modes=modes if modes else ["online"],
-        session_types=session_types if session_types else ["individual"],
-        diplomas=diplomas,
-    )
+    # This response has no per-viewer personalization (unlike search's
+    # ranking) — safe to cache verbatim. Semi-dynamic tier: short TTL,
+    # invalidated explicitly wherever the teacher's own data changes
+    # (see teacher_profile_cache_key call sites in teachers.py/admin/teachers.py).
+    data = cached_json(teacher_profile_cache_key(teacher_id), TEACHER_PROFILE_CACHE_TTL, _compute)
+    return TeacherPublicProfile(**data)
 
 
 @router.get("/teachers/{teacher_ref}/reviews")
-async def get_teacher_reviews(
+def get_teacher_reviews(
     teacher_ref: str,
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=50),
@@ -866,7 +958,7 @@ async def get_teacher_reviews(
 
 
 @router.get("/teachers/{teacher_ref}/slots")
-async def get_teacher_slots(
+def get_teacher_slots(
     teacher_ref: str,
     db: Session = Depends(get_db),
     _: Dict[str, Any] = Depends(get_current_user),
@@ -916,7 +1008,7 @@ async def get_teacher_slots(
 
 
 @router.get("/teachers/{teacher_ref}/absences", response_model=List[AbsenceResponse])
-async def get_teacher_absences(
+def get_teacher_absences(
     teacher_ref: str,
     db: Session = Depends(get_db),
     _: Dict[str, Any] = Depends(get_current_user),
@@ -970,7 +1062,7 @@ class ReviewSubmitBody(BaseModel):
 
 
 @router.get("/teachers/{teacher_ref}/my-reviews", response_model=MyReviewsResponse)
-async def get_my_reviews(
+def get_my_reviews(
     teacher_ref: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1070,7 +1162,7 @@ class BookingBody(BaseModel):
 
 
 @router.post("/teachers/{teacher_ref}/book", status_code=201)
-async def book_teacher_slot(
+def book_teacher_slot(
     teacher_ref: str,
     body: BookingBody,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -1211,6 +1303,29 @@ async def book_teacher_slot(
                 status_code=409,
                 detail="Ce professeur a déclaré une absence sur cette date/horaire. Choisissez un autre créneau.",
             )
+        # Neither side of a NEW booking may already be in a different,
+        # overlapping CONFIRMED session — a student can't be with two
+        # teachers at once, and a teacher can't teach two different
+        # students at once (a shared group slot is excluded via
+        # exclude_slot_id, that's the same session, not a conflict).
+        if gate_time is not None:
+            gate_window_start = dt.datetime.combine(gate_date, gate_time)
+            gate_window_end = gate_window_start + dt.timedelta(minutes=body.duration_min)
+            if matching.find_overlapping_confirmed_sessions(
+                db, window_start=gate_window_start, window_end=gate_window_end, student_id=student_id,
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Vous avez déjà une séance confirmée avec un autre professeur sur ce créneau.",
+                )
+            if matching.find_overlapping_confirmed_sessions(
+                db, window_start=gate_window_start, window_end=gate_window_end,
+                teacher_id=teacher_id, exclude_slot_id=gate_slot_id,
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Ce professeur a déjà une séance confirmée avec un autre élève sur ce créneau.",
+                )
         resolved_subject_id, _ = _resolve_requested_subject_level(gate_slot_id, gate_subject_id, gate_level_id, db)
         _check_refusal_block(
             db,
@@ -1523,7 +1638,7 @@ async def book_teacher_slot(
 
 
 @router.get("/bookings/lookup")
-async def lookup_booking(
+def lookup_booking(
     session_id: Optional[str] = Query(default=None),
     booking_id: Optional[str] = Query(default=None),
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -1605,7 +1720,7 @@ async def lookup_booking(
 
 
 @router.post("/teachers/{teacher_ref}/reviews", status_code=201)
-async def submit_teacher_review(
+def submit_teacher_review(
     teacher_ref: str,
     body: ReviewSubmitBody,
     current_user: Dict[str, Any] = Depends(get_current_user),

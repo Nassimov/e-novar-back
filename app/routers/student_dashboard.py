@@ -128,7 +128,7 @@ def _compute_streak_with_shield(sessions: list, user_id, db) -> int:
 
 
 @router.get("/dashboard", response_model=StudentDashboardResponse)
-async def student_dashboard(
+def student_dashboard(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -350,7 +350,7 @@ class StudentSessionListResponse(BaseModel):
 
 
 @router.get("/sessions", response_model=StudentSessionListResponse)
-async def student_session_list(
+def student_session_list(
     type: str = Query("upcoming", pattern="^(upcoming|past)$"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),

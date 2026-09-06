@@ -255,7 +255,7 @@ def _auto_expire(user_id: UUID, db: Session) -> None:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/", response_model=ChallengesListResponse)
-async def list_challenges(
+def list_challenges(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -305,7 +305,7 @@ async def list_challenges(
 
 
 @router.get("/history/", response_model=HistoryOut)
-async def get_history(
+def get_history(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -348,7 +348,7 @@ async def get_history(
 
 
 @router.post("/{challenge_id}/start", response_model=ChallengeOut)
-async def start_challenge(
+def start_challenge(
     challenge_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -390,7 +390,7 @@ async def start_challenge(
 
 
 @router.post("/{challenge_id}/decline", status_code=status.HTTP_204_NO_CONTENT)
-async def decline_challenge(
+def decline_challenge(
     challenge_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

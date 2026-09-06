@@ -175,7 +175,7 @@ def resolve_campaign_targets(db: Session, target_type: str, filters: Dict[str, A
 # ─── CRUD ───────────────────────────────────────────────────────────────────────
 
 @router.get("/")
-async def list_campaigns(
+def list_campaigns(
     status_filter: Optional[str] = Query(None, alias="status"),
     admin=Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -188,7 +188,7 @@ async def list_campaigns(
 
 
 @router.post("/", status_code=201)
-async def create_campaign(
+def create_campaign(
     payload: CampaignIn,
     admin=Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -210,7 +210,7 @@ async def create_campaign(
 
 
 @router.get("/{campaign_id}")
-async def get_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
+def get_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
     campaign = db.get(NotificationCampaign, campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -218,7 +218,7 @@ async def get_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Ses
 
 
 @router.patch("/{campaign_id}")
-async def update_campaign(
+def update_campaign(
     campaign_id: UUID,
     payload: CampaignUpdate,
     admin=Depends(get_admin_user),
@@ -242,7 +242,7 @@ async def update_campaign(
 
 
 @router.delete("/{campaign_id}", status_code=204)
-async def cancel_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
+def cancel_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
     campaign = db.get(NotificationCampaign, campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -254,7 +254,7 @@ async def cancel_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: 
 
 
 @router.post("/{campaign_id}/preview")
-async def preview_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
+def preview_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
     """Resolves the audience without sending anything — recipient count for the admin UI."""
     campaign = db.get(NotificationCampaign, campaign_id)
     if campaign is None:
@@ -264,7 +264,7 @@ async def preview_campaign(campaign_id: UUID, admin=Depends(get_admin_user), db:
 
 
 @router.post("/{campaign_id}/send-now", status_code=202)
-async def send_campaign_now(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
+def send_campaign_now(campaign_id: UUID, admin=Depends(get_admin_user), db: Session = Depends(get_db)):
     campaign = db.get(NotificationCampaign, campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -284,7 +284,7 @@ async def send_campaign_now(campaign_id: UUID, admin=Depends(get_admin_user), db
 
 
 @router.get("/{campaign_id}/logs")
-async def get_campaign_logs(
+def get_campaign_logs(
     campaign_id: UUID,
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=200),

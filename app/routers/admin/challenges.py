@@ -64,7 +64,7 @@ def _slugify(text: str) -> str:
 
 
 @router.get("/")
-async def list_challenges(
+def list_challenges(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -109,7 +109,7 @@ async def list_challenges(
 
 
 @router.post("/", status_code=201)
-async def create_challenge(
+def create_challenge(
     payload: AdminCreateChallenge,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -140,7 +140,7 @@ async def create_challenge(
 
 
 @router.put("/{challenge_id}")
-async def update_challenge(
+def update_challenge(
     challenge_id: str,
     payload: AdminUpdateChallenge,
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -161,7 +161,7 @@ async def update_challenge(
 
 
 @router.delete("/{challenge_id}", status_code=204)
-async def deactivate_challenge(
+def deactivate_challenge(
     challenge_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -176,7 +176,7 @@ async def deactivate_challenge(
 
 
 @router.get("/submissions")
-async def list_submissions(
+def list_submissions(
     status_filter: Optional[str] = Query(None, alias="status"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -270,7 +270,7 @@ async def list_submissions(
 
 
 @router.get("/submissions/{submission_id}/proof-urls")
-async def get_proof_signed_urls(
+def get_proof_signed_urls(
     submission_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -304,7 +304,7 @@ async def get_proof_signed_urls(
 
 
 @router.put("/submissions/{submission_id}/approve")
-async def approve_submission(
+def approve_submission(
     submission_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -355,7 +355,7 @@ async def approve_submission(
 
 
 @router.put("/submissions/{submission_id}/reject")
-async def reject_submission(
+def reject_submission(
     submission_id: UUID,
     reason: str = Body("", embed=True),
     current_user: Dict[str, Any] = Depends(get_admin_user),

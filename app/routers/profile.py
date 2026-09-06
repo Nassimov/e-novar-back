@@ -515,7 +515,7 @@ async def update_parent_profile(
 
 
 @router.get("/", response_model=ProfileResponse)
-async def get_profile(
+def get_profile(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -525,7 +525,7 @@ async def get_profile(
 
 
 @router.put("/", response_model=ProfileResponse)
-async def update_profile(
+def update_profile(
     payload: ProfileUpdateRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -584,7 +584,7 @@ async def upload_avatar(
 
 
 @router.get("/teacher", tags=["Profile"])
-async def get_teacher_profile(
+def get_teacher_profile(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -607,7 +607,7 @@ async def get_teacher_profile(
 
 
 @router.post("/teacher/{teacher_user_id}/approve", tags=["Admin — Teachers"])
-async def approve_teacher(
+def approve_teacher(
     teacher_user_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -642,7 +642,7 @@ async def approve_teacher(
 
 
 @router.post("/teacher/{teacher_user_id}/reject", tags=["Admin — Teachers"])
-async def reject_teacher(
+def reject_teacher(
     teacher_user_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -661,7 +661,7 @@ async def reject_teacher(
 
 
 @router.put("/notifications")
-async def update_notification_prefs(
+def update_notification_prefs(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -683,7 +683,7 @@ def _pm_to_response(pm: PaymentMethod) -> PaymentMethodResponse:
 
 
 @router.get("/payment-methods", response_model=List[PaymentMethodResponse])
-async def list_payment_methods(
+def list_payment_methods(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -702,7 +702,7 @@ async def list_payment_methods(
     response_model=PaymentMethodResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def add_payment_method(
+def add_payment_method(
     payload: PaymentMethodCreate,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -738,7 +738,7 @@ async def add_payment_method(
 
 
 @router.put("/payment-methods/{method_id}/set-default", response_model=PaymentMethodResponse)
-async def set_default_payment_method(
+def set_default_payment_method(
     method_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -777,7 +777,7 @@ async def set_default_payment_method(
 
 
 @router.delete("/payment-methods/{method_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_payment_method(
+def delete_payment_method(
     method_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

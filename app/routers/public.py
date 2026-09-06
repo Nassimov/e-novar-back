@@ -21,12 +21,14 @@ from app.services.pricing import get_platform_settings
 router = APIRouter()
 
 # These are hit unauthenticated, often on the home page / pre-booking flow —
-# cache to spare Postgres a round trip per visitor. Settings-derived values
-# use a short TTL and are invalidated immediately on admin write (see
-# app/routers/admin/settings.py); stats/leaderboard just tolerate a small
-# staleness window since they're aggregate/ranking data, not something a
-# user notices being 60s old.
-_SETTINGS_TTL = 120
+# cache to spare Postgres a round trip per visitor. Settings are invalidated
+# immediately on admin write (see app/routers/admin/settings.py), so the TTL
+# below is just a safety-net ceiling, not the real freshness bound — safe to
+# set long. Stats/leaderboard have no explicit invalidation wired (aggregate/
+# ranking data with many possible writers), so their TTL IS the real
+# freshness bound — kept short, since a user could plausibly notice a stale
+# leaderboard position within a minute.
+_SETTINGS_TTL = 3600
 _STATS_TTL = 60
 _LEADERBOARD_TTL = 60
 
@@ -38,7 +40,7 @@ class PricingSettingsPublic(BaseModel):
 
 
 @router.get("/pricing", response_model=PricingSettingsPublic)
-async def get_public_pricing(response: Response, db: Session = Depends(get_db)):
+def get_public_pricing(response: Response, db: Session = Depends(get_db)):
     """Current pack/group discount percentages — used to preview prices pre-auth."""
     response.headers["Cache-Control"] = f"public, max-age={_SETTINGS_TTL}"
     def _load():
@@ -58,7 +60,7 @@ class BookingPolicyPublic(BaseModel):
 
 
 @router.get("/booking-policy", response_model=BookingPolicyPublic)
-async def get_public_booking_policy(response: Response, db: Session = Depends(get_db)):
+def get_public_booking_policy(response: Response, db: Session = Depends(get_db)):
     """Timing rules shown as countdowns to the user (teacher's pending
     request auto-cancel deadline, student's pending-validation window) —
     admin-configurable in app/routers/admin/settings.py."""
@@ -84,7 +86,7 @@ class BankTransferInfoPublic(BaseModel):
 
 
 @router.get("/bank-transfer-info", response_model=BankTransferInfoPublic)
-async def get_bank_transfer_info(response: Response, db: Session = Depends(get_db)):
+def get_bank_transfer_info(response: Response, db: Session = Depends(get_db)):
     """Platform's own receiving RIBs, shown to a student who picks the RIB
     CIB / RIB Edahabia payment method at booking (see student.payment.tsx) —
     admin-configurable in app/routers/admin/settings.py."""

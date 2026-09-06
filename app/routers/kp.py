@@ -40,7 +40,7 @@ STORE_REWARDS = [
 
 
 @router.get("/balance", response_model=KpBalanceResponse)
-async def get_kp_balance(
+def get_kp_balance(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -55,7 +55,7 @@ async def get_kp_balance(
 
 
 @router.get("/transactions", response_model=Dict)
-async def get_kp_transactions(
+def get_kp_transactions(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -95,7 +95,7 @@ async def get_kp_transactions(
 
 
 @router.post("/spend")
-async def spend_kp_endpoint(
+def spend_kp_endpoint(
     payload: KpSpendRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -119,7 +119,7 @@ async def spend_kp_endpoint(
 
 
 @router.get("/levels")
-async def get_levels():
+def get_levels():
     """Get all KP level definitions."""
     levels = []
     for i, threshold in enumerate(LEVEL_THRESHOLDS):
@@ -145,7 +145,7 @@ def _get_level_title(level: int) -> str:
 
 
 @router.get("/badges", response_model=List[BadgeResponse])
-async def list_badges(
+def list_badges(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -165,7 +165,7 @@ async def list_badges(
 
 
 @router.post("/badges/{badge_id}/unlock")
-async def unlock_badge(
+def unlock_badge(
     badge_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -190,7 +190,7 @@ async def unlock_badge(
 
 
 @router.get("/leaderboard", response_model=List[LeaderboardEntry])
-async def get_leaderboard(
+def get_leaderboard(
     period: str = Query("week", pattern="^(week|month|all)$"),
     size: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),

@@ -90,7 +90,7 @@ router = APIRouter(tags=["sessions"])
 
 
 @router.get("/", response_model=SessionListResponse)
-async def list_sessions(
+def list_sessions(
     status_filter: Optional[str] = Query(None, alias="status"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -158,7 +158,7 @@ async def list_sessions(
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
-async def get_session(
+def get_session(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -177,7 +177,7 @@ async def get_session(
 
 
 @router.post("/{session_id}/cancel")
-async def cancel_session(
+def cancel_session(
     session_id: UUID,
     payload: Optional[CancelSessionRequest] = Body(None),
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -379,7 +379,7 @@ async def complete_session(
 
 
 @router.get("/{session_id}/replay")
-async def get_session_replay(
+def get_session_replay(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -400,7 +400,7 @@ async def get_session_replay(
 
 
 @router.post("/{session_id}/join", response_model=JoinSessionResponse)
-async def join_session(
+def join_session(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -448,7 +448,7 @@ async def join_session(
 
 
 @router.get("/{session_id}/summary")
-async def get_session_summary(
+def get_session_summary(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

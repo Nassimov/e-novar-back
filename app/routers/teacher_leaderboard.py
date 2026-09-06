@@ -168,7 +168,7 @@ def _compute_teacher_leaderboard_entries(db: Session, period: str) -> list[dict]
 # ─── Endpoint ─────────────────────────────────────────────────────────────────
 
 @router.get("/leaderboard", response_model=TeacherLeaderboardResponse)
-async def get_teacher_leaderboard(
+def get_teacher_leaderboard(
     period: str = "month",
     limit: int = 50,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),

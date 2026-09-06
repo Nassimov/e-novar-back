@@ -64,7 +64,7 @@ class BookingListItem(BaseModel):
 
 
 @router.get("/", response_model=List[BookingListItem])
-async def list_bookings(
+def list_bookings(
     payment_method: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     _admin: Dict[str, Any] = Depends(get_admin_user),
@@ -108,7 +108,7 @@ async def list_bookings(
 
 
 @router.post("/{booking_id}/approve-manual-payment")
-async def approve_manual_payment(
+def approve_manual_payment(
     booking_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -181,7 +181,7 @@ async def approve_manual_payment(
 
 
 @router.post("/{booking_id}/reject-manual-payment")
-async def reject_manual_payment(
+def reject_manual_payment(
     booking_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

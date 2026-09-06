@@ -119,7 +119,7 @@ def _due_label(due_at: Optional[datetime]) -> Optional[str]:
 # ── List homework ─────────────────────────────────────────────────────────────
 
 @router.get("/homework", response_model=HomeworkListResponse)
-async def student_homework_list(
+def student_homework_list(
     status: Optional[str] = Query(None, pattern="^(todo|submitted|graded)$"),
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -247,7 +247,7 @@ async def student_homework_list(
 # ── Stats / chart data ────────────────────────────────────────────────────────
 
 @router.get("/homework/stats", response_model=HomeworkStatsResponse)
-async def student_homework_stats(
+def student_homework_stats(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -320,7 +320,7 @@ async def student_homework_stats(
 # ── Submit homework ───────────────────────────────────────────────────────────
 
 @router.post("/homework/{homework_id}/submit")
-async def student_submit_homework(
+def student_submit_homework(
     homework_id: UUID,
     payload: SubmitRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -366,7 +366,7 @@ async def student_submit_homework(
 # ── Update hints_checked ──────────────────────────────────────────────────────
 
 @router.patch("/homework/{homework_id}/hints")
-async def update_hints_checked(
+def update_hints_checked(
     homework_id: UUID,
     payload: HintsRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),

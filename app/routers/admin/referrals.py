@@ -53,7 +53,7 @@ def _name(profiles: dict, uid: Optional[UUID]) -> Optional[str]:
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=AdminReferralStats)
-async def admin_referral_stats(
+def admin_referral_stats(
     _: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -94,7 +94,7 @@ async def admin_referral_stats(
 
 
 @router.get("", response_model=List[AdminReferralRow])
-async def admin_list_referrals(
+def admin_list_referrals(
     status: Optional[str] = Query(None, description="registered | validated"),
     role: Optional[str] = Query(None, description="student | teacher | parent"),
     search: Optional[str] = Query(None, description="Name or code search"),

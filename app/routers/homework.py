@@ -47,7 +47,7 @@ def _to_response(db: Session, hw: Homework) -> HomeworkResponse:
 
 
 @router.get("/", response_model=Dict)
-async def list_homework(
+def list_homework(
     status_filter: Optional[str] = Query(None, alias="status"),
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
@@ -86,7 +86,7 @@ async def list_homework(
 
 
 @router.get("/{homework_id}", response_model=HomeworkResponse)
-async def get_homework(
+def get_homework(
     homework_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -105,7 +105,7 @@ async def get_homework(
 
 
 @router.post("/", response_model=HomeworkResponse, status_code=status.HTTP_201_CREATED)
-async def create_homework(
+def create_homework(
     payload: HomeworkCreate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -168,7 +168,7 @@ async def create_homework(
 
 
 @router.put("/{homework_id}", response_model=HomeworkResponse)
-async def update_homework(
+def update_homework(
     homework_id: UUID,
     payload: HomeworkCreate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
@@ -200,7 +200,7 @@ async def update_homework(
 
 
 @router.post("/{homework_id}/submit")
-async def submit_homework(
+def submit_homework(
     homework_id: UUID,
     payload: HomeworkSubmitRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -237,7 +237,7 @@ async def submit_homework(
 
 
 @router.post("/{homework_id}/grade")
-async def grade_homework(
+def grade_homework(
     homework_id: UUID,
     payload: HomeworkGradeRequest,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),

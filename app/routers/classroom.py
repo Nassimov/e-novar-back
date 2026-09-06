@@ -425,7 +425,7 @@ class NotepadIn(BaseModel):
 
 
 @router.get("/{session_id}/notepad", response_model=NotepadOut)
-async def get_notepad(
+def get_notepad(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -443,7 +443,7 @@ async def get_notepad(
 
 
 @router.put("/{session_id}/notepad", response_model=NotepadOut)
-async def update_notepad(
+def update_notepad(
     session_id: UUID,
     payload: NotepadIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -481,7 +481,7 @@ class WhiteboardBackgroundIn(BaseModel):
 
 
 @router.get("/{session_id}/whiteboard-background", response_model=WhiteboardBackgroundOut)
-async def get_whiteboard_background(
+def get_whiteboard_background(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -494,7 +494,7 @@ async def get_whiteboard_background(
 
 
 @router.put("/{session_id}/whiteboard-background", response_model=WhiteboardBackgroundOut)
-async def set_whiteboard_background(
+def set_whiteboard_background(
     session_id: UUID,
     payload: WhiteboardBackgroundIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -533,7 +533,7 @@ async def set_whiteboard_background(
 
 
 @router.delete("/{session_id}/whiteboard-background", status_code=204)
-async def clear_whiteboard_background(
+def clear_whiteboard_background(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -571,7 +571,7 @@ class BookmarkOut(BaseModel):
 
 
 @router.post("/{session_id}/bookmarks", response_model=BookmarkOut, status_code=201)
-async def create_bookmark(
+def create_bookmark(
     session_id: UUID,
     payload: BookmarkIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -598,7 +598,7 @@ async def create_bookmark(
 
 
 @router.get("/{session_id}/bookmarks", response_model=List[BookmarkOut])
-async def list_bookmarks(
+def list_bookmarks(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -668,7 +668,7 @@ async def create_whiteboard_snapshot(
 
 
 @router.get("/{session_id}/whiteboard-snapshots", response_model=List[WhiteboardSnapshotOut])
-async def list_whiteboard_snapshots(
+def list_whiteboard_snapshots(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -748,7 +748,7 @@ class GroupSessionsResponse(BaseModel):
 
 
 @router.get("/{session_id}/group-sessions", response_model=GroupSessionsResponse)
-async def get_group_sessions(
+def get_group_sessions(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -796,7 +796,7 @@ async def get_group_sessions(
 # ─── In-call chat provisioning ──────────────────────────────────────────────
 
 @router.get("/{session_id}/chat")
-async def get_classroom_chat(
+def get_classroom_chat(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -874,7 +874,7 @@ def _chapter_out(c: SessionChapter) -> ChapterOut:
 
 
 @router.get("/{session_id}/chapters", response_model=List[ChapterOut])
-async def list_chapters(
+def list_chapters(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -888,7 +888,7 @@ async def list_chapters(
 
 
 @router.post("/{session_id}/chapters", response_model=ChapterOut, status_code=201)
-async def create_chapter(
+def create_chapter(
     session_id: UUID,
     payload: ChapterIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -910,7 +910,7 @@ async def create_chapter(
 
 
 @router.delete("/{session_id}/chapters/{chapter_id}", status_code=204)
-async def delete_chapter(
+def delete_chapter(
     session_id: UUID,
     chapter_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -930,7 +930,7 @@ async def delete_chapter(
 
 
 @router.post("/{session_id}/chapters/{chapter_id}/advance", response_model=ChapterOut)
-async def advance_chapter(
+def advance_chapter(
     session_id: UUID,
     chapter_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -1027,7 +1027,7 @@ def _file_out(f: SessionFile) -> FileOut:
 
 
 @router.get("/{session_id}/files", response_model=List[FileOut])
-async def list_session_files(
+def list_session_files(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1089,7 +1089,7 @@ async def upload_session_file(
 
 
 @router.delete("/{session_id}/files/{file_id}", status_code=204)
-async def delete_session_file(
+def delete_session_file(
     session_id: UUID,
     file_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -1133,7 +1133,7 @@ class QuizOut(BaseModel):
 
 
 @router.post("/{session_id}/quizzes", response_model=QuizOut, status_code=201)
-async def create_quiz(
+def create_quiz(
     session_id: UUID,
     payload: QuizIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -1171,7 +1171,7 @@ async def create_quiz(
 
 
 @router.get("/{session_id}/quizzes", response_model=List[QuizOut])
-async def list_quizzes(
+def list_quizzes(
     session_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1207,7 +1207,7 @@ async def list_quizzes(
 
 
 @router.post("/{session_id}/quizzes/{quiz_id}/answer", response_model=QuizOut)
-async def answer_quiz(
+def answer_quiz(
     session_id: UUID,
     quiz_id: UUID,
     payload: QuizAnswerIn,
@@ -1283,7 +1283,7 @@ class QuizAnswersDetail(BaseModel):
 
 
 @router.get("/{session_id}/quizzes/{quiz_id}/answers", response_model=QuizAnswersDetail)
-async def get_quiz_answers(
+def get_quiz_answers(
     session_id: UUID,
     quiz_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),

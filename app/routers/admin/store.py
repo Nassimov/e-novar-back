@@ -124,7 +124,7 @@ def _item_to_dict(it: StoreItem) -> Dict[str, Any]:
 # ── Items CRUD ─────────────────────────────────────────────────────────────────
 
 @router.get("/items")
-async def list_items(
+def list_items(
     category: Optional[str] = Query(None),
     active: Optional[bool] = Query(None),
     page: int = Query(1, ge=1),
@@ -181,7 +181,7 @@ async def list_items(
 
 
 @router.post("/items", status_code=status.HTTP_201_CREATED)
-async def create_item(
+def create_item(
     payload: StoreItemCreate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -215,7 +215,7 @@ async def create_item(
 
 
 @router.put("/items/{item_id}")
-async def update_item(
+def update_item(
     item_id: str,
     payload: StoreItemUpdate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -237,7 +237,7 @@ async def update_item(
 
 
 @router.patch("/items/{item_id}/toggle")
-async def toggle_item_active(
+def toggle_item_active(
     item_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -255,7 +255,7 @@ async def toggle_item_active(
 
 
 @router.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_item(
+def delete_item(
     item_id: str,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -288,7 +288,7 @@ async def delete_item(
 # ── Claims management ──────────────────────────────────────────────────────────
 
 @router.get("/claims")
-async def list_claims(
+def list_claims(
     claim_status: Optional[str] = Query(None, alias="status"),
     category: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
@@ -362,7 +362,7 @@ async def list_claims(
 
 
 @router.put("/claims/{claim_id}/process")
-async def process_claim(
+def process_claim(
     claim_id: UUID,
     payload: ClaimProcessRequest,
     current_user: Dict[str, Any] = Depends(get_admin_user),

@@ -553,7 +553,7 @@ class ConnectionManager:
         self.active_connections: Dict[str, list[WebSocket]] = {}
 
     async def connect(self, user_id: str, websocket: WebSocket):
-        await websocket.accept()
+        await websocket.accept(subprotocol=_ws_accept_subprotocol(websocket))
         if user_id not in self.active_connections:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
@@ -647,6 +647,20 @@ def _extract_ws_token(websocket: WebSocket, token: str) -> str:
         if len(parts) >= 2 and parts[0] == "access_token" and parts[1]:
             return parts[1]
     return token
+
+
+def _ws_accept_subprotocol(websocket: WebSocket) -> str | None:
+    """The handshake response MUST echo back one of the protocols the client
+    actually offered (RFC 6455 §4.1) — every `websocket.accept()` in this
+    file used to omit `subprotocol=` entirely, which is itself a spec
+    deviation strict clients/proxies can start enforcing without any
+    application code change (this was the root cause of chat/classroom
+    real-time features silently going dark). Conditional so the legacy
+    `?token=` connection path — which offers no subprotocol at all — still
+    gets a plain accept() instead of the client rejecting an unrequested one."""
+    proto_header = websocket.headers.get("sec-websocket-protocol", "")
+    offered = {p.strip() for p in proto_header.split(",") if p.strip()}
+    return "access_token" if "access_token" in offered else None
 
 
 @app.websocket("/ws/messages")
@@ -804,7 +818,7 @@ async def websocket_classroom(websocket: WebSocket, session_id: str, token: str 
         await websocket.close(code=1011, reason="Server error")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_ws_accept_subprotocol(websocket))
     send_queue = classroom_connections.register(room_key)
     stop_evt = asyncio.Event()
 
@@ -937,7 +951,7 @@ async def websocket_competitive(websocket: WebSocket, match_id: str, token: str 
         await websocket.close(code=1011, reason="Server error")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_ws_accept_subprotocol(websocket))
     send_queue = competitive_connections.register(match_id)
     stop_evt = asyncio.Event()
 
@@ -1160,7 +1174,7 @@ async def websocket_competitive_spectate(websocket: WebSocket, match_id: str, to
         await websocket.close(code=1011, reason="Server error")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_ws_accept_subprotocol(websocket))
     send_queue = competitive_connections.register(f"spectate:{match_id}")
     stop_evt = asyncio.Event()
 
@@ -1299,7 +1313,7 @@ async def websocket_competitive_tournament(websocket: WebSocket, tournament_id: 
         await websocket.close(code=4004, reason="Invalid tournament id")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_ws_accept_subprotocol(websocket))
     send_queue = competitive_connections.register(f"tournament:{tournament_id}")
     stop_evt = asyncio.Event()
 
@@ -1407,7 +1421,7 @@ async def websocket_club(websocket: WebSocket, club_id: str, token: str = ""):
         await websocket.close(code=1011, reason="Server error")
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=_ws_accept_subprotocol(websocket))
     send_queue = club_connections.register(club_id)
     stop_evt = asyncio.Event()
 

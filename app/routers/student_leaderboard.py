@@ -433,7 +433,7 @@ def _upsert_snapshot(
 # ─── Endpoint ─────────────────────────────────────────────────────────────────
 
 @router.get("/leaderboard", response_model=LeaderboardResponse)
-async def get_leaderboard(
+def get_leaderboard(
     audience: str = "students",
     period: str = "week",
     sort_by: str = "kp",

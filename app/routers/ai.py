@@ -156,7 +156,7 @@ def _current_quota_status(user_id: str, db: Session) -> dict:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/quota")
-async def get_ai_quota(
+def get_ai_quota(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -165,7 +165,7 @@ async def get_ai_quota(
 
 
 @router.post("/explain")
-async def explain_concept(
+def explain_concept(
     payload: ExplainRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -183,7 +183,7 @@ async def explain_concept(
 
 
 @router.post("/homework/hint")
-async def get_homework_hint(
+def get_homework_hint(
     payload: HomeworkHintRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -199,7 +199,7 @@ async def get_homework_hint(
 
 
 @router.post("/homework/solve")
-async def solve_homework(
+def solve_homework(
     payload: HomeworkSolveRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -215,7 +215,7 @@ async def solve_homework(
 
 
 @router.post("/practice/generate")
-async def generate_practice(
+def generate_practice(
     payload: QuizGenerateRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -229,7 +229,7 @@ async def generate_practice(
 
 
 @router.post("/practice/evaluate")
-async def evaluate_practice(
+def evaluate_practice(
     payload: QuizEvaluateRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):

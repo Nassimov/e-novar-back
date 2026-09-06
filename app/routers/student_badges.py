@@ -49,7 +49,7 @@ class BadgesResponse(BaseModel):
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/badges", response_model=BadgesResponse)
-async def get_student_badges(
+def get_student_badges(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -111,7 +111,7 @@ async def get_student_badges(
 
 
 @router.post("/badges/{badge_id}/seen", status_code=204)
-async def mark_badge_seen(
+def mark_badge_seen(
     badge_id: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

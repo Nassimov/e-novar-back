@@ -275,7 +275,7 @@ def _fmt(
 # ── REST endpoints ────────────────────────────────────────────────────────────
 
 @router.get("/unread-count")
-async def get_unread_message_count(
+def get_unread_message_count(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -305,7 +305,7 @@ async def get_unread_message_count(
 
 
 @router.get("/", response_model=List[ConversationOut])
-async def list_conversations(
+def list_conversations(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -368,7 +368,7 @@ async def list_conversations(
 
 
 @router.post("/", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)
-async def create_or_get_conversation(
+def create_or_get_conversation(
     payload: CreateConvIn,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -460,7 +460,7 @@ async def create_or_get_conversation(
 
 
 @router.get("/{conv_id}/messages", response_model=List[MessageOut])
-async def get_messages(
+def get_messages(
     conv_id: UUID,
     before: Optional[str] = Query(None),
     size: int = Query(50, ge=1, le=100),
@@ -661,7 +661,7 @@ async def mark_read(
 
 
 @router.delete("/{conv_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def hide_conversation(
+def hide_conversation(
     conv_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -725,7 +725,7 @@ async def upload_attachment(
 
 
 @router.get("/contacts")
-async def list_contacts(
+def list_contacts(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

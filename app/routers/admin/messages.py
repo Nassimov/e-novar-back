@@ -61,7 +61,7 @@ def _other_participant(conv_id: UUID, sender_id: UUID, db: Session) -> Optional[
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @router.get("/flagged", response_model=FlaggedListOut)
-async def list_flagged_messages(
+def list_flagged_messages(
     page: int = Query(1, ge=1),
     size: int = Query(25, ge=1, le=100),
     _admin: Dict[str, Any] = Depends(get_admin_user),
@@ -104,7 +104,7 @@ async def list_flagged_messages(
 
 
 @router.post("/{message_id}/dismiss", status_code=200)
-async def dismiss_flag(
+def dismiss_flag(
     message_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -124,7 +124,7 @@ async def dismiss_flag(
 
 
 @router.post("/{message_id}/warn", status_code=200)
-async def warn_sender(
+def warn_sender(
     message_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

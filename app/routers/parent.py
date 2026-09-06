@@ -142,7 +142,7 @@ def _verify_child_link(parent_uid: UUID, student_id: UUID, db: Session) -> None:
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard", response_model=ParentDashboardResponse)
-async def parent_dashboard(
+def parent_dashboard(
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
 ):
@@ -226,7 +226,7 @@ async def parent_dashboard(
 # ── Children list ─────────────────────────────────────────────────────────────
 
 @router.get("/children")
-async def list_children(
+def list_children(
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
 ):
@@ -288,7 +288,7 @@ def _guard_link_child_rate_limit(request: Request, uid: UUID) -> None:
 
 
 @router.post("/children/link")
-async def link_child(
+def link_child(
     payload: LinkChildRequest,
     request: Request,
     current_user: Dict[str, Any] = Depends(require_role("parent")),
@@ -342,7 +342,7 @@ async def link_child(
 
 
 @router.post("/children/{student_id}/unlink")
-async def unlink_child(
+def unlink_child(
     student_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
@@ -374,7 +374,7 @@ async def unlink_child(
 # ── Child sessions ────────────────────────────────────────────────────────────
 
 @router.get("/children/{child_id}/sessions")
-async def get_child_sessions(
+def get_child_sessions(
     child_id: UUID,
     type: str = Query("upcoming", pattern="^(upcoming|past)$"),
     page: int = Query(1, ge=1),
@@ -460,7 +460,7 @@ async def get_child_sessions(
 # ── Parent cancels session for a child ───────────────────────────────────────
 
 @router.post("/sessions/{session_id}/cancel")
-async def parent_cancel_session(
+def parent_cancel_session(
     session_id: UUID,
     payload: Optional[CancelForChildRequest] = Body(None),
     current_user: Dict[str, Any] = Depends(require_role("parent")),
@@ -528,7 +528,7 @@ async def parent_cancel_session(
 # ── Child progress ────────────────────────────────────────────────────────────
 
 @router.get("/children/{child_id}/progress")
-async def get_child_progress(
+def get_child_progress(
     child_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
@@ -580,7 +580,7 @@ async def get_child_progress(
 # proper detail view instead of only a passing notification.
 
 @router.get("/children/{child_id}/incidents")
-async def get_child_incidents(
+def get_child_incidents(
     child_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
@@ -630,7 +630,7 @@ async def get_child_incidents(
 # ── Child KP balance ─────────────────────────────────────────────────────────
 
 @router.get("/children/{child_id}/kp/balance")
-async def get_child_kp_balance(
+def get_child_kp_balance(
     child_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("parent")),
     db: Session = Depends(get_db),
@@ -665,7 +665,7 @@ async def get_child_kp_balance(
 # ── Child KP transactions ─────────────────────────────────────────────────────
 
 @router.get("/children/{child_id}/kp/transactions")
-async def get_child_kp_transactions(
+def get_child_kp_transactions(
     child_id: UUID,
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=50),
@@ -712,7 +712,7 @@ async def get_child_kp_transactions(
 # the caller's own id (verified as an accepted link first).
 
 @router.post("/children/{child_id}/store/redeem", status_code=status.HTTP_201_CREATED)
-async def redeem_store_item_for_child(
+def redeem_store_item_for_child(
     child_id: UUID,
     item_id: str = Body(..., embed=True),
     current_user: Dict[str, Any] = Depends(require_role("parent")),
@@ -747,7 +747,7 @@ async def redeem_store_item_for_child(
 # This lists every such booking as one "operation", newest first.
 
 @router.get("/payments")
-async def get_parent_payments(
+def get_parent_payments(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     month: Optional[str] = Query(None, description="Filter to a single month, format YYYY-MM"),

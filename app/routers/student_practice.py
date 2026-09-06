@@ -504,7 +504,7 @@ def _upsert_mastery(
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/practice/config", response_model=PracticeConfigResponse)
-async def get_practice_config(
+def get_practice_config(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -540,7 +540,7 @@ async def get_practice_config(
 
 
 @router.post("/practice/start", response_model=StartQuizResponse)
-async def start_quiz(
+def start_quiz(
     payload: StartQuizRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -631,7 +631,7 @@ async def start_quiz(
 
 
 @router.post("/practice/attempts/{attempt_id}/submit", response_model=SubmitQuizResponse)
-async def submit_quiz(
+def submit_quiz(
     attempt_id: str,
     payload: SubmitQuizRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -847,7 +847,7 @@ async def submit_quiz(
 
 
 @router.get("/practice/history", response_model=HistoryResponse)
-async def get_practice_history(
+def get_practice_history(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

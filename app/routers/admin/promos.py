@@ -50,7 +50,7 @@ def _validate_payload(kp_reward: int, discount_type: str | None, discount_value:
 
 
 @router.get("/stats")
-async def get_promo_stats(
+def get_promo_stats(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -80,7 +80,7 @@ async def get_promo_stats(
 
 
 @router.get("/")
-async def list_promo_codes(
+def list_promo_codes(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     active: bool = Query(None),
@@ -113,7 +113,7 @@ async def list_promo_codes(
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def create_promo_code(
+def create_promo_code(
     payload: PromoCodeCreate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -155,7 +155,7 @@ async def create_promo_code(
 
 
 @router.get("/{promo_id}/stats")
-async def get_code_stats(
+def get_code_stats(
     promo_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -188,7 +188,7 @@ async def get_code_stats(
 
 
 @router.patch("/{promo_id}")
-async def update_promo_code(
+def update_promo_code(
     promo_id: UUID,
     payload: PromoCodeUpdate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -232,7 +232,7 @@ async def update_promo_code(
 
 
 @router.delete("/{promo_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_promo_code(
+def delete_promo_code(
     promo_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

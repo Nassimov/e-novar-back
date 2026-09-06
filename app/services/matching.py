@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import unicodedata
-from typing import Iterable, Optional, Union
+from datetime import datetime, timedelta
+from typing import Iterable, List, Optional, Union
 from uuid import UUID
 
 from sqlmodel import Session, select
@@ -122,3 +123,59 @@ def wants_online(student_lesson_format: Optional[Union[str, Iterable[str]]]) -> 
         return False
     formats = [student_lesson_format] if isinstance(student_lesson_format, str) else list(student_lesson_format)
     return "online" in formats
+
+
+def find_overlapping_confirmed_sessions(
+    db: Session,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    teacher_id: Optional[UUID] = None,
+    student_id: Optional[UUID] = None,
+    exclude_slot_id: Optional[UUID] = None,
+    exclude_booking_id: Optional[UUID] = None,
+) -> List["TutoringSession"]:  # noqa: F821 — see local import below
+    """Single source of truth for "is this person already booked at this
+    time" — used to stop a teacher or a student from ending up in two
+    different, overlapping tutoring sessions.
+
+    Only counts sessions whose parent Booking is `confirmed` — a still-
+    pending request never blocks a new one (mirrors
+    app.routers.teachers.find_confirmed_session_conflicts's reasoning for
+    absences: nothing real has happened yet, so there's nothing to protect
+    against). Deliberately excludes any session sharing `exclude_slot_id`:
+    several students booked into the SAME declared group slot are not a
+    double-booking, they're the group session working as intended — that
+    case is already capacity-gated by `_claim_slot_or_409` in
+    student_teachers.py, not by this check.
+    """
+    if teacher_id is None and student_id is None:
+        return []
+
+    from app.models.booking import Booking, TutoringSession
+
+    query = (
+        select(TutoringSession, Booking.slot_id, Booking.duration_min)
+        .join(Booking, Booking.id == TutoringSession.booking_id)
+        .where(
+            TutoringSession.status.in_(["scheduled", "waiting", "live"]),
+            Booking.status == "confirmed",
+            TutoringSession.scheduled_at < window_end,
+        )
+    )
+    if teacher_id is not None:
+        query = query.where(TutoringSession.teacher_id == teacher_id)
+    if student_id is not None:
+        query = query.where(TutoringSession.student_id == student_id)
+    if exclude_booking_id is not None:
+        query = query.where(TutoringSession.booking_id != exclude_booking_id)
+
+    conflicts: List["TutoringSession"] = []
+    for session_row, slot_id, booking_duration in db.exec(query).all():
+        if exclude_slot_id is not None and slot_id == exclude_slot_id:
+            continue
+        duration = session_row.duration_min or booking_duration or 90
+        session_end = session_row.scheduled_at + timedelta(minutes=duration)
+        if session_end > window_start:
+            conflicts.append(session_row)
+    return conflicts

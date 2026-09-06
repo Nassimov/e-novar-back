@@ -26,7 +26,7 @@ def get_redis() -> Redis:
     return get_redis_client()
 
 
-async def get_current_user(
+def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> Dict[str, Any]:
     """
@@ -101,7 +101,7 @@ def get_current_profile(
     return profile
 
 
-async def get_admin_user(
+def get_admin_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -185,7 +185,7 @@ def require_super_admin(
 def require_role(*roles: str):
     """Dependency factory — raises 403 if the JWT role isn't in `roles`."""
 
-    async def _checker(
+    def _checker(
         current_user: Dict[str, Any] = Depends(get_current_user),
         db: Session = Depends(get_db),
     ) -> Dict[str, Any]:

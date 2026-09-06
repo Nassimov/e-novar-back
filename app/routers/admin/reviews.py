@@ -206,7 +206,7 @@ def _build_items(db: Session, reviews: List[Review]) -> List[ReviewItem]:
 
 
 @router.get("/", response_model=ReviewListResponse)
-async def list_reviews(
+def list_reviews(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     flagged_only: bool = Query(False),
@@ -244,7 +244,7 @@ async def list_reviews(
 
 
 @router.get("/{review_id}", response_model=ReviewDetail)
-async def get_review(
+def get_review(
     review_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -283,7 +283,7 @@ async def get_review(
 
 
 @router.post("/{review_id}/keep", response_model=ModerationResult)
-async def keep_review(
+def keep_review(
     review_id: UUID,
     admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -310,7 +310,7 @@ async def keep_review(
 
 
 @router.post("/{review_id}/hide", response_model=ModerationResult)
-async def hide_review(
+def hide_review(
     review_id: UUID,
     admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -343,7 +343,7 @@ async def hide_review(
 
 
 @router.delete("/{review_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_review(
+def delete_review(
     review_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -372,7 +372,7 @@ async def delete_review(
 
 
 @router.post("/reports/{report_id}/dismiss", response_model=ModerationResult)
-async def dismiss_report(
+def dismiss_report(
     report_id: UUID,
     admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

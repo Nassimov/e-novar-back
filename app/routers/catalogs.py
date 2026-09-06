@@ -11,10 +11,12 @@ router = APIRouter(tags=["catalogs"])
 
 # Reference data (subjects/levels/goals/wilayas) barely ever changes but is
 # hit on nearly every page (registration, booking, search filters) — cache
-# it so most requests never touch Postgres. Short-ish TTL keeps an admin
-# edit (app/routers/admin/content.py) visible within a few minutes without
-# needing explicit invalidation wiring.
-_CATALOG_TTL = 300
+# it so most requests never touch Postgres. Freshness on admin edits comes
+# from the explicit cache_invalidate("catalog:subjects"/"catalog:levels")
+# calls in app/routers/admin/content.py, not this TTL — so it's safe to set
+# long (this is a "cache très long" category-A static dataset per the perf
+# audit), it's only a ceiling in case an invalidation call is ever missed.
+_CATALOG_TTL = 3600
 
 # ── Fallback hardcoded data (used only if DB tables are empty) ────────────────
 
@@ -203,7 +205,7 @@ def get_wilayas(response: Response, db: Session = Depends(get_db)):
 
 
 @router.get("/store/rewards")
-async def get_store_rewards(response: Response):
+def get_store_rewards(response: Response):
     """Return KP store rewards (static catalogue)."""
     response.headers["Cache-Control"] = f"public, max-age={_CATALOG_TTL}"
     return {"rewards": STORE_REWARDS, "total": len(STORE_REWARDS)}

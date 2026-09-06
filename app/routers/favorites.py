@@ -37,7 +37,7 @@ class AddFavoriteRequest(BaseModel):
 
 
 @router.get("/", response_model=FavoriteListResponse)
-async def list_favorites(
+def list_favorites(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -109,7 +109,7 @@ async def list_favorites(
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def add_favorite(
+def add_favorite(
     payload: AddFavoriteRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -139,7 +139,7 @@ async def add_favorite(
 
 
 @router.delete("/{teacher_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_favorite(
+def remove_favorite(
     teacher_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

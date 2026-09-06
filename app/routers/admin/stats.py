@@ -41,7 +41,7 @@ def _pct_delta(current: float, previous: float) -> float:
 
 
 @router.get("/")
-async def get_platform_stats(
+def get_platform_stats(
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -113,7 +113,7 @@ async def get_platform_stats(
 
 
 @router.get("/revenue")
-async def get_revenue_stats(
+def get_revenue_stats(
     period: str = Query("7j", pattern="^(7j|30j|90j)$"),
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -168,7 +168,7 @@ async def get_revenue_stats(
 
 
 @router.get("/top-teachers")
-async def get_top_teachers(
+def get_top_teachers(
     limit: int = Query(4, ge=1, le=20),
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -195,7 +195,7 @@ async def get_top_teachers(
 
 
 @router.get("/activity")
-async def get_recent_activity(
+def get_recent_activity(
     limit: int = Query(15, ge=1, le=50),
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

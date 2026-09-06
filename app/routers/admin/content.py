@@ -112,7 +112,7 @@ def _serialize_subject(s: Subject, teachers: Dict[UUID, int], levels: Dict[UUID,
 
 
 @router.get("/subjects")
-async def list_subjects(
+def list_subjects(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -126,7 +126,7 @@ async def list_subjects(
 
 
 @router.post("/subjects", status_code=status.HTTP_201_CREATED)
-async def create_subject(
+def create_subject(
     payload: SubjectCreate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -149,7 +149,7 @@ async def create_subject(
 
 
 @router.put("/subjects/{subject_id}")
-async def update_subject(
+def update_subject(
     subject_id: UUID,
     payload: SubjectUpdate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -183,7 +183,7 @@ async def update_subject(
 
 
 @router.delete("/subjects/{subject_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_subject(
+def delete_subject(
     subject_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -218,7 +218,7 @@ async def delete_subject(
 # ── Levels CRUD (mirrors public.levels) ─────────────────────────────────────
 
 @router.get("/levels")
-async def list_levels_admin(
+def list_levels_admin(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -231,7 +231,7 @@ async def list_levels_admin(
 
 
 @router.post("/levels", status_code=status.HTTP_201_CREATED)
-async def create_level(
+def create_level(
     payload: LevelCreate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -258,7 +258,7 @@ async def create_level(
 
 
 @router.put("/levels/{level_id}")
-async def update_level(
+def update_level(
     level_id: UUID,
     payload: LevelUpdate,
     current_user: Dict[str, Any] = Depends(get_admin_user),
@@ -291,7 +291,7 @@ async def update_level(
 
 
 @router.delete("/levels/{level_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_level(
+def delete_level(
     level_id: UUID,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -329,7 +329,7 @@ async def delete_level(
 # backend surface for a future payouts/wallet admin page.
 
 @router.get("/withdrawals")
-async def list_withdrawals(
+def list_withdrawals(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -380,7 +380,7 @@ async def list_withdrawals(
 
 
 @router.put("/withdrawals/{withdrawal_id}")
-async def process_withdrawal(
+def process_withdrawal(
     withdrawal_id: UUID,
     payload: WithdrawalProcessRequest,
     current_user: Dict[str, Any] = Depends(get_admin_user),

@@ -58,7 +58,7 @@ def _actor_id(current_user: Dict[str, Any]) -> Optional[UUID]:
 
 
 @router.get("/")
-async def list_admin_accounts(
+def list_admin_accounts(
     current_user: Dict[str, Any] = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ):
@@ -151,7 +151,7 @@ async def resend_invite(
 
 
 @router.post("/{account_id}/suspend")
-async def suspend_admin(
+def suspend_admin(
     account_id: UUID,
     current_user: Dict[str, Any] = Depends(require_super_admin),
     db: Session = Depends(get_db),
@@ -169,7 +169,7 @@ async def suspend_admin(
 
 
 @router.post("/{account_id}/reinstate")
-async def reinstate_admin(
+def reinstate_admin(
     account_id: UUID,
     current_user: Dict[str, Any] = Depends(require_super_admin),
     db: Session = Depends(get_db),
@@ -189,7 +189,7 @@ async def reinstate_admin(
 
 
 @router.delete("/{account_id}", status_code=204)
-async def delete_admin(
+def delete_admin(
     account_id: UUID,
     current_user: Dict[str, Any] = Depends(require_super_admin),
     db: Session = Depends(get_db),
@@ -210,7 +210,7 @@ async def delete_admin(
 # ─── Public invite-acceptance flow (no admin session exists yet) ──────────────
 
 @router.post("/accept-invite")
-async def accept_invite(payload: AcceptInviteRequest, db: Session = Depends(get_db)):
+def accept_invite(payload: AcceptInviteRequest, db: Session = Depends(get_db)):
     account = svc.find_by_invite_token(db, payload.token)
     if account is None:
         raise HTTPException(status_code=400, detail="Lien d'invitation invalide ou expiré")
@@ -233,7 +233,7 @@ async def accept_invite(payload: AcceptInviteRequest, db: Session = Depends(get_
 
 
 @router.post("/confirm-enrollment")
-async def confirm_enrollment(payload: ConfirmEnrollmentRequest, db: Session = Depends(get_db)):
+def confirm_enrollment(payload: ConfirmEnrollmentRequest, db: Session = Depends(get_db)):
     raw = get_redis_client().get(f"admin:enrollment:{payload.enrollment_token}")
     if not raw:
         raise HTTPException(status_code=400, detail="Session d'inscription expirée — recommencez l'invitation")

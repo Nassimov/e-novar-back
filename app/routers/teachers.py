@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from sqlmodel import Session, select
 
+from app.core.cache import cache_invalidate
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.teacher import TeacherPayout, TeacherProfile, TeacherSlot
 from app.models.scheduling import TeacherAbsence, TeacherSlotSubject
@@ -133,7 +134,7 @@ def _profile_to_detail(profile: TeacherProfile, user: Profile, db: Session) -> T
 
 
 @router.get("/me", response_model=TeacherDetailResponse)
-async def get_my_teacher_profile(
+def get_my_teacher_profile(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -154,7 +155,7 @@ async def get_my_teacher_profile(
 
 
 @router.get("/me/boost", response_model=BoostStatusResponse)
-async def get_my_boost_status(
+def get_my_boost_status(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -179,7 +180,7 @@ async def get_my_boost_status(
 
 
 @router.post("/me/boost", response_model=BoostStatusResponse)
-async def activate_my_boost(
+def activate_my_boost(
     payload: BoostActivateRequest,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -202,6 +203,10 @@ async def activate_my_boost(
         raise HTTPException(status_code=400, detail=str(exc))
 
     account = get_or_create_kp_account(uid, db)
+
+    from app.routers.student_teachers import TEACHER_SEARCH_CACHE_KEY
+    cache_invalidate(TEACHER_SEARCH_CACHE_KEY)
+
     return BoostStatusResponse(
         active=is_boost_active(profile),
         expires_at=profile.boost_expires_at,
@@ -232,7 +237,7 @@ _MANUAL_PAYMENT_METHODS = ("cash", "transfer", "rib_cib", "rib_edahabia")
 
 
 @router.put("/me", response_model=TeacherDetailResponse)
-async def update_my_teacher_profile(
+def update_my_teacher_profile(
     payload: TeacherProfileUpdate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -336,6 +341,13 @@ async def update_my_teacher_profile(
         db.commit()
 
     db.refresh(profile)
+
+    # Every field this endpoint can touch (price, bio, headline, wilaya,
+    # delivery options, subjects) feeds the cached search corpus and/or the
+    # cached public profile — see app/routers/student_teachers.py.
+    from app.routers.student_teachers import TEACHER_SEARCH_CACHE_KEY, teacher_profile_cache_key
+    cache_invalidate(TEACHER_SEARCH_CACHE_KEY, teacher_profile_cache_key(user.id))
+
     return _profile_to_detail(profile, user, db)
 
 
@@ -376,11 +388,15 @@ async def upload_diploma(
     db.add(diploma)
     db.commit()
     db.refresh(diploma)
+
+    from app.routers.student_teachers import teacher_profile_cache_key
+    cache_invalidate(teacher_profile_cache_key(user.id))
+
     return DiplomaResponse(id=str(diploma.id), name=diploma.name, url=diploma.file_url or "")
 
 
 @router.delete("/me/diplomas/{diploma_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_diploma(
+def delete_diploma(
     diploma_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -396,11 +412,15 @@ async def delete_diploma(
 
     db.delete(diploma)
     db.commit()
+
+    from app.routers.student_teachers import teacher_profile_cache_key
+    cache_invalidate(teacher_profile_cache_key(user.id))
+
     return None
 
 
 @router.put("/me/payout-info")
-async def update_payout_info(
+def update_payout_info(
     payload: TeacherPayoutInfoUpdate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -593,7 +613,7 @@ def _slot_to_response(s: TeacherSlot, db: Session, student_name: Optional[str] =
 
 
 @router.get("/me/slots", response_model=List[SlotResponse])
-async def list_my_slots(
+def list_my_slots(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -633,7 +653,7 @@ async def list_my_slots(
 
 
 @router.post("/me/slots", response_model=SlotResponse, status_code=status.HTTP_201_CREATED)
-async def create_slot(
+def create_slot(
     payload: SlotCreate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -683,7 +703,7 @@ async def create_slot(
 
 
 @router.put("/me/slots/{slot_id}", response_model=SlotResponse)
-async def update_slot(
+def update_slot(
     slot_id: UUID,
     payload: SlotUpdate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
@@ -748,7 +768,7 @@ async def update_slot(
 
 
 @router.delete("/me/slots/{slot_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_slot(
+def delete_slot(
     slot_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -824,7 +844,7 @@ def find_confirmed_session_conflicts(
 
 
 @router.get("/me/absences", response_model=List[AbsenceResponse])
-async def list_my_absences(
+def list_my_absences(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -842,7 +862,7 @@ async def list_my_absences(
 
 
 @router.post("/me/absences", response_model=AbsenceResponse, status_code=status.HTTP_201_CREATED)
-async def create_absence(
+def create_absence(
     payload: AbsenceCreate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -900,7 +920,7 @@ async def create_absence(
 
 
 @router.delete("/me/absences/{absence_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_absence(
+def delete_absence(
     absence_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -918,7 +938,7 @@ async def delete_absence(
 
 
 @router.get("/me/students")
-async def get_my_students(
+def get_my_students(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -942,7 +962,7 @@ async def get_my_students(
 
 
 @router.post("/me/invitations")
-async def send_student_invitation(
+def send_student_invitation(
     email: str,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
 ):
@@ -954,7 +974,7 @@ async def send_student_invitation(
 
 
 @router.get("/me/wallet", response_model=WalletResponse)
-async def get_wallet(
+def get_wallet(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -991,7 +1011,7 @@ async def get_wallet(
 
 
 @router.get("/me/payments", response_model=List[TeacherPaymentItem])
-async def list_my_payments(
+def list_my_payments(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -1063,7 +1083,7 @@ async def list_my_payments(
 
 
 @router.patch("/me/payout-mode")
-async def update_payout_mode(
+def update_payout_mode(
     payload: PayoutModeUpdate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1086,7 +1106,7 @@ async def update_payout_mode(
 
 
 @router.get("/me/bookings", response_model=List[TeacherBookingItem])
-async def list_teacher_bookings(
+def list_teacher_bookings(
     booking_status: Optional[str] = Query(None, alias="status"),
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1138,7 +1158,7 @@ async def list_teacher_bookings(
 
 
 @router.post("/me/bookings/{booking_id}/accept")
-async def accept_booking(
+def accept_booking(
     booking_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1184,6 +1204,40 @@ async def accept_booking(
             capture_payment_intent(pi_id)
         except Exception as exc:
             raise HTTPException(status_code=402, detail=f"Payment capture failed: {exc}")
+
+    # A pending booking can sit unaccepted for a while — re-check for a
+    # double-booking right before actually confirming it, since either side
+    # (this teacher or this booking's student) may have had a different
+    # booking become confirmed in the meantime. Creation-time already ran
+    # this same check (see student_teachers.py's _gate_one), this is the
+    # second enforcement point for anything that slipped through while
+    # pending — see app.services.matching.find_overlapping_confirmed_sessions.
+    from datetime import timedelta
+    from app.models.booking import TutoringSession as _TutoringSession
+    from app.services import matching as _matching
+
+    for own_session in db.exec(
+        select(_TutoringSession).where(_TutoringSession.booking_id == booking.id)
+    ).all():
+        session_duration = own_session.duration_min or booking.duration_min
+        window_start = own_session.scheduled_at
+        window_end = window_start + timedelta(minutes=session_duration)
+        if _matching.find_overlapping_confirmed_sessions(
+            db, window_start=window_start, window_end=window_end,
+            student_id=booking.student_id, exclude_booking_id=booking.id,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Impossible d'accepter : cet élève a déjà une autre séance confirmée sur ce créneau.",
+            )
+        if _matching.find_overlapping_confirmed_sessions(
+            db, window_start=window_start, window_end=window_end,
+            teacher_id=teacher_id, exclude_slot_id=booking.slot_id, exclude_booking_id=booking.id,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Impossible d'accepter : vous avez déjà une autre séance confirmée sur ce créneau.",
+            )
 
     booking.status = "confirmed"
     db.add(booking)
@@ -1250,7 +1304,7 @@ async def accept_booking(
 
 
 @router.post("/me/bookings/{booking_id}/refuse")
-async def refuse_booking(
+def refuse_booking(
     booking_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1339,7 +1393,7 @@ async def refuse_booking(
 
 
 @router.post("/me/withdrawals/dzd", status_code=status.HTTP_201_CREATED)
-async def request_dzd_withdrawal(
+def request_dzd_withdrawal(
     payload: DzdWithdrawalRequest,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1436,7 +1490,7 @@ async def request_dzd_withdrawal(
 
 
 @router.get("/me/withdrawals", response_model=List[WithdrawalResponse])
-async def list_withdrawals(
+def list_withdrawals(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -1451,7 +1505,7 @@ async def list_withdrawals(
 
 
 @router.post("/me/withdrawals", response_model=WithdrawalResponse, status_code=status.HTTP_201_CREATED)
-async def request_withdrawal(
+def request_withdrawal(
     payload: WithdrawalRequest,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1509,7 +1563,7 @@ async def request_withdrawal(
 
 
 @router.get("/me/evaluations")
-async def list_evaluations(
+def list_evaluations(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -1537,7 +1591,7 @@ async def list_evaluations(
 
 
 @router.post("/me/evaluations", status_code=status.HTTP_201_CREATED)
-async def create_evaluation(
+def create_evaluation(
     payload: EvaluationCreate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
@@ -1600,7 +1654,7 @@ async def create_evaluation(
 
 
 @router.put("/me/evaluations/{evaluation_id}")
-async def update_evaluation(
+def update_evaluation(
     evaluation_id: UUID,
     payload: EvaluationCreate,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
@@ -1631,7 +1685,7 @@ async def update_evaluation(
 
 
 @router.get("/me/students-overview")
-async def get_my_students_overview(
+def get_my_students_overview(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
@@ -1761,7 +1815,7 @@ async def get_my_students_overview(
 
 
 @router.get("/me/students/{student_id}")
-async def get_my_student_detail(
+def get_my_student_detail(
     student_id: UUID,
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),

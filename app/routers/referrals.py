@@ -79,7 +79,7 @@ class MyCodeResponse(BaseModel):
 # ── endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/my-code", response_model=MyCodeResponse)
-async def get_my_referral_code(
+def get_my_referral_code(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -134,7 +134,7 @@ async def get_my_referral_code(
 
 
 @router.post("/apply", status_code=status.HTTP_200_OK)
-async def apply_code(
+def apply_code(
     payload: ApplyCodeRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -155,7 +155,7 @@ async def apply_code(
 
 
 @router.get("/preview/{code}")
-async def preview_code(
+def preview_code(
     code: str,
     referee_role: str = Query(default="student", description="student | teacher | parent"),
     db: Session = Depends(get_db),
@@ -195,7 +195,7 @@ async def preview_code(
 
 
 @router.get("/stats")
-async def get_stats(
+def get_stats(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

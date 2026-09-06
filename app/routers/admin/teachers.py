@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from app.core.cache import cache_invalidate
 from app.database import get_supabase_service
 from app.dependencies import get_admin_user, get_db
 from app.models.catalog import Level, Subject, TeacherDiploma, TeacherSubjectPrice
@@ -19,6 +20,14 @@ from app.services.tenure import experience_years_from
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Admin — Teachers"])
+
+
+def _invalidate_teacher_caches(user_id: UUID) -> None:
+    """A status transition (approve/suspend/reinstate) changes whether this
+    teacher appears in the cached search corpus at all — see
+    app/routers/student_teachers.py."""
+    from app.routers.student_teachers import TEACHER_SEARCH_CACHE_KEY, teacher_profile_cache_key
+    cache_invalidate(TEACHER_SEARCH_CACHE_KEY, teacher_profile_cache_key(user_id))
 
 
 # ─── Payload schemas ──────────────────────────────────────────────────────────
@@ -144,7 +153,7 @@ def _fire_rejection_email(p: Profile, reason: str) -> None:
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/pending")
-async def list_pending_teachers(
+def list_pending_teachers(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
     _admin: Dict[str, Any] = Depends(get_admin_user),
@@ -194,7 +203,7 @@ async def list_pending_teachers(
 
 
 @router.get("/active")
-async def list_active_teachers(
+def list_active_teachers(
     page: int = Query(1, ge=1),
     size: int = Query(50, ge=1, le=100),
     search: Optional[str] = Query(None),
@@ -257,7 +266,7 @@ async def list_active_teachers(
 
 
 @router.get("/{user_id}")
-async def get_teacher_detail(
+def get_teacher_detail(
     user_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -303,7 +312,7 @@ async def get_teacher_detail(
 
 
 @router.post("/{user_id}/approve")
-async def approve_teacher(
+def approve_teacher(
     user_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -343,12 +352,14 @@ async def approve_teacher(
     if p:
         _fire_approval_email(p)
 
+    _invalidate_teacher_caches(user_id)
+
     logger.info("Teacher approved: user_id=%s by admin=%s", user_id, _admin.get("email", "?"))
     return {"status": "approved", "user_id": str(user_id)}
 
 
 @router.post("/{user_id}/reject")
-async def reject_teacher(
+def reject_teacher(
     user_id: UUID,
     payload: RejectPayload,
     _admin: Dict[str, Any] = Depends(get_admin_user),
@@ -388,7 +399,7 @@ async def reject_teacher(
 
 
 @router.post("/{user_id}/suspend")
-async def suspend_teacher(
+def suspend_teacher(
     user_id: UUID,
     payload: SuspendPayload,
     _admin: Dict[str, Any] = Depends(get_admin_user),
@@ -413,12 +424,14 @@ async def suspend_teacher(
     )
     db.commit()
 
+    _invalidate_teacher_caches(user_id)
+
     logger.info("Teacher suspended: user_id=%s reason=%r", user_id, payload.reason)
     return {"status": "suspended", "user_id": str(user_id)}
 
 
 @router.post("/{user_id}/reinstate")
-async def reinstate_teacher(
+def reinstate_teacher(
     user_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -438,6 +451,8 @@ async def reinstate_teacher(
         body="Votre compte enseignant a été réactivé. Vous pouvez à nouveau recevoir des réservations.",
     )
     db.commit()
+
+    _invalidate_teacher_caches(user_id)
 
     logger.info("Teacher reinstated: user_id=%s", user_id)
     return {"status": "approved", "user_id": str(user_id)}

@@ -33,7 +33,7 @@ def _roles_for(db: Session, user_ids: List[UUID]) -> Dict[UUID, List[str]]:
 
 
 @router.get("/")
-async def list_users(
+def list_users(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
     role: Optional[str] = Query(None),
@@ -94,7 +94,7 @@ async def list_users(
 
 
 @router.get("/{user_id}")
-async def get_user(
+def get_user(
     user_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -130,7 +130,7 @@ async def get_user(
 
 
 @router.delete("/{user_id}", status_code=204)
-async def delete_user(
+def delete_user(
     user_id: UUID,
     _admin: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

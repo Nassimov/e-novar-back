@@ -97,7 +97,7 @@ def _guard_reset_password_rate_limit(request: Request) -> None:
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-async def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     """Register a new user via Supabase Auth and create local profile."""
     _guard_register_rate_limit(request)
     try:
@@ -155,7 +155,7 @@ async def register(payload: RegisterRequest, request: Request, db: Session = Dep
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """Sign in with email and password via Supabase Auth."""
     _guard_login_rate_limit(request, payload.email)
     try:
@@ -210,7 +210,7 @@ async def login(payload: LoginRequest, request: Request, db: Session = Depends(g
 
 
 @router.post("/logout")
-async def logout(current_user: Dict[str, Any] = Depends(get_current_user)):
+def logout(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Sign out the current user."""
     auth_service.logout_from_supabase(
         current_user["claims"].get("access_token", "")
@@ -219,7 +219,7 @@ async def logout(current_user: Dict[str, Any] = Depends(get_current_user)):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
+def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
     """Refresh access token using a refresh token."""
     try:
         result = auth_service.refresh_supabase_token(payload.refresh_token)
@@ -264,7 +264,7 @@ async def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_
 
 
 @router.patch("/role", response_model=TokenResponse)
-async def update_role(
+def update_role(
     payload: UpdateRoleRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -330,7 +330,7 @@ async def update_role(
 
 
 @router.post("/forgot-password")
-async def forgot_password(payload: ForgotPasswordRequest, request: Request):
+def forgot_password(payload: ForgotPasswordRequest, request: Request):
     """Send a password reset email."""
     _guard_forgot_password_rate_limit(request, payload.email)
     auth_service.send_password_reset(payload.email)
@@ -338,7 +338,7 @@ async def forgot_password(payload: ForgotPasswordRequest, request: Request):
 
 
 @router.post("/verify-otp")
-async def verify_otp(payload: OtpVerifyRequest, request: Request):
+def verify_otp(payload: OtpVerifyRequest, request: Request):
     """Verify an OTP code sent to an email."""
     _guard_otp_verify_rate_limit(request, payload.email)
     success = auth_service.verify_otp(payload.email, payload.token)
@@ -348,7 +348,7 @@ async def verify_otp(payload: OtpVerifyRequest, request: Request):
 
 
 @router.post("/reset-password")
-async def reset_password(payload: ResetPasswordRequest, request: Request):
+def reset_password(payload: ResetPasswordRequest, request: Request):
     """Reset password using token from email."""
     _guard_reset_password_rate_limit(request)
     try:
@@ -359,7 +359,7 @@ async def reset_password(payload: ResetPasswordRequest, request: Request):
 
 
 @router.post("/google/exchange", response_model=TokenResponse)
-async def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(get_db)):
+def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(get_db)):
     """
     Exchange a Google OAuth code **or** existing Supabase tokens for a session.
 
@@ -472,7 +472,7 @@ async def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(
 
 
 @router.post("/signin", response_model=TokenResponse)
-async def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_db)):
+def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_db)):
     """
     Unified sign-in endpoint — choose one method:
 
@@ -601,7 +601,7 @@ async def signin(payload: SignInRequest, request: Request, db: Session = Depends
 
 
 @router.get("/google")
-async def google_oauth():
+def google_oauth():
     """Initiate Google OAuth via Supabase."""
     from app.database import get_supabase_anon
 
@@ -616,7 +616,7 @@ async def google_oauth():
 
 
 @router.get("/google/callback")
-async def google_callback(request: Request, db: Session = Depends(get_db)):
+def google_callback(request: Request, db: Session = Depends(get_db)):
     """Handle Google OAuth callback."""
     code = request.query_params.get("code")
     if not code:
@@ -627,7 +627,7 @@ async def google_callback(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserBrief)
-async def get_me(
+def get_me(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):

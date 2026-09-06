@@ -45,7 +45,7 @@ def _serialize_booking_policy(s: PlatformSettings) -> dict:
 
 
 @router.get("/pricing")
-async def get_pricing_settings(
+def get_pricing_settings(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -53,7 +53,7 @@ async def get_pricing_settings(
 
 
 @router.put("/pricing")
-async def update_pricing_settings(
+def update_pricing_settings(
     body: PlatformPricingSettings,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -73,7 +73,7 @@ async def update_pricing_settings(
 
 
 @router.get("/booking-policy")
-async def get_booking_policy_settings(
+def get_booking_policy_settings(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -81,7 +81,7 @@ async def get_booking_policy_settings(
 
 
 @router.put("/booking-policy")
-async def update_booking_policy_settings(
+def update_booking_policy_settings(
     body: BookingPolicySettings,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -117,7 +117,7 @@ def _serialize_bank_transfer(s: PlatformSettings) -> dict:
 
 
 @router.get("/bank-transfer")
-async def get_bank_transfer_settings(
+def get_bank_transfer_settings(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -125,7 +125,7 @@ async def get_bank_transfer_settings(
 
 
 @router.put("/bank-transfer")
-async def update_bank_transfer_settings(
+def update_bank_transfer_settings(
     body: BankTransferSettings,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
@@ -180,7 +180,7 @@ def _serialize_competitive(s: PlatformSettings) -> dict:
 
 
 @router.get("/competitive")
-async def get_competitive_settings(
+def get_competitive_settings(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -194,7 +194,7 @@ async def get_competitive_settings(
 
 
 @router.put("/competitive")
-async def update_competitive_settings(
+def update_competitive_settings(
     body: CompetitiveArenaSettings,
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),

@@ -60,7 +60,7 @@ async def upload_file_endpoint(
 
 
 @router.delete("/{key:path}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_file_endpoint(
+def delete_file_endpoint(
     key: str,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):

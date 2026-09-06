@@ -25,7 +25,7 @@ router = APIRouter(tags=["payments"])
 
 
 @router.post("/", response_model=PaymentResponse, status_code=status.HTTP_201_CREATED)
-async def initiate_payment(
+def initiate_payment(
     payload: PaymentInitiate,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -58,7 +58,7 @@ async def initiate_payment(
 
 
 @router.post("/cib", response_model=PaymentResponse, status_code=status.HTTP_201_CREATED)
-async def pay_with_cib(
+def pay_with_cib(
     payload: CibPaymentRequest,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -114,7 +114,7 @@ async def pay_with_cib(
 
 
 @router.post("/verify-transfer", response_model=PaymentResponse)
-async def verify_transfer(
+def verify_transfer(
     payload: TransferVerify,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -143,7 +143,7 @@ async def verify_transfer(
 
 
 @router.get("/invoices")
-async def list_invoices(
+def list_invoices(
     page: int = 1,
     size: int = 20,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -171,7 +171,7 @@ async def list_invoices(
 
 
 @router.get("/invoices/{payment_id}", response_model=PaymentResponse)
-async def get_invoice(
+def get_invoice(
     payment_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -189,7 +189,7 @@ async def get_invoice(
 
 
 @router.get("/invoices/{payment_id}/pdf")
-async def get_invoice_pdf(
+def get_invoice_pdf(
     payment_id: UUID,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
