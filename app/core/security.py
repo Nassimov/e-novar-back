@@ -88,6 +88,50 @@ def decode_admin_jwt(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _camera_jwt_secret() -> str:
+    """Dedicated signing secret for camera-pairing JWTs (falls back to secret_key)."""
+    return settings.camera_jwt_secret or settings.secret_key
+
+
+def create_camera_jwt(
+    camera_id: str,
+    session_id: str,
+    room_key: str,
+    expire_at: datetime,
+) -> str:
+    """Issue a signed, session-scoped JWT for a paired second-camera device.
+
+    Deliberately minimal claims — no profile/user identity of any kind, and
+    `type` is checked by get_current_camera so this can never be accepted
+    where a Supabase or admin JWT is expected (or vice versa). `expire_at`
+    is the session's own grace end (see app/routers/classroom.py's
+    scheduled_end + 45min), not a fixed TTL — a paired phone should never
+    need to re-pair mid-lesson just because a generic timer ran out.
+    """
+    now = datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {
+        "sub": f"camera:{camera_id}",
+        "camera_id": camera_id,
+        "session_id": session_id,
+        "room_key": room_key,
+        "type": "camera_session",
+        "iat": now,
+        "exp": expire_at,
+    }
+    return jwt.encode(payload, _camera_jwt_secret(), algorithm=_ALGORITHM)
+
+
+def decode_camera_jwt(token: str) -> Optional[Dict[str, Any]]:
+    """Validate a camera-pairing JWT. Returns None on any failure."""
+    try:
+        claims = jwt.decode(token, _camera_jwt_secret(), algorithms=[_ALGORITHM])
+        if claims.get("type") != "camera_session":
+            return None
+        return claims
+    except JWTError:
+        return None
+
+
 def extract_role(claims: Dict[str, Any]) -> str:
     """
     Extract the app role from JWT claims.

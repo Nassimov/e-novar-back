@@ -125,6 +125,12 @@ class Settings(BaseSettings):
     admin_2fa_secret: str = ""      # base32-encoded TOTP secret (standard TOTP, RFC 6238)
     admin_jwt_expire_minutes: int = 60
     admin_jwt_secret: str = ""      # dedicated signing secret for admin JWTs
+
+    # ── Second-camera pairing (session_cameras) ────────────────────────────────
+    # Dedicated signing secret for the short-lived, session-scoped JWT a
+    # paired phone uses — never accepted by get_current_user, never resolves
+    # to a profile. See app/core/security.py's create_camera_jwt.
+    camera_jwt_secret: str = ""
     # Comma-separated explicit origins (e.g. "https://e-novar.com,http://localhost:5173").
     # The wildcard "*" is no longer used here — *.e-novar.com is handled by regex in main.py.
     allowed_origins: str = ""

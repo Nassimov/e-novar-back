@@ -305,6 +305,7 @@ from app.routers.chargily_webhook import router as chargily_webhook_router
 from app.routers.sessions import router as sessions_router
 from app.routers.session_validation import router as session_validation_router
 from app.routers.classroom import router as classroom_router
+from app.routers.camera_pairing import router as camera_pairing_router
 from app.routers.messages import router as messages_router
 from app.routers.notifications import router as notifications_router
 from app.routers.kp import router as kp_router
@@ -381,6 +382,7 @@ app.include_router(chargily_webhook_router, prefix="/api/payments",    tags=["Pa
 app.include_router(sessions_router,      prefix="/api/sessions",       tags=["Sessions"])
 app.include_router(session_validation_router, prefix="/api/sessions",  tags=["Session Validation"])
 app.include_router(classroom_router,     prefix="/api/classroom",     tags=["Classroom"])
+app.include_router(camera_pairing_router, prefix="/api/camera",        tags=["Session Camera"])
 app.include_router(homework_router,      prefix="/api/homework",       tags=["Homework"])
 app.include_router(messages_router,      prefix="/api/messages",       tags=["Messages"])
 app.include_router(notifications_router, prefix="/api/notifications",  tags=["Notifications"])

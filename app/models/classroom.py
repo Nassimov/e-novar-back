@@ -197,3 +197,27 @@ class SessionWhiteboardSnapshot(SQLModel, table=True):
     created_by: UUID = Field(foreign_key="profiles.id")
     image_url: str = Field()
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionCamera(SQLModel, table=True):
+    """Mirrors public.session_cameras — a second device (typically the
+    teacher's phone) paired to a live session as an extra, video-only LiveKit
+    participant (identity f"camera:{id}"), used to film a physical sheet of
+    paper. Metadata/audit only: the pairing secret lives in Redis (short TTL,
+    single-use, never persisted here) and the media itself is a normal
+    LiveKit track, never stored. See app/services/camera_pairing.py and
+    migration 108."""
+
+    __tablename__ = "session_cameras"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    session_id: UUID = Field(foreign_key="sessions.id", index=True)
+    teacher_id: UUID = Field(foreign_key="profiles.id")
+    room_key: str = Field()
+    name: str = Field(default="Caméra secondaire")
+    status: str = Field(default="CONNECTING")  # 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR'
+    is_shared: bool = Field(default=False)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    connected_at: Optional[datetime] = Field(default=None)
+    disconnected_at: Optional[datetime] = Field(default=None)

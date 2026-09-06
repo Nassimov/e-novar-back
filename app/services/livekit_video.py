@@ -186,3 +186,72 @@ async def mute_participant_microphone(room_name: str, identity: str) -> bool:
             room=room_name, identity=identity, track_sid=mic_track.sid, muted=True,
         ))
         return True
+
+
+def camera_identity(camera_id: str) -> str:
+    return f"camera:{camera_id}"
+
+
+def create_camera_access_token(
+    *,
+    room_name: str,
+    camera_id: str,
+    name: str,
+    expire_at: datetime,
+) -> str:
+    """One-shot token for a paired second-camera device — video-only publish,
+    no subscribe (it never needs to see anyone else) and no data channel (it
+    isn't a participant that draws/chats/answers quizzes). `room_admin` is
+    always False: the phone can never mute/remove other participants."""
+    grants = VideoGrants(
+        room_join=True,
+        room=room_name,
+        can_publish=True,
+        can_subscribe=False,
+        can_publish_data=False,
+        room_admin=False,
+    )
+    token = (
+        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
+        .with_identity(camera_identity(camera_id))
+        .with_name(name)
+        .with_grants(grants)
+        .with_ttl(max(timedelta(minutes=1), expire_at - datetime.now(timezone.utc)))
+    )
+    return token.to_jwt()
+
+
+async def set_camera_track_shared(room_name: str, camera_id: str, shared: bool) -> bool:
+    """Server-enforced share/stop-sharing of a paired camera's video track —
+    same SFU-level mute mechanism as mute_participant_microphone, applied to
+    the camera's own video track. The phone's RTCPeerConnection is left
+    untouched (still "connected"); only whether the SFU forwards its frames
+    to other participants changes. Returns True if a video track was found."""
+    from livekit.api import ListParticipantsRequest, MuteRoomTrackRequest
+
+    identity = camera_identity(camera_id)
+    async with LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret) as lkapi:
+        resp = await lkapi.room.list_participants(ListParticipantsRequest(room=room_name))
+        participant = next((p for p in resp.participants if p.identity == identity), None)
+        if not participant:
+            return False
+        video_track = next((t for t in participant.tracks if t.type == 1), None)  # 1 == TrackType.VIDEO
+        if not video_track:
+            return False
+        await lkapi.room.mute_published_track(MuteRoomTrackRequest(
+            room=room_name, identity=identity, track_sid=video_track.sid, muted=not shared,
+        ))
+        return True
+
+
+async def remove_camera_participant(room_name: str, camera_id: str) -> None:
+    """Best-effort full disconnect of a paired camera — never raises."""
+    from livekit.api import RoomParticipantIdentity
+
+    try:
+        async with LiveKitAPI(settings.livekit_url, settings.livekit_api_key, settings.livekit_api_secret) as lkapi:
+            await lkapi.room.remove_participant(RoomParticipantIdentity(
+                room=room_name, identity=camera_identity(camera_id),
+            ))
+    except Exception:
+        pass

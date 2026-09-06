@@ -168,6 +168,41 @@ def get_admin_user(
     }
 
 
+def get_current_camera(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> Dict[str, Any]:
+    """Validate a paired second-camera device's JWT (see app/core/security.py's
+    create_camera_jwt and app/routers/camera_pairing.py). Checks the JWT
+    signature/expiry AND that `camera_id` isn't in the Redis revocation set —
+    the teacher's "Disconnect camera" action (or session end cleanup) DELs
+    that key so the phone is locked out immediately, without waiting for the
+    JWT's own (generous, session-length) expiry.
+
+    Deliberately never resolves to a Profile and is never accepted by any
+    route that depends on get_current_user — a paired phone has no access to
+    anything on the platform beyond the 2 endpoints that use this."""
+    from app.core.security import decode_camera_jwt
+
+    token = credentials.credentials
+    claims = decode_camera_jwt(token)
+    if not claims:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid camera token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    camera_id = claims.get("camera_id", "")
+    if not camera_id or get_redis_client().get(f"camera:revoked:{camera_id}"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Camera session expired or revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return claims
+
+
 def require_super_admin(
     current_user: Dict[str, Any] = Depends(get_admin_user),
 ) -> Dict[str, Any]:

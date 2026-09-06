@@ -29,6 +29,7 @@ from app.models.booking import Booking, TutoringSession
 from app.models.catalog import Level, Subject
 from app.models.classroom import (
     SessionBookmark,
+    SessionCamera,
     SessionChapter,
     SessionFile,
     SessionNotepad,
@@ -42,6 +43,7 @@ from app.models.conversation import ChatMessage, Conversation, ConversationParti
 from app.models.enums import KpSource
 from app.models.profile import Profile
 from app.models.scheduling import TeacherSlot
+from app.services import camera_pairing
 from app.services import egress as lk_egress
 from app.services import livekit_video as lk_video
 from app.services.kp import award_kp
@@ -1331,3 +1333,164 @@ def get_quiz_answers(
         quiz_id=str(quiz.id), question=quiz.question, choices=quiz.choices,
         correct_indices=quiz.correct_indices, students=out_students,
     )
+
+
+# ─── Second-camera devices (pairing) ────────────────────────────────────────
+# A paired phone never calls anything in THIS router (it has no user JWT) —
+# see app/routers/camera_pairing.py for its own public, camera-JWT-scoped
+# endpoints. Everything below is teacher-only (students may only GET the
+# list, to render names/state for a track they already receive via LiveKit).
+
+class CameraOut(BaseModel):
+    id: str
+    name: str
+    status: str
+    is_shared: bool
+    created_at: str
+    connected_at: Optional[str] = None
+
+
+class CameraPairingOut(BaseModel):
+    camera: CameraOut
+    pairing_token: str
+    pairing_code: str
+    expires_at: str
+    join_url: str
+
+
+def _camera_out(c: SessionCamera) -> CameraOut:
+    return CameraOut(
+        id=str(c.id), name=c.name, status=c.status, is_shared=c.is_shared,
+        created_at=c.created_at.isoformat(),
+        connected_at=c.connected_at.isoformat() if c.connected_at else None,
+    )
+
+
+def _load_camera(db: Session, session: TutoringSession, camera_id: UUID) -> SessionCamera:
+    camera = db.get(SessionCamera, camera_id)
+    room_key = lk_video.room_key_for_session(db, session)
+    if camera is None or camera.room_key != room_key:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return camera
+
+
+@router.post("/{session_id}/cameras", response_model=CameraPairingOut, status_code=201)
+def create_camera(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher clicks "Ajouter une caméra" — creates the SessionCamera row
+    (metadata/audit) and a fresh, single-use pairing token+code (Redis,
+    120s TTL) for the QR the phone scans. See app/services/camera_pairing.py."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut ajouter une caméra")
+
+    room_key = lk_video.room_key_for_session(db, session)
+    camera = SessionCamera(session_id=session_id, teacher_id=session.teacher_id, room_key=room_key)
+    db.add(camera)
+    db.commit()
+    db.refresh(camera)
+
+    pairing = camera_pairing.create_pairing(
+        camera_id=str(camera.id), session_id=str(session_id),
+        teacher_id=str(session.teacher_id), room_key=room_key,
+    )
+    from app.config import get_settings as _get_settings
+    join_url = f"{_get_settings().frontend_url}/camera/{pairing['token']}"
+
+    return CameraPairingOut(
+        camera=_camera_out(camera), pairing_token=pairing["token"], pairing_code=pairing["code"],
+        expires_at=pairing["expires_at"].isoformat(), join_url=join_url,
+    )
+
+
+@router.get("/{session_id}/cameras", response_model=List[CameraOut])
+def list_cameras(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+    room_key = lk_video.room_key_for_session(db, session)
+    cameras = db.exec(
+        select(SessionCamera).where(SessionCamera.room_key == room_key).order_by(SessionCamera.created_at)
+    ).all()
+    return [_camera_out(c) for c in cameras]
+
+
+@router.post("/{session_id}/cameras/{camera_id}/share", response_model=CameraOut)
+async def share_camera(
+    session_id: UUID,
+    camera_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut partager la caméra")
+    camera = _load_camera(db, session, camera_id)
+
+    room_name = lk_video.room_name_for_session(camera.room_key)
+    await lk_video.set_camera_track_shared(room_name, str(camera.id), True)
+    camera.is_shared = True
+    camera.updated_at = datetime.now(timezone.utc)
+    db.add(camera)
+    db.commit()
+    publish_classroom_event(camera.room_key, {"type": "camera_shared", "camera_id": str(camera.id)})
+    return _camera_out(camera)
+
+
+@router.post("/{session_id}/cameras/{camera_id}/stop-sharing", response_model=CameraOut)
+async def stop_sharing_camera(
+    session_id: UUID,
+    camera_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut arrêter le partage")
+    camera = _load_camera(db, session, camera_id)
+
+    room_name = lk_video.room_name_for_session(camera.room_key)
+    await lk_video.set_camera_track_shared(room_name, str(camera.id), False)
+    camera.is_shared = False
+    camera.updated_at = datetime.now(timezone.utc)
+    db.add(camera)
+    db.commit()
+    publish_classroom_event(camera.room_key, {"type": "camera_unshared", "camera_id": str(camera.id)})
+    return _camera_out(camera)
+
+
+@router.delete("/{session_id}/cameras/{camera_id}", status_code=204)
+async def disconnect_camera(
+    session_id: UUID,
+    camera_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Fully disconnects the paired phone — removes it from the LiveKit room
+    and revokes its JWT (see get_current_camera) so a reload of the phone
+    page can't rejoin without re-pairing."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut déconnecter la caméra")
+    camera = _load_camera(db, session, camera_id)
+
+    room_name = lk_video.room_name_for_session(camera.room_key)
+    await lk_video.remove_camera_participant(room_name, str(camera.id))
+    camera_pairing.revoke_camera(str(camera.id))
+    camera.status = "DISCONNECTED"
+    camera.is_shared = False
+    camera.disconnected_at = datetime.now(timezone.utc)
+    camera.updated_at = camera.disconnected_at
+    db.add(camera)
+    db.commit()
+    publish_classroom_event(camera.room_key, {"type": "camera_disconnected", "camera_id": str(camera.id)})

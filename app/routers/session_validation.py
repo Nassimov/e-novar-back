@@ -132,7 +132,7 @@ def get_validation_status(
 
 
 @router.post("/{session_id}/validation/end")
-def end_session(
+async def end_session(
     session_id: UUID,
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
@@ -189,13 +189,44 @@ def end_session(
     db.commit()
 
     from app.core.classroom_ws import publish_classroom_event
+    room_key = lk_video.room_key_for_session(db, session)
     publish_classroom_event(
-        lk_video.room_key_for_session(db, session),
+        room_key,
         {"type": "session_ended", "by": str(ender_uid) if ender_uid else None},
     )
 
+    # A paired phone has no user JWT and never sees this classroom WS event
+    # (see app/routers/camera_pairing.py's module comment) — it only finds
+    # out the session is over because its LiveKit connection gets force-
+    # disconnected here. Best-effort, mirrors app/services/livekit_video.py's
+    # delete_room: never blocks "end session" on a flaky LiveKit call.
+    await _disconnect_session_cameras(db, room_key)
+
     db.refresh(sv)
     return {"status": sv.status}
+
+
+async def _disconnect_session_cameras(db: Session, room_key: str) -> None:
+    from sqlmodel import select
+
+    from app.models.classroom import SessionCamera
+    from app.services import camera_pairing
+    from app.services import livekit_video as lk_video
+
+    room_name = lk_video.room_name_for_session(room_key)
+    cameras = db.exec(
+        select(SessionCamera).where(SessionCamera.room_key == room_key, SessionCamera.status != "DISCONNECTED")
+    ).all()
+    for camera in cameras:
+        await lk_video.remove_camera_participant(room_name, str(camera.id))
+        camera_pairing.revoke_camera(str(camera.id))
+        camera.status = "DISCONNECTED"
+        camera.is_shared = False
+        camera.disconnected_at = datetime.now(timezone.utc)
+        camera.updated_at = camera.disconnected_at
+        db.add(camera)
+    if cameras:
+        db.commit()
 
 
 @router.get("/{session_id}/validation/token", response_model=TokenViewResponse)
