@@ -1198,9 +1198,38 @@ async def request_dzd_withdrawal(
     from app.models.profile import TeacherProfile as _TeacherProfile
 
     teacher_id = UUID(current_user["id"])
-    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id)).first()
+    # Row-locked for the whole check-then-deduct below: without this, two
+    # concurrent requests (a double-click, or a retried request) can each
+    # read the same stale balance, both pass the sufficient-funds check, and
+    # both deduct — a classic lost-update that lets a teacher withdraw more
+    # than their actual wallet balance. The lock is held until this request's
+    # transaction commits, so a second concurrent request blocks here and
+    # sees the already-updated balance once it proceeds.
+    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == teacher_id).with_for_update()).first()
     if tp is None:
         raise HTTPException(status_code=404, detail="Teacher profile not found")
+
+    # Max 2 wallet withdrawal requests per calendar month — a rejected
+    # request (funds already refunded, see admin/content.py's
+    # process_withdrawal) doesn't consume a slot, but a pending or approved
+    # one does, so this can't be bypassed by spamming requests hoping some
+    # get auto-rejected.
+    from datetime import datetime
+
+    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    withdrawals_this_month = db.exec(
+        select(TeacherPayout).where(
+            TeacherPayout.teacher_id == teacher_id,
+            TeacherPayout.source == "wallet",
+            TeacherPayout.status != "rejected",
+            TeacherPayout.requested_at >= month_start,
+        )
+    ).all()
+    if len(withdrawals_this_month) >= 2:
+        raise HTTPException(
+            status_code=429,
+            detail="Vous avez atteint la limite de 2 retraits par mois. Réessayez le mois prochain.",
+        )
 
     # payout_rail defaults to "bank" even when nothing has actually been
     # configured yet — the real signal of "a payout destination exists" is
@@ -1229,6 +1258,25 @@ async def request_dzd_withdrawal(
     # happened to contain).
     tp.wallet_balance_dzd -= payload.amount_dzd
     db.add(tp)
+
+    # Persisted so an admin can actually see and act on it — previously this
+    # request silently deducted the wallet with nothing recorded anywhere,
+    # so nobody (admin included) had any way to know a payout was owed.
+    # Shares the same admin queue as the EP->DZD conversion flow (see
+    # app/routers/admin/content.py's list/process_withdrawal), distinguished
+    # by `source`.
+    payout = TeacherPayout(
+        teacher_id=teacher_id,
+        source="wallet",
+        ep_amount=0,
+        dzd_amount=payload.amount_dzd,
+        currency=tp.currency or "DZD",
+        payout_rail=tp.payout_rail,
+        iban=tp.iban if tp.payout_rail != "baridimob" else None,
+        bank_holder=tp.bank_holder if tp.payout_rail != "baridimob" else None,
+        payout_phone=tp.payout_phone if tp.payout_rail == "baridimob" else None,
+    )
+    db.add(payout)
     db.commit()
     return {
         "message": f"Demande de retrait de {payload.amount_dzd} DA enregistrée. Un virement sera effectué sous 72h.",

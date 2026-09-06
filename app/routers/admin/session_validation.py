@@ -15,6 +15,7 @@ from app.dependencies import get_admin_user, get_db
 from app.models.booking import Booking, TutoringSession
 from app.models.profile import Profile
 from app.models.session_validation import SessionValidation
+from app.models.teacher import TeacherProfile
 from app.schemas.session_validation import AdminDecisionRequest, AdminReviewItem, TrustScoreSettings
 from app.services.pricing import get_platform_settings
 from app.services.session_validation import credit_session_payout, generate_token, log_audit
@@ -191,6 +192,28 @@ async def reject_validation(
                 )
             session_row = db.get(TutoringSession, sv.session_id)
             if session_row is not None:
+                # Clawback: if the teacher was already auto-credited for
+                # this session (see credit_session_payout — this can happen
+                # before an admin gets to review a disputed session), the
+                # student refund above would otherwise leave the platform
+                # eating the full loss while the teacher keeps their credit.
+                # Deduct the same amount that was credited, clamped at 0 —
+                # if the teacher already withdrew past it, the wallet can't
+                # go negative here, so this is logged for manual follow-up
+                # instead of silently under-clawing-back.
+                if sv.payment_credited_at is not None and session_row.teacher_payout_amount:
+                    teacher_profile = db.get(TeacherProfile, sv.teacher_id)
+                    if teacher_profile is not None:
+                        clawback_amount = session_row.teacher_payout_amount
+                        shortfall = max(0, clawback_amount - teacher_profile.wallet_balance_dzd)
+                        teacher_profile.wallet_balance_dzd = max(0, teacher_profile.wallet_balance_dzd - clawback_amount)
+                        db.add(teacher_profile)
+                        if shortfall > 0:
+                            log_audit(
+                                db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=admin_id,
+                                actor_ip=None, action="payout_clawback_shortfall",
+                                metadata={"teacher_id": str(sv.teacher_id), "clawback_amount": clawback_amount, "shortfall": shortfall},
+                            )
                 session_row.refund_percentage = 100
                 session_row.refund_amount = refund_amount
                 session_row.teacher_payout_amount = 0

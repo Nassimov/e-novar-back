@@ -11,7 +11,10 @@ individual ones. Same logic for the shared group chat conversation.
 """
 from __future__ import annotations
 
+import io
 import logging
+import posixpath
+import zipfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -24,11 +27,22 @@ from app.core.classroom_ws import publish_classroom_event
 from app.dependencies import get_current_user, get_db
 from app.models.booking import Booking, TutoringSession
 from app.models.catalog import Level, Subject
-from app.models.classroom import SessionChapter, SessionFile, SessionQuiz, SessionQuizAnswer
+from app.models.classroom import (
+    SessionBookmark,
+    SessionChapter,
+    SessionFile,
+    SessionNotepad,
+    SessionQuiz,
+    SessionQuizAnswer,
+    SessionRecording,
+    SessionWhiteboardSnapshot,
+    SessionWhiteboardState,
+)
 from app.models.conversation import ChatMessage, Conversation, ConversationParticipant
 from app.models.enums import KpSource
 from app.models.profile import Profile
 from app.models.scheduling import TeacherSlot
+from app.services import egress as lk_egress
 from app.services import livekit_video as lk_video
 from app.services.kp import award_kp
 from app.services.pricing import get_platform_settings
@@ -257,6 +271,423 @@ async def mute_participant(
 
     publish_classroom_event(room_key, {"type": "participant_muted", "user_id": str(target_user_id)})
     return {"muted": muted}
+
+
+# ─── Recording (LiveKit Egress) ─────────────────────────────────────────────
+
+class RecordingOut(BaseModel):
+    id: str
+    status: str  # 'active' | 'ending' | 'complete' | 'failed'
+    file_url: Optional[str] = None
+    duration_sec: Optional[int] = None
+    started_at: str
+    ended_at: Optional[str] = None
+
+
+@router.post("/{session_id}/recording/start", response_model=RecordingOut, status_code=201)
+async def start_recording(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher (or admin) only — starts a room-composite recording. Only one
+    active recording per session at a time (mirrors what the UI exposes)."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut démarrer l'enregistrement")
+    if not lk_egress.is_configured():
+        raise HTTPException(status_code=503, detail="L'enregistrement n'est pas configuré sur cette plateforme (EGRESS_S3_*)")
+
+    existing = db.exec(
+        select(SessionRecording)
+        .where(SessionRecording.session_id.in_(_group_session_ids(db, session)))
+        .where(SessionRecording.status.in_(("active", "ending")))
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Un enregistrement est déjà en cours pour cette séance")
+
+    room_key = lk_video.room_key_for_session(db, session)
+    room_name = lk_video.room_name_for_session(room_key)
+    try:
+        info = await lk_egress.start_recording(room_name, str(session_id))
+    except Exception:
+        logger.exception("Failed to start egress recording session_id=%s", session_id)
+        raise HTTPException(status_code=502, detail="Impossible de démarrer l'enregistrement")
+
+    rec = SessionRecording(
+        session_id=session_id, room_key=room_key, egress_id=info["egress_id"],
+        status=info["status"], started_by=uid,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+
+    publish_classroom_event(room_key, {"type": "recording_started"})
+    return RecordingOut(id=str(rec.id), status=rec.status, started_at=rec.started_at.isoformat())
+
+
+@router.post("/{session_id}/recording/{recording_id}/stop", response_model=RecordingOut)
+async def stop_recording(
+    session_id: UUID,
+    recording_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut arrêter l'enregistrement")
+
+    rec = db.get(SessionRecording, recording_id)
+    if rec is None or rec.session_id not in _group_session_ids(db, session):
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if rec.status not in ("active",):
+        raise HTTPException(status_code=409, detail=f"Cannot stop a recording in status '{rec.status}'")
+
+    try:
+        info = await lk_egress.stop_recording(rec.egress_id)
+    except Exception:
+        logger.exception("Failed to stop egress recording id=%s", rec.egress_id)
+        raise HTTPException(status_code=502, detail="Impossible d'arrêter l'enregistrement")
+
+    rec.status = info["status"]
+    rec.ended_at = datetime.now(timezone.utc)
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+
+    publish_classroom_event(rec.room_key, {"type": "recording_stopped"})
+    return RecordingOut(
+        id=str(rec.id), status=rec.status, file_url=rec.file_url, duration_sec=rec.duration_sec,
+        started_at=rec.started_at.isoformat(), ended_at=rec.ended_at.isoformat(),
+    )
+
+
+@router.get("/{session_id}/recordings", response_model=List[RecordingOut])
+async def list_recordings(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Both participants can view — refreshes status/file_url from LiveKit's
+    ListEgress for anything not yet 'complete'/'failed' (no webhook receiver
+    exists in this app, see app/services/egress.py)."""
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+
+    recordings = db.exec(
+        select(SessionRecording)
+        .where(SessionRecording.session_id.in_(_group_session_ids(db, session)))
+        .order_by(SessionRecording.started_at.desc())
+    ).all()
+
+    for rec in recordings:
+        if rec.status in ("complete", "failed"):
+            continue
+        try:
+            fresh = await lk_egress.get_egress_status(rec.egress_id)
+        except Exception:
+            logger.warning("Failed to refresh egress status id=%s", rec.egress_id, exc_info=True)
+            continue
+        if fresh is None:
+            continue
+        if fresh["status"] != rec.status or fresh.get("file_url"):
+            rec.status = fresh["status"]
+            if fresh.get("file_url"):
+                rec.file_url = fresh["file_url"]
+            if fresh.get("duration_sec"):
+                rec.duration_sec = fresh["duration_sec"]
+            if rec.status in ("complete", "failed") and rec.ended_at is None:
+                rec.ended_at = datetime.now(timezone.utc)
+            db.add(rec)
+    db.commit()
+
+    return [
+        RecordingOut(
+            id=str(r.id), status=r.status, file_url=r.file_url, duration_sec=r.duration_sec,
+            started_at=r.started_at.isoformat(), ended_at=r.ended_at.isoformat() if r.ended_at else None,
+        )
+        for r in recordings
+    ]
+
+
+# ─── Shared notepad ─────────────────────────────────────────────────────────
+
+class NotepadOut(BaseModel):
+    content: str
+    updated_by: Optional[str] = None
+    updated_at: str
+
+
+class NotepadIn(BaseModel):
+    content: str
+
+
+@router.get("/{session_id}/notepad", response_model=NotepadOut)
+async def get_notepad(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+    room_key = lk_video.room_key_for_session(db, session)
+    pad = db.get(SessionNotepad, room_key)
+    if pad is None:
+        return NotepadOut(content="", updated_at=datetime.now(timezone.utc).isoformat())
+    return NotepadOut(
+        content=pad.content, updated_by=str(pad.updated_by) if pad.updated_by else None,
+        updated_at=pad.updated_at.isoformat(),
+    )
+
+
+@router.put("/{session_id}/notepad", response_model=NotepadOut)
+async def update_notepad(
+    session_id: UUID,
+    payload: NotepadIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Either party can edit — debounced client-side (not on every
+    keystroke), broadcast to the room so it stays live without a poll."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    room_key = lk_video.room_key_for_session(db, session)
+
+    pad = db.get(SessionNotepad, room_key)
+    now = datetime.now(timezone.utc)
+    if pad is None:
+        pad = SessionNotepad(room_key=room_key, content=payload.content, updated_by=uid, updated_at=now)
+    else:
+        pad.content = payload.content
+        pad.updated_by = uid
+        pad.updated_at = now
+    db.add(pad)
+    db.commit()
+
+    publish_classroom_event(room_key, {"type": "notepad_updated", "content": pad.content, "updated_by": str(uid)})
+    return NotepadOut(content=pad.content, updated_by=str(uid), updated_at=pad.updated_at.isoformat())
+
+
+# ─── Whiteboard background (shared exercise sheet / diagram image) ─────────
+
+class WhiteboardBackgroundOut(BaseModel):
+    background_url: Optional[str] = None
+
+
+class WhiteboardBackgroundIn(BaseModel):
+    file_id: UUID
+
+
+@router.get("/{session_id}/whiteboard-background", response_model=WhiteboardBackgroundOut)
+async def get_whiteboard_background(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+    room_key = lk_video.room_key_for_session(db, session)
+    state = db.get(SessionWhiteboardState, room_key)
+    return WhiteboardBackgroundOut(background_url=state.background_url if state else None)
+
+
+@router.put("/{session_id}/whiteboard-background", response_model=WhiteboardBackgroundOut)
+async def set_whiteboard_background(
+    session_id: UUID,
+    payload: WhiteboardBackgroundIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sets an already-uploaded image (see the Library file list) as the
+    whiteboard's shared background — drawn behind replayed strokes on both
+    sides, so annotating over an exercise sheet/diagram photo works the same
+    way as the plain blank whiteboard."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut définir le fond du tableau")
+    room_key = lk_video.room_key_for_session(db, session)
+
+    file = db.get(SessionFile, payload.file_id)
+    if file is None or file.session_id not in _group_session_ids(db, session):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not file.mime or not file.mime.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Seule une image peut être utilisée comme fond du tableau")
+
+    state = db.get(SessionWhiteboardState, room_key)
+    now = datetime.now(timezone.utc)
+    if state is None:
+        state = SessionWhiteboardState(room_key=room_key, background_url=file.url, background_file_id=file.id, updated_by=uid, updated_at=now)
+    else:
+        state.background_url = file.url
+        state.background_file_id = file.id
+        state.updated_by = uid
+        state.updated_at = now
+    db.add(state)
+    db.commit()
+
+    publish_classroom_event(room_key, {"type": "whiteboard_background_updated", "background_url": file.url})
+    return WhiteboardBackgroundOut(background_url=file.url)
+
+
+@router.delete("/{session_id}/whiteboard-background", status_code=204)
+async def clear_whiteboard_background(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut retirer le fond du tableau")
+    room_key = lk_video.room_key_for_session(db, session)
+
+    state = db.get(SessionWhiteboardState, room_key)
+    if state is not None:
+        state.background_url = None
+        state.background_file_id = None
+        state.updated_by = uid
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        db.commit()
+
+    publish_classroom_event(room_key, {"type": "whiteboard_background_updated", "background_url": None})
+    return None
+
+
+class BookmarkIn(BaseModel):
+    elapsed_sec: int
+    label: Optional[str] = None
+
+
+class BookmarkOut(BaseModel):
+    id: str
+    label: Optional[str] = None
+    elapsed_sec: int
+    created_by: str
+    created_at: str
+
+
+@router.post("/{session_id}/bookmarks", response_model=BookmarkOut, status_code=201)
+async def create_bookmark(
+    session_id: UUID,
+    payload: BookmarkIn,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Either party can mark a moment — shown on the post-session summary
+    page, linking into the recording once one exists (see
+    app/routers/classroom.py's recording endpoints)."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    room_key = lk_video.room_key_for_session(db, session)
+
+    bookmark = SessionBookmark(
+        session_id=session_id, room_key=room_key, created_by=uid,
+        label=payload.label, elapsed_sec=max(0, payload.elapsed_sec),
+    )
+    db.add(bookmark)
+    db.commit()
+    db.refresh(bookmark)
+    return BookmarkOut(
+        id=str(bookmark.id), label=bookmark.label, elapsed_sec=bookmark.elapsed_sec,
+        created_by=str(bookmark.created_by), created_at=bookmark.created_at.isoformat(),
+    )
+
+
+@router.get("/{session_id}/bookmarks", response_model=List[BookmarkOut])
+async def list_bookmarks(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+
+    bookmarks = db.exec(
+        select(SessionBookmark)
+        .where(SessionBookmark.session_id.in_(_group_session_ids(db, session)))
+        .order_by(SessionBookmark.elapsed_sec)
+    ).all()
+    return [
+        BookmarkOut(
+            id=str(b.id), label=b.label, elapsed_sec=b.elapsed_sec,
+            created_by=str(b.created_by), created_at=b.created_at.isoformat(),
+        )
+        for b in bookmarks
+    ]
+
+
+class WhiteboardSnapshotOut(BaseModel):
+    id: str
+    image_url: str
+    created_by: str
+    created_at: str
+
+
+@router.post("/{session_id}/whiteboard-snapshots", response_model=WhiteboardSnapshotOut, status_code=201)
+async def create_whiteboard_snapshot(
+    session_id: UUID,
+    file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Either party can export a PNG capture of the whiteboard (composited
+    client-side from the background + drawn strokes) — shown on the
+    post-session summary page next to recordings/bookmarks."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Image vide")
+
+    from app.services.storage import GENERAL_CONTENT_TYPES, GENERAL_EXTENSIONS, UploadValidationError, validate_upload
+    try:
+        validate_upload(
+            filename=file.filename, content_type=file.content_type, size=len(raw),
+            allowed_content_types=GENERAL_CONTENT_TYPES, allowed_extensions=GENERAL_EXTENSIONS,
+            max_size=10 * 1024 * 1024,
+        )
+    except UploadValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    room_key = lk_video.room_key_for_session(db, session)
+    image_url = upload_file(raw, file.filename or "whiteboard.png", file.content_type, folder=f"whiteboard-snapshots/{session_id}")
+
+    snapshot = SessionWhiteboardSnapshot(session_id=session_id, room_key=room_key, created_by=uid, image_url=image_url)
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    return WhiteboardSnapshotOut(
+        id=str(snapshot.id), image_url=snapshot.image_url,
+        created_by=str(snapshot.created_by), created_at=snapshot.created_at.isoformat(),
+    )
+
+
+@router.get("/{session_id}/whiteboard-snapshots", response_model=List[WhiteboardSnapshotOut])
+async def list_whiteboard_snapshots(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    session = _load_session(db, session_id)
+    _authorize(session, current_user)
+
+    snapshots = db.exec(
+        select(SessionWhiteboardSnapshot)
+        .where(SessionWhiteboardSnapshot.session_id.in_(_group_session_ids(db, session)))
+        .order_by(SessionWhiteboardSnapshot.created_at)
+    ).all()
+    return [
+        WhiteboardSnapshotOut(
+            id=str(s.id), image_url=s.image_url,
+            created_by=str(s.created_by), created_at=s.created_at.isoformat(),
+        )
+        for s in snapshots
+    ]
 
 
 @router.post("/{session_id}/dev-simulate-start")
@@ -532,6 +963,52 @@ async def advance_chapter(
 
 # ─── Files ──────────────────────────────────────────────────────────────────
 
+H5P_MAX_PACKAGE_SIZE = 100 * 1024 * 1024  # 100 MB, uncompressed
+
+
+def _extract_and_host_h5p(raw: bytes, session_id: UUID) -> str:
+    """Extracts a `.h5p` package (a zip archive) and re-uploads every entry to
+    Supabase Storage under a fresh folder, preserving relative paths — the
+    h5p-standalone player fetches h5p.json/content.json/library files by
+    plain relative URL against this folder's base, so it can't work from a
+    single opaque .h5p file URL the way a PDF/image can.
+
+    Returns the base folder's public URL (used directly as h5pJsonPath).
+    """
+    from app.services.storage import upload_at_path, public_folder_url
+
+    folder = f"h5p-content/{session_id}/{uuid4()}"
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Fichier H5P invalide (zip corrompu)")
+
+    total_size = 0
+    entries: list[tuple[str, zipfile.ZipInfo]] = []
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        # Reject zip-slip attempts (entries that normalize outside the
+        # archive root, e.g. "../../etc/passwd") — Supabase Storage doesn't
+        # do real filesystem traversal, but there's no reason to trust these
+        # paths any further than necessary.
+        normalized = posixpath.normpath(info.filename)
+        if normalized.startswith("..") or normalized.startswith("/"):
+            continue
+        total_size += info.file_size
+        if total_size > H5P_MAX_PACKAGE_SIZE:
+            raise HTTPException(status_code=400, detail="Paquet H5P trop volumineux")
+        entries.append((normalized, info))
+
+    if not any(name == "h5p.json" for name, _ in entries):
+        raise HTTPException(status_code=400, detail="Paquet H5P invalide (h5p.json manquant)")
+
+    for normalized, info in entries:
+        upload_at_path(zf.read(info), f"{folder}/{normalized}")
+
+    return public_folder_url(folder)
+
+
 class FileOut(BaseModel):
     id: str
     name: str
@@ -579,19 +1056,25 @@ async def upload_session_file(
     if not raw:
         raise HTTPException(status_code=400, detail="Fichier vide")
 
-    from app.services.storage import (
-        GENERAL_CONTENT_TYPES, GENERAL_EXTENSIONS, UploadValidationError, validate_upload,
-    )
-    try:
-        validate_upload(
-            filename=file.filename, content_type=file.content_type, size=len(raw),
-            allowed_content_types=GENERAL_CONTENT_TYPES, allowed_extensions=GENERAL_EXTENSIONS,
-            max_size=50 * 1024 * 1024,
+    is_h5p = (file.filename or "").lower().endswith(".h5p")
+    if is_h5p:
+        if len(raw) > H5P_MAX_PACKAGE_SIZE:
+            raise HTTPException(status_code=400, detail="Paquet H5P trop volumineux")
+        url = _extract_and_host_h5p(raw, session_id)
+    else:
+        from app.services.storage import (
+            GENERAL_CONTENT_TYPES, GENERAL_EXTENSIONS, UploadValidationError, validate_upload,
         )
-    except UploadValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        try:
+            validate_upload(
+                filename=file.filename, content_type=file.content_type, size=len(raw),
+                allowed_content_types=GENERAL_CONTENT_TYPES, allowed_extensions=GENERAL_EXTENSIONS,
+                max_size=50 * 1024 * 1024,
+            )
+        except UploadValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
-    url = upload_file(raw, file.filename or "fichier", file.content_type, folder=f"session-files/{session_id}")
+        url = upload_file(raw, file.filename or "fichier", file.content_type, folder=f"session-files/{session_id}")
 
     record = SessionFile(
         session_id=session_id, uploaded_by=uid, name=file.filename or "fichier",
@@ -779,4 +1262,72 @@ async def answer_quiz(
         id=str(quiz.id), question=quiz.question, choices=quiz.choices, created_at=quiz.created_at.isoformat(),
         my_answers=choice_indices, my_correct=is_correct, correct_indices=quiz.correct_indices,
         answers_count=answers_count, correct_count=correct_count,
+    )
+
+
+class QuizStudentAnswer(BaseModel):
+    student_id: str
+    student_name: str
+    student_avatar: Optional[str] = None
+    choice_indices: Optional[List[int]] = None  # None = hasn't answered yet
+    is_correct: Optional[bool] = None
+    answered_at: Optional[str] = None
+
+
+class QuizAnswersDetail(BaseModel):
+    quiz_id: str
+    question: str
+    choices: List[str]
+    correct_indices: List[int]
+    students: List[QuizStudentAnswer]  # every enrolled student, answered or not
+
+
+@router.get("/{session_id}/quizzes/{quiz_id}/answers", response_model=QuizAnswersDetail)
+async def get_quiz_answers(
+    session_id: UUID,
+    quiz_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Per-student answer breakdown for one quiz — teacher (or admin) only.
+    Lists every enrolled student (individual: the one student; group: every
+    sibling session's student, see _group_session_ids), so the teacher can
+    tell "hasn't answered yet" apart from "answered incorrectly"."""
+    session = _load_session(db, session_id)
+    uid = _authorize(session, current_user)
+    if uid != session.teacher_id and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Seul l'enseignant peut voir le détail des réponses")
+
+    quiz = db.get(SessionQuiz, quiz_id)
+    if quiz is None or quiz.session_id not in _group_session_ids(db, session):
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    slot_id = _group_slot_id(db, session)
+    if slot_id:
+        student_ids = list({s.student_id for s in _group_sessions(db, slot_id)})
+    else:
+        student_ids = [session.student_id]
+
+    students = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all()
+    profile_map = {p.id: p for p in students}
+    answers = db.exec(select(SessionQuizAnswer).where(SessionQuizAnswer.quiz_id == quiz_id)).all()
+    answer_map = {a.student_id: a for a in answers}
+
+    out_students = sorted(
+        (
+            QuizStudentAnswer(
+                student_id=str(sid),
+                student_name=_display_name(profile_map.get(sid)),
+                student_avatar=(profile_map.get(sid).avatar_url if profile_map.get(sid) else None),
+                choice_indices=(answer_map[sid].choice_indices if sid in answer_map else None),
+                is_correct=(answer_map[sid].is_correct if sid in answer_map else None),
+                answered_at=(answer_map[sid].answered_at.isoformat() if sid in answer_map else None),
+            )
+            for sid in student_ids
+        ),
+        key=lambda s: (s.choice_indices is None, s.student_name),
+    )
+    return QuizAnswersDetail(
+        quiz_id=str(quiz.id), question=quiz.question, choices=quiz.choices,
+        correct_indices=quiz.correct_indices, students=out_students,
     )

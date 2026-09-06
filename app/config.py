@@ -69,6 +69,19 @@ class Settings(BaseSettings):
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
 
+    # ── LiveKit Egress (session recording) — S3-compatible upload target ─────
+    # Points at Supabase Storage's own S3-compatible endpoint by default (see
+    # Project Settings > Storage > S3 Connection in the Supabase dashboard —
+    # these are DIFFERENT credentials from SUPABASE_SERVICE_ROLE_KEY), so
+    # recordings land in the same storage the rest of the app already uses.
+    # Recording is a no-op (returns a clear error) until these are set — see
+    # app/services/egress.py.
+    egress_s3_endpoint: str = ""       # e.g. https://<project>.supabase.co/storage/v1/s3
+    egress_s3_region: str = "us-east-1"
+    egress_s3_access_key: str = ""
+    egress_s3_secret_key: str = ""
+    egress_s3_bucket: str = ""
+
     # ── OneSignal (push + email) ──────────────────────────────────────────────
     onesignal_app_id: str = ""
     onesignal_rest_api_key: str = ""

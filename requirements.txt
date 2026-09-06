@@ -14,6 +14,10 @@ celery[redis]==5.4.0
 redis==5.0.8
 httpx==0.27.0
 livekit-api==1.2.0
+# Live classroom captions (app/agents/transcription_agent.py) — a separate
+# worker process, not loaded by the main FastAPI app. Compatible with the
+# livekit-api pin above (livekit-agents requires livekit-api<2,>=1.2.0).
+livekit-agents[deepgram]==1.7.1
 pydantic-settings==2.4.0
 pydantic[email]==2.11.7
 python-dotenv==1.0.1

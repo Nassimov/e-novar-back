@@ -93,23 +93,32 @@ class Invoice(SQLModel, table=True):
 class TeacherPayout(SQLModel, table=True):
     """
     Mirrors public.teacher_payouts.
-    Teacher requests to convert EP → DZD. Admin approves and sets dzd_amount.
-    Requires at least 1 completed session (enforced at API level).
+    Two request sources share this same admin-facing queue (see migration
+    102): 'ep_conversion' (teacher converts EP -> DZD; admin sets dzd_amount
+    on approval, EP deducted via kp_transactions) and 'wallet' (teacher cashes
+    out real session-earnings from wallet_balance_dzd — dzd_amount is already
+    fixed at request time, the wallet was already deducted then too, so a
+    reject on this source must refund it — see admin/content.py's
+    process_withdrawal). Requires at least 1 completed session (enforced at
+    API level, ep_conversion only).
     """
 
     __tablename__ = "teacher_payouts"
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     teacher_id: UUID = Field(foreign_key="profiles.id", index=True)
-    ep_amount: int = Field()                             # EP à convertir
+    source: str = Field(default="ep_conversion")         # 'wallet' | 'ep_conversion'
+    ep_amount: int = Field(default=0)                    # EP à convertir — 0 for a 'wallet' request
     dzd_amount: Optional[int] = Field(default=None)     # fixé par l'admin — despite the name, denominates
                                                           # whatever `currency` says (kept unrenamed, see
                                                           # migration 100 — a live financial column rename
                                                           # is a separate, riskier change with no functional
-                                                          # benefit right now)
+                                                          # benefit right now). Already known for 'wallet'.
     currency: str = Field(default="DZD")                 # ISO 4217 — source of truth for dzd_amount's unit
-    iban: str = Field()
-    bank_holder: str = Field()
+    payout_rail: Optional[str] = Field(default=None)    # 'bank' | 'baridimob' — teacher's rail at request time
+    iban: Optional[str] = Field(default=None)
+    bank_holder: Optional[str] = Field(default=None)
+    payout_phone: Optional[str] = Field(default=None)   # BaridiMob destination
     status: str = Field(default="pending")               # public.withdrawal_status
     admin_note: Optional[str] = Field(default=None)
     requested_at: datetime = Field(default_factory=datetime.utcnow)

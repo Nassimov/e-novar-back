@@ -110,3 +110,90 @@ class SessionQuizAnswer(SQLModel, table=True):
     choice_indices: List[int] = Field(default_factory=list, sa_column=sa.Column(JSONB, nullable=False))
     is_correct: bool = Field()
     answered_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionRecording(SQLModel, table=True):
+    """Mirrors public.session_recordings — one row per LiveKit Egress
+    recording attempt. `file_url`/`duration_sec` are only known once the
+    upload finishes; no LiveKit webhook receiver exists in this app, so
+    they're refreshed by polling ListEgress on read (see
+    app/services/egress.py), not pushed. See app/routers/classroom.py's
+    recording endpoints and migration 103."""
+
+    __tablename__ = "session_recordings"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    session_id: UUID = Field(foreign_key="sessions.id", index=True)
+    room_key: str = Field()
+    egress_id: str = Field(unique=True, index=True)
+    status: str = Field(default="active")  # 'active' | 'ending' | 'complete' | 'failed'
+    file_url: Optional[str] = Field(default=None)
+    duration_sec: Optional[int] = Field(default=None)
+    started_by: UUID = Field(foreign_key="profiles.id")
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    ended_at: Optional[datetime] = Field(default=None)
+
+
+class SessionNotepad(SQLModel, table=True):
+    """Mirrors public.session_notepads. A free-form shared scratch space —
+    distinct from the structured "chapters" program — either party can type,
+    both see it live (broadcast over the classroom WS) and it survives a
+    reload/reconnect (unlike whiteboard strokes, which are DB-less). One row
+    per room_key (shared across a group lesson's siblings). See migration 104."""
+
+    __tablename__ = "session_notepads"
+
+    room_key: str = Field(primary_key=True)
+    content: str = Field(default="")
+    updated_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionWhiteboardState(SQLModel, table=True):
+    """Mirrors public.session_whiteboard_state. The currently shared
+    background image (an uploaded exercise sheet/diagram) drawn behind the
+    whiteboard canvas before strokes replay on top. One row per room_key.
+    See migration 104."""
+
+    __tablename__ = "session_whiteboard_state"
+
+    room_key: str = Field(primary_key=True)
+    background_url: Optional[str] = Field(default=None)
+    background_file_id: Optional[UUID] = Field(default=None)
+    updated_by: Optional[UUID] = Field(default=None, foreign_key="profiles.id")
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionBookmark(SQLModel, table=True):
+    """Mirrors public.session_bookmarks. Either party can mark a moment
+    mid-session — shown on the post-session summary page, linking to
+    recording_url#t=<elapsed_sec> once a completed recording exists (see
+    SessionRecording). See migration 105."""
+
+    __tablename__ = "session_bookmarks"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    session_id: UUID = Field(foreign_key="sessions.id", index=True)
+    room_key: str = Field()
+    created_by: UUID = Field(foreign_key="profiles.id")
+    label: Optional[str] = Field(default=None)
+    elapsed_sec: int = Field()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class SessionWhiteboardSnapshot(SQLModel, table=True):
+    """Mirrors public.session_whiteboard_snapshots. A PNG capture of the
+    whiteboard (background + strokes) either party exported mid/post-session
+    — shown on the summary page next to recordings/bookmarks. See migration
+    106. Formula overlays (KaTeX HTML, not canvas-drawn) are not part of the
+    raster — same rendering-fragility tradeoff documented on the formula
+    overlay itself."""
+
+    __tablename__ = "session_whiteboard_snapshots"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    session_id: UUID = Field(foreign_key="sessions.id", index=True)
+    room_key: str = Field()
+    created_by: UUID = Field(foreign_key="profiles.id")
+    image_url: str = Field()
+    created_at: datetime = Field(default_factory=datetime.utcnow)

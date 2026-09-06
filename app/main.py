@@ -864,11 +864,12 @@ async def websocket_classroom(websocket: WebSocket, session_id: str, token: str 
                 mtype = msg.get("type")
                 if mtype == "ping":
                     send_queue.put_nowait({"type": "pong"})
-                elif mtype in (
-                    "whiteboard_stroke", "whiteboard_clear",
-                    "annotation_stroke", "annotation_clear",
-                    "hand_raise",
-                ):
+                elif mtype == "hand_raise":
+                    # Whiteboard/annotation strokes moved to LiveKit's own
+                    # reliable data channel (see src/routes/*.classroom.live
+                    # .$sessionId.tsx) — this custom relay only still carries
+                    # hand_raise plus the REST-triggered chapter/file/quiz
+                    # broadcasts (app/routers/classroom.py).
                     msg["from"] = user_id
                     publish_classroom_event(room_key, msg)
             except json.JSONDecodeError:

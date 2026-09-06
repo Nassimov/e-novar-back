@@ -346,16 +346,26 @@ async def list_withdrawals(
     offset = (page - 1) * size
     paginated = payouts[offset: offset + size]
 
+    teacher_ids = list({p.teacher_id for p in paginated})
+    from app.models.profile import Profile as _Profile
+    teacher_profiles = db.exec(select(_Profile).where(_Profile.id.in_(teacher_ids))).all() if teacher_ids else []
+    teacher_name_map = {p.id: p.full_name for p in teacher_profiles}
+
     return {
         "items": [
             {
                 "id": str(p.id),
                 "teacher_id": str(p.teacher_id),
+                "teacher_name": teacher_name_map.get(p.teacher_id),
+                "source": p.source,
                 "ep_amount": p.ep_amount,
                 "dzd_amount": p.dzd_amount,
+                "currency": p.currency,
                 "status": p.status,
+                "payout_rail": p.payout_rail,
                 "iban": p.iban,
                 "bank_holder": p.bank_holder,
+                "payout_phone": p.payout_phone,
                 "admin_note": p.admin_note,
                 "requested_at": p.requested_at.isoformat(),
                 "processed_at": p.processed_at.isoformat() if p.processed_at else None,
@@ -376,9 +386,12 @@ async def process_withdrawal(
     current_user: Dict[str, Any] = Depends(get_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Approve or reject an EP→DZD payout request.
-    On approve: deducts EP via kp_transactions (trigger updates kp_balances).
-    """
+    """Approve or reject a payout request — either source (see TeacherPayout's
+    docstring): 'ep_conversion' (EP -> DZD, admin sets the DZD amount, EP
+    deducted via kp_transactions on approval) or 'wallet' (a teacher cashing
+    out real session earnings — dzd_amount is already fixed at request time,
+    and the wallet was already debited then too, so rejecting one must
+    refund it; approving needs no EP/KP side effect at all)."""
     from datetime import datetime
 
     payout = db.get(TeacherPayout, withdrawal_id)
@@ -387,27 +400,46 @@ async def process_withdrawal(
     if payout.status != "pending":
         raise HTTPException(status_code=400, detail="Only pending payouts can be processed")
 
-    if payload.action == "approve":
-        if payload.dzd_amount is None:
-            raise HTTPException(status_code=400, detail="dzd_amount requis pour approuver un retrait")
-        payout.status = "approved"
-        payout.dzd_amount = payload.dzd_amount
-        payout.processed_at = datetime.utcnow()
+    is_wallet = payout.source == "wallet"
 
-        # Deduct EP from teacher's balance via kp_transactions
-        from app.models.kp import KpTransaction
-        db.add(KpTransaction(
-            user_id=payout.teacher_id,
-            amount=-payout.ep_amount,
-            source="reward",
-            label=f"Retrait EP → DZD ({payload.dzd_amount} DZD)",
-            ref_type="payout",
-            ref_id=payout.id,
-        ))
+    if payload.action == "approve":
+        if is_wallet:
+            # Amount was already fixed (and the wallet already debited) at
+            # request time — nothing left to decide, just confirm the
+            # manual transfer was made. An admin-supplied dzd_amount here
+            # would silently misrepresent what was actually promised to the
+            # teacher, so it's ignored rather than trusted.
+            payout.status = "approved"
+            payout.processed_at = datetime.utcnow()
+        else:
+            if payload.dzd_amount is None:
+                raise HTTPException(status_code=400, detail="dzd_amount requis pour approuver un retrait")
+            payout.status = "approved"
+            payout.dzd_amount = payload.dzd_amount
+            payout.processed_at = datetime.utcnow()
+
+            # Deduct EP from teacher's balance via kp_transactions
+            from app.models.kp import KpTransaction
+            db.add(KpTransaction(
+                user_id=payout.teacher_id,
+                amount=-payout.ep_amount,
+                source="reward",
+                label=f"Retrait EP → DZD ({payload.dzd_amount} DZD)",
+                ref_type="payout",
+                ref_id=payout.id,
+            ))
 
     elif payload.action == "reject":
         payout.status = "rejected"
         payout.processed_at = datetime.utcnow()
+        if is_wallet and payout.dzd_amount:
+            # Refund what request_dzd_withdrawal already deducted — a
+            # rejected wallet cash-out must not just vanish the money.
+            from app.models.profile import TeacherProfile as _TeacherProfile
+            tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == payout.teacher_id)).first()
+            if tp is not None:
+                tp.wallet_balance_dzd += payout.dzd_amount
+                db.add(tp)
     else:
         raise HTTPException(status_code=400, detail="action invalide. Utilise 'approve' ou 'reject'")
 

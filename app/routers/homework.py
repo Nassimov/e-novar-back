@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import math
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
+from app.models.catalog import Subject
 from app.models.homework import Homework, HomeworkGrade, HomeworkStatus, HomeworkSubmission
 from app.models.profile import Profile
-from app.models.user import User
 from app.schemas.homework import (
     HomeworkCreate,
     HomeworkGradeRequest,
@@ -23,11 +23,27 @@ from app.services.kp import award_kp, KpSource
 router = APIRouter(tags=["homework"])
 
 
-def _parse_hints(homework: Homework) -> List[str]:
-    try:
-        return json.loads(homework.hints or "[]")
-    except Exception:
-        return []
+def _resolve_subject_name(db: Session, hw: Homework) -> Optional[str]:
+    """Free-text label wins (a teacher typed one, or the subject isn't in the
+    catalog yet); otherwise falls back to the catalog subject's name. Mirrors
+    app/routers/student_homework.py's identical fallback."""
+    if hw.subject_name:
+        return hw.subject_name
+    if hw.subject_id:
+        subj = db.get(Subject, hw.subject_id)
+        return subj.name if subj else None
+    return None
+
+
+def _to_response(db: Session, hw: Homework) -> HomeworkResponse:
+    return HomeworkResponse(
+        id=hw.id, teacher_id=hw.teacher_id, student_id=hw.student_id,
+        session_id=hw.session_id, subject_name=_resolve_subject_name(db, hw),
+        title=hw.title, statement=hw.statement, hints=hw.hints or [],
+        due_at=hw.due_at, due_label=hw.due_label,
+        status=hw.status.value if hasattr(hw.status, "value") else hw.status,
+        kp_reward=hw.kp_reward, created_at=hw.created_at, updated_at=hw.updated_at,
+    )
 
 
 @router.get("/", response_model=Dict)
@@ -61,16 +77,7 @@ async def list_homework(
     paginated = homeworks[offset: offset + size]
 
     return {
-        "items": [
-            HomeworkResponse(
-                id=h.id, teacher_id=h.teacher_id, student_id=h.student_id,
-                session_id=h.session_id, subject=h.subject, title=h.title,
-                statement=h.statement, hints=_parse_hints(h), due_at=h.due_at,
-                status=h.status.value, kp_reward=h.kp_reward,
-                created_at=h.created_at, updated_at=h.updated_at,
-            )
-            for h in paginated
-        ],
+        "items": [_to_response(db, h) for h in paginated],
         "total": total,
         "page": page,
         "size": size,
@@ -94,13 +101,7 @@ async def get_homework(
         if current_user.get("role") != "admin":
             raise HTTPException(status_code=403, detail="Access denied")
 
-    return HomeworkResponse(
-        id=hw.id, teacher_id=hw.teacher_id, student_id=hw.student_id,
-        session_id=hw.session_id, subject=hw.subject, title=hw.title,
-        statement=hw.statement, hints=_parse_hints(hw), due_at=hw.due_at,
-        status=hw.status.value, kp_reward=hw.kp_reward,
-        created_at=hw.created_at, updated_at=hw.updated_at,
-    )
+    return _to_response(db, hw)
 
 
 @router.post("/", response_model=HomeworkResponse, status_code=status.HTTP_201_CREATED)
@@ -109,7 +110,9 @@ async def create_homework(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Create a homework assignment (teacher only)."""
+    """Create a homework assignment (teacher only) — requires an existing
+    session with that student (any status: a booking having existed is what
+    establishes the relationship, not a specific session's outcome)."""
     from app.models.booking import TutoringSession
 
     teacher = db.get(Profile, UUID(current_user["id"]))
@@ -130,15 +133,23 @@ async def create_homework(
             detail="Vous ne pouvez assigner un devoir qu'à un élève avec qui vous avez une séance.",
         )
 
+    if payload.session_id is not None:
+        session = db.get(TutoringSession, payload.session_id)
+        if session is None or session.teacher_id != teacher.id or session.student_id != payload.student_id:
+            raise HTTPException(status_code=400, detail="Session invalide pour cet élève")
+
     hw = Homework(
         teacher_id=teacher.id,
         student_id=payload.student_id,
         session_id=payload.session_id,
-        subject=payload.subject,
+        subject_id=payload.subject_id,
+        subject_name=payload.subject_name,
         title=payload.title,
         statement=payload.statement,
-        hints=json.dumps(payload.hints),
+        hints=payload.hints,
+        hints_checked=[False] * len(payload.hints),
         due_at=payload.due_at,
+        due_label=payload.due_label,
         kp_reward=payload.kp_reward,
     )
     db.add(hw)
@@ -153,13 +164,7 @@ async def create_homework(
         dedup_key=f"homework_assigned:{hw.id}",
     )
 
-    return HomeworkResponse(
-        id=hw.id, teacher_id=hw.teacher_id, student_id=hw.student_id,
-        session_id=hw.session_id, subject=hw.subject, title=hw.title,
-        statement=hw.statement, hints=_parse_hints(hw), due_at=hw.due_at,
-        status=hw.status.value, kp_reward=hw.kp_reward,
-        created_at=hw.created_at, updated_at=hw.updated_at,
-    )
+    return _to_response(db, hw)
 
 
 @router.put("/{homework_id}", response_model=HomeworkResponse)
@@ -170,8 +175,6 @@ async def update_homework(
     db: Session = Depends(get_db),
 ):
     """Update a homework assignment."""
-    from datetime import datetime
-
     hw = db.get(Homework, homework_id)
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
@@ -180,24 +183,20 @@ async def update_homework(
     if user is None or hw.teacher_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
 
-    hw.subject = payload.subject
+    hw.subject_id = payload.subject_id
+    hw.subject_name = payload.subject_name
     hw.title = payload.title
     hw.statement = payload.statement
-    hw.hints = json.dumps(payload.hints)
+    hw.hints = payload.hints
     hw.due_at = payload.due_at
+    hw.due_label = payload.due_label
     hw.kp_reward = payload.kp_reward
     hw.updated_at = datetime.utcnow()
     db.add(hw)
     db.commit()
     db.refresh(hw)
 
-    return HomeworkResponse(
-        id=hw.id, teacher_id=hw.teacher_id, student_id=hw.student_id,
-        session_id=hw.session_id, subject=hw.subject, title=hw.title,
-        statement=hw.statement, hints=_parse_hints(hw), due_at=hw.due_at,
-        status=hw.status.value, kp_reward=hw.kp_reward,
-        created_at=hw.created_at, updated_at=hw.updated_at,
-    )
+    return _to_response(db, hw)
 
 
 @router.post("/{homework_id}/submit")
@@ -207,9 +206,10 @@ async def submit_homework(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Submit a homework answer (student only)."""
-    from datetime import datetime
-
+    """Submit a homework answer (student only). Prefer POST
+    /api/student/homework/{id}/submit (app/routers/student_homework.py) —
+    that is the endpoint the app's own homework UI actually calls; this one
+    is kept for API completeness/back-compat."""
     hw = db.get(Homework, homework_id)
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
@@ -223,8 +223,9 @@ async def submit_homework(
 
     submission = HomeworkSubmission(
         homework_id=homework_id,
+        student_id=user.id,
         text=payload.text,
-        attachment_url=payload.attachment_url,
+        files=[{"name": "attachment", "url": payload.attachment_url, "type": "", "size": 0}] if payload.attachment_url else [],
     )
     db.add(submission)
 
@@ -243,8 +244,6 @@ async def grade_homework(
     db: Session = Depends(get_db),
 ):
     """Grade a submitted homework (teacher only)."""
-    from datetime import datetime
-
     hw = db.get(Homework, homework_id)
     if hw is None:
         raise HTTPException(status_code=404, detail="Homework not found")
@@ -265,6 +264,7 @@ async def grade_homework(
 
     grade = HomeworkGrade(
         homework_id=homework_id,
+        teacher_id=user.id,
         score=payload.score,
         feedback=payload.feedback,
         kp_awarded=kp_earned,
@@ -276,7 +276,6 @@ async def grade_homework(
     db.add(hw)
     db.commit()
 
-    # Award KP to student
     if kp_earned > 0:
         award_kp(
             hw.student_id,

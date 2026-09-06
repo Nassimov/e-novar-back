@@ -125,6 +125,28 @@ def upload_file(
     return _bucket().get_public_url(path)
 
 
+def upload_at_path(file_bytes: bytes, path: str, content_type: Optional[str] = None) -> str:
+    """Upload a file to Supabase Storage at an EXACT path (no random renaming) —
+    for content, like an extracted H5P package, whose internal files reference
+    each other by relative path and must keep their original names/structure."""
+    if content_type is None:
+        content_type, _ = mimetypes.guess_type(path)
+        content_type = content_type or "application/octet-stream"
+
+    _bucket().upload(
+        path=path,
+        file=file_bytes,
+        file_options={"content-type": content_type, "upsert": "true"},
+    )
+
+    return _bucket().get_public_url(path)
+
+
+def public_folder_url(path: str) -> str:
+    """Public URL prefix for a folder of files previously uploaded via upload_at_path."""
+    return f"{settings.supabase_url}/storage/v1/object/public/{settings.supabase_storage_bucket}/{path}"
+
+
 def delete_file(path: str) -> None:
     """Delete a file from Supabase Storage by its storage path or full public URL."""
     prefix = f"{settings.supabase_url}/storage/v1/object/public/{settings.supabase_storage_bucket}/"

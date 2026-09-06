@@ -279,8 +279,10 @@ class TeacherPaymentItem(BaseModel):
 
 class DzdWithdrawalRequest(BaseModel):
     amount_dzd: int = Field(gt=0, description="Montant à retirer en DZD")
-    iban: str
-    bank_holder: str
+    # No iban/bank_holder here — the payout destination is always read from
+    # the teacher's own saved/verified profile (TeacherProfile.iban/
+    # bank_holder/payout_phone), never trusted from the request body. See
+    # request_dzd_withdrawal's payout-destination gate.
 
 
 class DiplomaResponse(BaseModel):
@@ -297,11 +299,15 @@ class WithdrawalRequest(BaseModel):
 
 class WithdrawalResponse(BaseModel):
     id: UUID
+    source: str = "ep_conversion"  # 'wallet' | 'ep_conversion'
     ep_amount: int
     dzd_amount: Optional[int] = None
+    currency: str = "DZD"
     status: str
-    iban: str
-    bank_holder: str
+    payout_rail: Optional[str] = None
+    iban: Optional[str] = None
+    bank_holder: Optional[str] = None
+    payout_phone: Optional[str] = None
     admin_note: Optional[str] = None
     requested_at: datetime
     processed_at: Optional[datetime] = None
