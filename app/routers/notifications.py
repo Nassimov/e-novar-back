@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
@@ -91,26 +92,41 @@ async def list_notifications(
     'archived' tab in the notification center."""
     user_id = UUID(current_user["id"])
 
-    query = select(Notification).where(Notification.user_id == user_id)
-    if archived:
-        query = query.where(Notification.archived_at.is_not(None))
-    else:
-        query = query.where(Notification.archived_at.is_(None))
+    # Base filter (without the unread_only clause) reused for both the page
+    # of rows and the "unread_count" badge — kept as its own builder so
+    # unread_count always reflects the true unread total for this
+    # archived/category scope, not just the unread rows within the current page.
+    def base_filter(q):
+        q = q.where(Notification.user_id == user_id)
+        q = q.where(Notification.archived_at.is_not(None)) if archived else q.where(Notification.archived_at.is_(None))
+        if category:
+            q = q.where(Notification.category == category)
+        return q
+
+    query = base_filter(select(Notification))
     if unread_only:
         query = query.where(Notification.read_at == None)  # noqa: E711
-    if category:
-        query = query.where(Notification.category == category)
     query = query.order_by(Notification.created_at.desc())
 
-    notifications = db.exec(query).all()
-    total = len(notifications)
+    # Fetches only the requested page and computes total/unread counts via
+    # SQL aggregates — the previous version loaded EVERY matching
+    # notification into memory on every call (Python-side slicing for
+    # pagination), which only gets slower as a user's notification history
+    # grows. This is the actual reason list loads felt slow, not a missing
+    # frontend cache.
+    total = db.exec(select(func.count()).select_from(base_filter(select(Notification.id)).subquery())).one()
+    unread_count = db.exec(
+        select(func.count()).select_from(
+            base_filter(select(Notification.id)).where(Notification.read_at == None).subquery()  # noqa: E711
+        )
+    ).one()
     offset = (page - 1) * size
-    paginated = notifications[offset : offset + size]
+    paginated = db.exec(query.offset(offset).limit(size)).all()
 
     return {
         "items": [NotificationResponse.model_validate(n) for n in paginated],
         "total": total,
-        "unread_count": sum(1 for n in notifications if n.read_at is None),
+        "unread_count": unread_count,
         "page": page,
         "size": size,
         "pages": math.ceil(total / size) if total else 0,

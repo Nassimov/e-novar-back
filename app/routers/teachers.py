@@ -9,13 +9,15 @@ from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db, require_role
 from app.models.teacher import TeacherPayout, TeacherProfile, TeacherSlot
-from app.models.scheduling import TeacherSlotSubject
+from app.models.scheduling import TeacherAbsence, TeacherSlotSubject
 from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
 from app.models.profile import Profile
 from app.models.user import User
 from app.services.pricing import compute_pack_prices, get_platform_settings
 from app.services.teacher_currency import currency_for_country
 from app.schemas.teacher import (
+    AbsenceCreate,
+    AbsenceResponse,
     BoostActivateRequest,
     BoostStatusResponse,
     DeliveryOption,
@@ -762,6 +764,155 @@ async def delete_slot(
         raise HTTPException(status_code=409, detail="Cannot delete a booked slot")
 
     db.delete(slot)
+    db.commit()
+    return None
+
+
+# ─── Absences (declared unavailability — see migration 107) ────────────────
+
+def _absence_to_response(a: TeacherAbsence) -> AbsenceResponse:
+    return AbsenceResponse(
+        id=str(a.id),
+        date_from=a.date_from.isoformat(),
+        date_to=a.date_to.isoformat(),
+        start_time=str(a.start_time)[:5] if a.start_time else None,
+        end_time=str(a.end_time)[:5] if a.end_time else None,
+        reason=a.reason,
+    )
+
+
+def find_confirmed_session_conflicts(
+    db: Session,
+    teacher_id: UUID,
+    date_from,
+    date_to,
+    start_time=None,
+    end_time=None,
+):
+    """Active, CONFIRMED sessions (see TutoringSession/Booking docstrings —
+    a session row exists from the moment a student books, before the
+    teacher accepts) overlapping the given window. Used to block declaring
+    an absence over a lesson that's already committed — a still-pending,
+    not-yet-accepted request does NOT block (the teacher can simply refuse
+    it once they see the conflict, or accept it despite the overlap)."""
+    import datetime as dt
+    from app.models.booking import Booking, TutoringSession
+
+    window_start = dt.datetime.combine(date_from, start_time or dt.time.min)
+    window_end = dt.datetime.combine(date_to, end_time or dt.time.max)
+
+    candidates = db.exec(
+        select(TutoringSession).where(
+            TutoringSession.teacher_id == teacher_id,
+            TutoringSession.status.in_(["scheduled", "waiting", "live"]),
+            TutoringSession.scheduled_at >= window_start,
+            TutoringSession.scheduled_at <= window_end,
+        )
+    ).all()
+    if not candidates:
+        return []
+
+    booking_ids = [s.booking_id for s in candidates if s.booking_id]
+    confirmed_booking_ids = set()
+    if booking_ids:
+        confirmed_booking_ids = {
+            b.id for b in db.exec(
+                select(Booking).where(Booking.id.in_(booking_ids), Booking.status == "confirmed")
+            ).all()
+        }
+    return [s for s in candidates if s.booking_id and s.booking_id in confirmed_booking_ids]
+
+
+@router.get("/me/absences", response_model=List[AbsenceResponse])
+async def list_my_absences(
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """List this teacher's declared absences, soonest first."""
+    import datetime as dt
+
+    teacher_id = UUID(current_user["id"])
+    today = dt.date.today()
+    absences = db.exec(
+        select(TeacherAbsence)
+        .where(TeacherAbsence.teacher_id == teacher_id, TeacherAbsence.date_to >= today)
+        .order_by(TeacherAbsence.date_from)
+    ).all()
+    return [_absence_to_response(a) for a in absences]
+
+
+@router.post("/me/absences", response_model=AbsenceResponse, status_code=status.HTTP_201_CREATED)
+async def create_absence(
+    payload: AbsenceCreate,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Declare a period of unavailability — blocks booking (both a declared
+    slot and a student-proposed custom time, see book_teacher_slot) for any
+    date/time inside it. Rejected if it would conflict with an
+    already-confirmed session: cancel/reschedule that first, an absence
+    must never silently orphan a paid, confirmed lesson."""
+    import datetime as dt
+
+    teacher_id = UUID(current_user["id"])
+    try:
+        date_from = dt.date.fromisoformat(payload.date_from)
+        date_to = dt.date.fromisoformat(payload.date_to)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid date format — use YYYY-MM-DD")
+    if date_to < date_from:
+        raise HTTPException(status_code=422, detail="date_to must be on or after date_from")
+
+    start_time = end_time = None
+    if payload.start_time or payload.end_time:
+        if not (payload.start_time and payload.end_time):
+            raise HTTPException(status_code=422, detail="start_time and end_time must be provided together")
+        try:
+            start_time = dt.time.fromisoformat(payload.start_time)
+            end_time = dt.time.fromisoformat(payload.end_time)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid time format — use HH:MM")
+        if end_time <= start_time:
+            raise HTTPException(status_code=422, detail="end_time must be after start_time")
+
+    conflicts = find_confirmed_session_conflicts(db, teacher_id, date_from, date_to, start_time, end_time)
+    if conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{len(conflicts)} séance(s) déjà confirmée(s) tombent dans cette période. "
+                "Annulez ou reprogrammez-les avant de déclarer cette absence."
+            ),
+        )
+
+    absence = TeacherAbsence(
+        teacher_id=teacher_id,
+        date_from=date_from,
+        date_to=date_to,
+        start_time=start_time,
+        end_time=end_time,
+        reason=payload.reason,
+    )
+    db.add(absence)
+    db.commit()
+    db.refresh(absence)
+    return _absence_to_response(absence)
+
+
+@router.delete("/me/absences/{absence_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_absence(
+    absence_id: UUID,
+    current_user: Dict[str, Any] = Depends(require_role("teacher")),
+    db: Session = Depends(get_db),
+):
+    """Cancel a declared absence, re-opening that date/time for booking."""
+    teacher_id = UUID(current_user["id"])
+    absence = db.get(TeacherAbsence, absence_id)
+    if absence is None:
+        raise HTTPException(status_code=404, detail="Absence not found")
+    if absence.teacher_id != teacher_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    db.delete(absence)
     db.commit()
     return None
 

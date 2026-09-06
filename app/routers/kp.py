@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.dependencies import get_current_user, get_db
@@ -66,15 +67,23 @@ async def get_kp_transactions(
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
 
-    transactions = db.exec(
+    # Paginated at the SQL level — this used to load the user's ENTIRE
+    # transaction history on every call (Python-side slicing), which only
+    # gets slower the longer someone has been using the platform (every
+    # session/challenge/reward adds a row).
+    total = db.exec(
+        select(func.count()).select_from(
+            select(KpTransaction.id).where(KpTransaction.user_id == user.id).subquery()
+        )
+    ).one()
+    offset = (page - 1) * size
+    paginated = db.exec(
         select(KpTransaction)
         .where(KpTransaction.user_id == user.id)
         .order_by(KpTransaction.created_at.desc())
+        .offset(offset)
+        .limit(size)
     ).all()
-
-    total = len(transactions)
-    offset = (page - 1) * size
-    paginated = transactions[offset: offset + size]
 
     return {
         "items": [KpTransactionResponse.model_validate(t) for t in paginated],

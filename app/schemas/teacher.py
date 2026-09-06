@@ -206,6 +206,23 @@ class SlotResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AbsenceCreate(BaseModel):
+    date_from: str               # "YYYY-MM-DD"
+    date_to: str                 # "YYYY-MM-DD" — same as date_from for a single day
+    start_time: Optional[str] = None  # both null = whole-day absence
+    end_time: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class AbsenceResponse(BaseModel):
+    id: str
+    date_from: str
+    date_to: str
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class TeacherBookingStudentInfo(BaseModel):
     id: str
     full_name: str

@@ -18,8 +18,8 @@ from app.models.booking import Booking, BookingRefusal, TutoringSession
 from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDiploma, TeacherSubjectPrice
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.models.review import Review
-from app.models.scheduling import TeacherSlot, TeacherSlotSubject
-from app.schemas.teacher import SlotSubjectLevelResponse
+from app.models.scheduling import TeacherAbsence, TeacherSlot, TeacherSlotSubject
+from app.schemas.teacher import AbsenceResponse, SlotSubjectLevelResponse
 from app.services import matching
 from app.services.boost import is_boost_active
 from app.services.tenure import experience_years_from
@@ -67,6 +67,41 @@ def _resolve_teacher(db: Session, teacher_ref: str) -> TeacherProfile:
     if tp is None or tp.status not in ("approved",):
         raise HTTPException(status_code=404, detail="Teacher not found")
     return tp
+
+
+def _fetch_absences_for_range(db: Session, teacher_id: UUID, date_from: date, date_to: date) -> List[TeacherAbsence]:
+    return db.exec(
+        select(TeacherAbsence).where(
+            TeacherAbsence.teacher_id == teacher_id,
+            TeacherAbsence.date_from <= date_to,
+            TeacherAbsence.date_to >= date_from,
+        )
+    ).all()
+
+
+def _date_time_blocked_by_absence(
+    absences: List[TeacherAbsence],
+    check_date: date,
+    start_time=None,
+    end_time=None,
+) -> bool:
+    """True if the given date (and, when known, time window) falls inside
+    any of the given teacher's declared absences (see migration 107) —
+    checked against both a declared TeacherSlot (get_teacher_slots) and a
+    student-proposed custom, slot-less time (book_teacher_slot)."""
+    for a in absences:
+        if not (a.date_from <= check_date <= a.date_to):
+            continue
+        if a.start_time is None or a.end_time is None:
+            return True  # whole-day absence blocks everything that day
+        if start_time is None:
+            # Time unknown at this call site — block conservatively rather
+            # than risk letting a conflicting booking slip through silently.
+            return True
+        check_end = end_time or start_time
+        if start_time < a.end_time and a.start_time < check_end:
+            return True
+    return False
 
 
 def _slot_subject_levels_for(slot_id: UUID, db: Session) -> List[SlotSubjectLevelResponse]:
@@ -850,6 +885,14 @@ async def get_teacher_slots(
         .order_by(TeacherSlot.slot_date, TeacherSlot.start_time)
     ).all()
 
+    # A declared slot that now falls inside a LATER-declared absence must
+    # not still be offered — filtered here at read-time rather than by
+    # mutating/deleting the slot row itself (see migration 107 / the
+    # absence endpoints in app/routers/teachers.py).
+    absences = _fetch_absences_for_range(db, teacher_id, today, end)
+    if absences:
+        slots = [s for s in slots if not _date_time_blocked_by_absence(absences, s.slot_date, s.start_time, s.end_time)]
+
     from app.services.pricing import compute_pack_prices, get_platform_settings
 
     settings = get_platform_settings(db)
@@ -870,6 +913,33 @@ async def get_teacher_slots(
             subject_levels=_slot_subject_levels_for(s.id, db),
         ))
     return items
+
+
+@router.get("/teachers/{teacher_ref}/absences", response_model=List[AbsenceResponse])
+async def get_teacher_absences(
+    teacher_ref: str,
+    db: Session = Depends(get_db),
+    _: Dict[str, Any] = Depends(get_current_user),
+):
+    """This teacher's declared absences over the same 30-day booking window
+    as get_teacher_slots — the frontend uses this to block those dates/times
+    out when a student proposes a custom (slot-less) date for a pack
+    session, same as book_teacher_slot enforces server-side regardless."""
+    tp = _resolve_teacher(db, teacher_ref)
+    today = date.today()
+    end = today + timedelta(days=30)
+    absences = _fetch_absences_for_range(db, tp.user_id, today, end)
+    return [
+        AbsenceResponse(
+            id=str(a.id),
+            date_from=a.date_from.isoformat(),
+            date_to=a.date_to.isoformat(),
+            start_time=str(a.start_time)[:5] if a.start_time else None,
+            end_time=str(a.end_time)[:5] if a.end_time else None,
+            reason=a.reason,
+        )
+        for a in absences
+    ]
 
 
 # ─── Student reviews (authenticated student) ─────────────────────────────────
@@ -1127,8 +1197,20 @@ async def book_teacher_slot(
     # rejected request never has payment-gateway side effects.
     platform_settings_for_gate = get_platform_settings(db)
     refusal_threshold = platform_settings_for_gate.booking_refusal_block_threshold
+    # Fetched once up front (a teacher's absence list is small) — checked for
+    # EVERY proposed date, slot-based or a student-proposed custom time
+    # alike (see migration 107 / _date_time_blocked_by_absence): a declared
+    # slot only means "the teacher promoted this time", never "the only
+    # bookable time" — absence is the one thing that actually removes
+    # bookability.
+    teacher_absences = db.exec(select(TeacherAbsence).where(TeacherAbsence.teacher_id == teacher_id)).all()
 
     def _gate_one(gate_slot_id: Optional[UUID], gate_date: date, gate_time, gate_subject_id: Optional[UUID], gate_level_id: Optional[UUID]) -> None:
+        if _date_time_blocked_by_absence(teacher_absences, gate_date, gate_time, gate_time):
+            raise HTTPException(
+                status_code=409,
+                detail="Ce professeur a déclaré une absence sur cette date/horaire. Choisissez un autre créneau.",
+            )
         resolved_subject_id, _ = _resolve_requested_subject_level(gate_slot_id, gate_subject_id, gate_level_id, db)
         _check_refusal_block(
             db,
