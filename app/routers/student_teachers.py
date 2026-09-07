@@ -187,6 +187,60 @@ def _date_time_blocked_by_absence(
     return False
 
 
+def _minutes_between(start_time, end_time) -> int:
+    return (end_time.hour * 60 + end_time.minute) - (start_time.hour * 60 + start_time.minute)
+
+
+def _time_plus_minutes(t, minutes: int):
+    from datetime import time as _time
+    total = t.hour * 60 + t.minute + minutes
+    return _time(hour=(total // 60) % 24, minute=total % 60)
+
+
+def _plus_one_hour(t):
+    return _time_plus_minutes(t, 60)
+
+
+def _resolve_leg_range(*, slot: Optional[TeacherSlot], start_time, requested_end_time, is_group: bool):
+    """Recomputes and validates the real (end_time, duration_min) for one
+    booking leg (the single booking, or one pack session) — never trusts
+    body.duration_min / body.end_time at face value (a manually-crafted
+    request could otherwise claim an arbitrary window unrelated to what was
+    actually gated/priced).
+
+    - Group bookings and ad-hoc (slot-less) proposals with no declared end
+      time keep exactly what they already did: the slot's own full window,
+      or a single hour respectively — group sessions are capacity-gated by
+      _claim_slot_or_409, never time-split (see its own docstring).
+    - An individual booking against a *published* slot must land on a whole
+      number of consecutive 1-hour units, fully inside that slot's declared
+      window — this is the actual enforcement point for the slot-splitting
+      feature (see student.booking.schedule.tsx's makeSubSlots /
+      duration picker, which is what constructs `requested_end_time` and
+      must never be trusted to have gotten it right on its own).
+    """
+    if start_time is None:
+        return None, 90  # nothing to validate — mirrors the historical default
+
+    if is_group and slot is not None:
+        return slot.end_time, _minutes_between(slot.start_time, slot.end_time)
+
+    end_time = requested_end_time or _plus_one_hour(start_time)
+    duration_min = _minutes_between(start_time, end_time)
+    if duration_min <= 0 or duration_min % 60 != 0:
+        raise HTTPException(
+            status_code=422,
+            detail="La durée doit être un nombre entier d'heures consécutives (1h, 2h ou 3h).",
+        )
+    if slot is not None and not is_group:
+        if start_time < slot.start_time or end_time > slot.end_time:
+            raise HTTPException(
+                status_code=422,
+                detail="Cet horaire dépasse la disponibilité déclarée par le professeur pour ce créneau.",
+            )
+    return end_time, duration_min
+
+
 def _slot_subject_levels_for(slot_id: UUID, db: Session) -> List[SlotSubjectLevelResponse]:
     """All (subject, level) combos this slot accepts, with resolved names —
     student-facing mirror of the teacher-side helper in app.routers.teachers."""
@@ -294,12 +348,12 @@ def _release_if_abandoned_checkout(db: Session, booking: "Booking") -> bool:
     # slot (this used to be the most common way a student would see what
     # looks like the same session listed twice: the abandoned attempt's
     # phantom "upcoming" entry next to the new, real one).
-    from datetime import datetime as _datetime
+    from datetime import datetime as _datetime, timezone as _timezone
     from app.models.booking import TutoringSession as _TutoringSession
     for s in db.exec(select(_TutoringSession).where(_TutoringSession.booking_id == booking.id)).all():
         if s.status not in ("completed", "cancelled"):
             s.status = "cancelled"
-            s.cancelled_at = _datetime.utcnow()
+            s.cancelled_at = _datetime.now(_timezone.utc)
             s.cancellation_reason = "payment_never_completed"
             s.refund_percentage = 100
             db.add(s)
@@ -307,15 +361,30 @@ def _release_if_abandoned_checkout(db: Session, booking: "Booking") -> bool:
     return True
 
 
-def _claim_slot_or_409(db: Session, slot_id: UUID, student_id: UUID) -> TeacherSlot:
+def _claim_slot_or_409(
+    db: Session, slot_id: UUID, student_id: UUID, *,
+    is_group: bool = False, start_time=None, end_time=None,
+) -> TeacherSlot:
     """
-    Atomically claim a seat on a TeacherSlot, correct for both individual
-    slots (max_students=1) and group slots (max_students>1) under
-    concurrency: SELECT ... FOR UPDATE takes a row lock so two simultaneous
-    requests for the same slot are serialized (the second sees the first
-    request's just-added Booking row once it gets the lock), instead of both
-    reading "1 seat free" and both succeeding — the exact double-booking race
-    the student flagged.
+    Atomically claim a TeacherSlot, correct for both individual and group
+    slots under concurrency: SELECT ... FOR UPDATE takes a row lock so two
+    simultaneous requests for the same slot are serialized (the second sees
+    the first request's just-added Booking row once it gets the lock),
+    instead of both reading "still free" and both succeeding — the exact
+    double-booking race the student flagged.
+
+    Group slots (multiple students, same time): unchanged — capacity-gated
+    by max_students, whole-slot status flips to "booked" once full.
+
+    Individual slots (see the hour-splitting feature — a teacher's declared
+    12h-15h window is independently bookable as 12-13, 13-14, 14-15 by
+    DIFFERENT students): claiming one 1-3h sub-range must never lock out an
+    UNRELATED sub-range of the same slot. Only rejects on an actual time
+    overlap with another still-active booking already claiming part of
+    [start_time, end_time) on this same slot_id — the slot's own `status`
+    stays "open" regardless (get_teacher_slots computes per-slot remaining
+    availability itself, from these same booked ranges, rather than from
+    `status`).
     """
     slot = db.exec(
         select(TeacherSlot).where(TeacherSlot.id == slot_id).with_for_update()
@@ -334,6 +403,26 @@ def _claim_slot_or_409(db: Session, slot_id: UUID, student_id: UUID) -> TeacherS
     ).all()
     if any(not _release_if_abandoned_checkout(db, b) for b in existing_own):
         raise HTTPException(status_code=409, detail="Vous avez déjà réservé ce créneau.")
+
+    if not is_group and start_time is not None and end_time is not None:
+        others = db.exec(
+            select(Booking).where(
+                Booking.slot_id == slot_id,
+                Booking.status.in_(["pending", "confirmed"]),
+            )
+        ).all()
+        for other in others:
+            if _release_if_abandoned_checkout(db, other):
+                continue
+            other_start = other.slot_time or slot.start_time
+            other_end = _plus_one_hour(other_start) if other.duration_min is None else _time_plus_minutes(other_start, other.duration_min)
+            if start_time < other_end and other_start < end_time:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Ce créneau n'est plus disponible. Merci de rafraîchir et choisir un autre horaire.",
+                )
+        return slot
+
     active_count = db.exec(
         select(sa_func.count()).select_from(Booking).where(
             Booking.slot_id == slot_id,
@@ -822,6 +911,12 @@ class TeacherSlotItem(BaseModel):
     price_pack5: int = 0   # computed from `price` + platform discount config, never stored
     price_pack10: int = 0  # computed from `price` + platform discount config, never stored
     subject_levels: List[SlotSubjectLevelResponse] = []
+    # Sub-ranges of [start_time, end_time) another student already claimed
+    # (individual slots only — see the hour-splitting feature; always []
+    # for a group slot, whose capacity is tracked by `status` instead).
+    # Never trust the frontend to have re-derived this on its own —
+    # book_teacher_slot re-checks for a real overlap server-side regardless.
+    booked_ranges: List[Dict[str, str]] = []
 
 
 @router.get("/teachers/{teacher_ref}", response_model=TeacherPublicProfile)
@@ -987,9 +1082,44 @@ def get_teacher_slots(
 
     from app.services.pricing import compute_pack_prices, get_platform_settings
 
+    # Individual slots are never fully "claimed" by one booking anymore (see
+    # _claim_slot_or_409) — a 12h-15h slot with 12-13 already booked stays
+    # status="open" so 13-14/14-15 remain offered to other students. That
+    # means availability for an individual slot must be computed here, from
+    # its own actual booked sub-ranges, rather than from `status` alone
+    # (still the right signal for group slots, whose capacity IS tracked by
+    # status — unchanged, see _resolve_leg_range/_claim_slot_or_409's own
+    # group branches).
+    individual_slot_ids = [s.id for s in slots if s.type != "group"]
+    bookings_by_slot: Dict[UUID, List[Booking]] = {}
+    if individual_slot_ids:
+        for b in db.exec(
+            select(Booking).where(
+                Booking.slot_id.in_(individual_slot_ids),
+                Booking.status.in_(["pending", "confirmed"]),
+            )
+        ).all():
+            if not _release_if_abandoned_checkout(db, b):
+                bookings_by_slot.setdefault(b.slot_id, []).append(b)
+        if bookings_by_slot:
+            db.commit()
+
     settings = get_platform_settings(db)
     items = []
     for s in slots:
+        booked_ranges: List[Dict[str, str]] = []
+        booked_minutes = 0
+        if s.type != "group":
+            for b in bookings_by_slot.get(s.id, []):
+                b_start = b.slot_time or s.start_time
+                b_duration = b.duration_min or _minutes_between(s.start_time, s.end_time)
+                b_end = _time_plus_minutes(b_start, b_duration)
+                booked_ranges.append({"start_time": str(b_start)[:5], "end_time": str(b_end)[:5]})
+                booked_minutes += b_duration
+            # Nothing left to offer at all — omit the slot entirely rather
+            # than show an empty picker with every sub-hour grayed out.
+            if booked_ranges and booked_minutes >= _minutes_between(s.start_time, s.end_time):
+                continue
         packs = compute_pack_prices(s.price, settings)
         items.append(TeacherSlotItem(
             id=str(s.id),
@@ -1003,6 +1133,7 @@ def get_teacher_slots(
             price_pack5=packs["pack5"],
             price_pack10=packs["pack10"],
             subject_levels=_slot_subject_levels_for(s.id, db),
+            booked_ranges=booked_ranges,
         ))
     return items
 
@@ -1184,7 +1315,7 @@ def book_teacher_slot(
     from uuid import UUID as _UUID
     from app.config import get_settings
     from app.models.booking import Booking
-    from app.services.pricing import compute_pack_prices, get_platform_settings
+    from app.services.pricing import compute_pack_prices, compute_variable_duration_amount, get_platform_settings
 
     settings = get_settings()
     tp = _resolve_teacher(db, teacher_ref)
@@ -1297,20 +1428,48 @@ def book_teacher_slot(
     # bookability.
     teacher_absences = db.exec(select(TeacherAbsence).where(TeacherAbsence.teacher_id == teacher_id)).all()
 
-    def _gate_one(gate_slot_id: Optional[UUID], gate_date: date, gate_time, gate_subject_id: Optional[UUID], gate_level_id: Optional[UUID]) -> None:
+    def _gate_one(
+        gate_slot_id: Optional[UUID], gate_date: date, gate_time, gate_subject_id: Optional[UUID],
+        gate_level_id: Optional[UUID], gate_requested_end_time,
+    ) -> tuple:
+        # A booking can never be created for a date/time that's already
+        # passed — a manually-crafted request bypassing the UI's own
+        # min="today" date input would otherwise slip through untouched.
+        if gate_time is not None:
+            naive_start = dt.datetime.combine(gate_date, gate_time)
+            if naive_start.replace(tzinfo=dt.timezone.utc) < dt.datetime.now(dt.timezone.utc):
+                raise HTTPException(status_code=422, detail="Impossible de réserver une date/heure déjà passée.")
         if _date_time_blocked_by_absence(teacher_absences, gate_date, gate_time, gate_time):
             raise HTTPException(
                 status_code=409,
                 detail="Ce professeur a déclaré une absence sur cette date/horaire. Choisissez un autre créneau.",
             )
+
+        gate_slot = db.get(TeacherSlot, gate_slot_id) if gate_slot_id else None
+        gate_is_group = resolved_session_type == "group" if not body.pack_sessions else False
+
+        # Recomputed and validated server-side — never body.duration_min /
+        # body.end_time taken at face value (see _resolve_leg_range's own
+        # docstring for exactly what it enforces: whole consecutive hours,
+        # fully inside the slot's own declared window for an individual
+        # booking against a published slot).
+        gate_end_time, gate_duration_min = _resolve_leg_range(
+            slot=gate_slot, start_time=gate_time, requested_end_time=gate_requested_end_time, is_group=gate_is_group,
+        )
+
         # Neither side of a NEW booking may already be in a different,
         # overlapping CONFIRMED session — a student can't be with two
         # teachers at once, and a teacher can't teach two different
         # students at once (a shared group slot is excluded via
         # exclude_slot_id, that's the same session, not a conflict).
         if gate_time is not None:
-            gate_window_start = dt.datetime.combine(gate_date, gate_time)
-            gate_window_end = gate_window_start + dt.timedelta(minutes=body.duration_min)
+            # Explicit UTC — sessions.scheduled_at is TIMESTAMPTZ (see
+            # docs/database-schema.sql), so a naive datetime compared
+            # against a value read back from it raises "can't compare
+            # offset-naive and offset-aware datetimes" (see
+            # matching.find_overlapping_confirmed_sessions).
+            gate_window_start = dt.datetime.combine(gate_date, gate_time, tzinfo=dt.timezone.utc)
+            gate_window_end = gate_window_start + dt.timedelta(minutes=gate_duration_min)
             if matching.find_overlapping_confirmed_sessions(
                 db, window_start=gate_window_start, window_end=gate_window_end, student_id=student_id,
             ):
@@ -1337,10 +1496,15 @@ def book_teacher_slot(
             threshold=refusal_threshold,
         )
         if gate_slot_id:
-            _claim_slot_or_409(db, gate_slot_id, student_id)
+            _claim_slot_or_409(
+                db, gate_slot_id, student_id,
+                is_group=gate_is_group, start_time=gate_time, end_time=gate_end_time,
+            )
         elif gate_time is not None:
             _check_no_slot_duplicate(db, student_id=student_id, teacher_id=teacher_id, booking_date=gate_date, slot_time=gate_time)
+        return gate_end_time, gate_duration_min
 
+    pack_leg_ranges: List[tuple] = []
     if body.pack_sessions:
         for ps in body.pack_sessions:
             ps_slot_uuid = _UUID(ps.slot_id) if ps.slot_id else None
@@ -1352,9 +1516,23 @@ def book_teacher_slot(
                 ps_gate_date = dt.date.fromisoformat(ps.date)
             except ValueError:
                 ps_gate_date = booking_date
-            _gate_one(ps_slot_uuid, ps_gate_date, ps_gate_time, ps.subject_id, ps.level_id)
+            ps_requested_end_time = None
+            if ps.end_time:
+                try:
+                    ps_requested_end_time = dt.time.fromisoformat(ps.end_time)
+                except ValueError:
+                    pass
+            pack_leg_ranges.append(_gate_one(ps_slot_uuid, ps_gate_date, ps_gate_time, ps.subject_id, ps.level_id, ps_requested_end_time))
     else:
-        _gate_one(slot_id, booking_date, slot_time, body.subject_id, body.level_id)
+        requested_end_time = None
+        if body.end_time:
+            try:
+                requested_end_time = dt.time.fromisoformat(body.end_time)
+            except ValueError:
+                pass
+        single_end_time, single_duration_min = _gate_one(
+            slot_id, booking_date, slot_time, body.subject_id, body.level_id, requested_end_time,
+        )
 
     # Resolve the authoritative single-lesson price. Priority:
     #   1. slot-level price, when the teacher set one for this specific slot
@@ -1389,15 +1567,21 @@ def book_teacher_slot(
         ).first()
         subject_price = tsp.price_single if tsp else 0
 
-    price_single = slot_price if slot_price > 0 else (subject_price if subject_price > 0 else tp.price_per_session)
-
+    # price_single is the teacher's HOURLY rate — a booking's amount is
+    # always price_single * (that leg's own duration in hours), never a
+    # flat per-session figure, so a 1h/2h/3h selection (see the
+    # slot-splitting feature) is charged proportionally. Group sessions are
+    # the one exception: never time-split, so they keep the historical flat
+    # "price_single, discounted" formula regardless of the slot's own
+    # declared duration — out of this feature's scope, see _resolve_leg_range.
     pack_prices = compute_pack_prices(price_single, get_platform_settings(db))
-    # A group ("collective") session is always priced lower than an
-    # individual single session — the admin-configured group discount off
-    # price_single (see app.services.pricing) — regardless of `formula`,
-    # which stays "single" for a one-off group booking (packs are
-    # individual-only, see student.booking.session-type.tsx).
-    amount = pack_prices["group"] if resolved_session_type == "group" else pack_prices[body.formula]
+    if resolved_session_type == "group":
+        amount = pack_prices["group"]
+    elif body.pack_sessions:
+        leg_amounts = [round(price_single * duration_min / 60) for (_, duration_min) in pack_leg_ranges]
+        amount = compute_variable_duration_amount(leg_amounts, body.formula, get_platform_settings(db))
+    else:
+        amount = round(price_single * single_duration_min / 60)
 
     # A pack purchase must name exactly as many sessions as the pack contains.
     required_sessions = {"single": None, "pack5": 5, "pack10": 10}[body.formula]
@@ -1447,7 +1631,11 @@ def book_teacher_slot(
         session_type=resolved_session_type,
         booking_date=booking_date,
         slot_time=slot_time,
-        duration_min=body.duration_min,
+        # Recomputed server-side (never body.duration_min) — see
+        # _resolve_leg_range. For a pack, this single aggregate field is
+        # only ever a rough representative value; each session's own real
+        # duration lives on its own TutoringSession row below.
+        duration_min=pack_leg_ranges[0][1] if body.pack_sessions else single_duration_min,
         amount=amount,
         currency=tp.currency,
         kp_reward=tp.kp_reward,
@@ -1534,7 +1722,7 @@ def book_teacher_slot(
     # at a time, even for packs (see PACK_SIZES in app.services.pricing).
     created_sessions: List[TutoringSession] = []
     if body.pack_sessions:
-        for ps in body.pack_sessions:
+        for ps_idx, ps in enumerate(body.pack_sessions):
             ps_subject_id = None
             ps_level_id = None
             if ps.slot_id:
@@ -1558,7 +1746,16 @@ def book_teacher_slot(
                 student_id=student_id,
                 subject_id=ps_subject_id,
                 level_id=ps_level_id,
-                scheduled_at=dt.datetime.combine(ps_date, ps_time),
+                # Explicit UTC — sessions.scheduled_at is TIMESTAMPTZ; a
+                # naive value here would be silently reinterpreted using
+                # the DB session's own timezone setting on write instead of
+                # the intended UTC instant (see matching.py's module note).
+                scheduled_at=dt.datetime.combine(ps_date, ps_time, tzinfo=dt.timezone.utc),
+                # This session's own real, validated duration (see
+                # _resolve_leg_range) — never assumed uniform across a pack
+                # (matching.find_overlapping_confirmed_sessions and other
+                # conflict checks prefer this per-session value first).
+                duration_min=pack_leg_ranges[ps_idx][1],
                 mode=body.mode,
                 status="scheduled",
             )
@@ -1575,7 +1772,9 @@ def book_teacher_slot(
             student_id=student_id,
             subject_id=single_subject_id,
             level_id=single_level_id,
-            scheduled_at=dt.datetime.combine(booking_date, slot_time or dt.time(0, 0)),
+            # Explicit UTC — see the pack-session branch above for why.
+            scheduled_at=dt.datetime.combine(booking_date, slot_time or dt.time(0, 0), tzinfo=dt.timezone.utc),
+            duration_min=single_duration_min,
             mode=body.mode,
             status="scheduled",
         )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, List, Optional, Union
 from uuid import UUID
 
@@ -151,6 +151,21 @@ def find_overlapping_confirmed_sessions(
     """
     if teacher_id is None and student_id is None:
         return []
+
+    # `sessions.scheduled_at` is TIMESTAMPTZ (see docs/database-schema.sql) —
+    # always timezone-aware once read back from the DB. A caller building
+    # `window_start`/`window_end` from a raw date+time the student just
+    # proposed (no session row exists yet to read scheduled_at from) can
+    # easily hand this a naive datetime instead — comparing that against an
+    # aware value below raises `TypeError: can't compare offset-naive and
+    # offset-aware datetimes`, which is exactly the bug this normalizes away
+    # at the boundary rather than trusting every call site to remember.
+    # Naive input is assumed UTC, matching this codebase's storage
+    # convention throughout the booking/session domain.
+    if window_start.tzinfo is None:
+        window_start = window_start.replace(tzinfo=timezone.utc)
+    if window_end.tzinfo is None:
+        window_end = window_end.replace(tzinfo=timezone.utc)
 
     from app.models.booking import Booking, TutoringSession
 

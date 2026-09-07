@@ -31,7 +31,7 @@ for the full policy write-up):
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 from uuid import UUID
 
@@ -83,7 +83,7 @@ def apply_cancellation_side_effects(db: Session, booking: Booking, reason: str) 
     sessions = db.exec(
         select(TutoringSession).where(TutoringSession.booking_id == booking.id)
     ).all()
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     seen: set[tuple[Optional[UUID], int, object]] = set()
     for s in sessions:
         if s.status not in ("completed", "cancelled"):
@@ -143,7 +143,7 @@ def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_la
     if tp is None:
         return (0, 0)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if tp.last_no_response_at is None or (now - tp.last_no_response_at).days > reset_days:
         tp.no_response_strikes = 0
     tp.no_response_strikes += weight
@@ -200,7 +200,7 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
     if sp is None:
         return (0, 0)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if sp.last_no_show_at is None or (now - sp.last_no_show_at).days > reset_days:
         sp.no_show_strikes = 0
     sp.no_show_strikes += weight

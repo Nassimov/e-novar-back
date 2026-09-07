@@ -37,3 +37,24 @@ def compute_pack_prices(price_single: int, settings: PlatformSettings) -> dict[s
         "pack10": pack10,
         "group": group,
     }
+
+
+def compute_variable_duration_amount(leg_amounts: list[int], formula: str, settings: PlatformSettings) -> int:
+    """Like compute_pack_prices, but for a booking whose session(s) don't
+    all share the same duration — see the hour-based slot-splitting feature
+    (app/routers/student_teachers.py's _resolve_leg_range): each leg's own
+    already duration-scaled price (price_per_hour * that leg's own hours)
+    is summed first, THEN the same admin-configured pack discount
+    percentage compute_pack_prices would apply to a uniform
+    price_single * pack size is applied to that sum — so a 5-pack mixing a
+    1h and a 2h session is still discounted consistently with a uniform
+    5-pack of 1h sessions, just on the real total instead of an assumed
+    uniform one. "group" is deliberately not handled here — group sessions
+    are never time-split, they keep compute_pack_prices' own flat formula.
+    """
+    total = sum(leg_amounts)
+    if formula == "pack5":
+        return round(total * (1 - settings.pack5_discount_percent / 100))
+    if formula == "pack10":
+        return round(total * (1 - settings.pack10_discount_percent / 100))
+    return total  # "single" — exactly one leg, no pack discount to apply

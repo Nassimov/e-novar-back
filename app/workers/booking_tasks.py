@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 @celery_app.task
 def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from sqlmodel import Session, select
 
@@ -43,7 +43,7 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
         settings_row = db.get(PlatformSettings, True)
         timeout_hours = settings_row.booking_teacher_response_hours if settings_row else 24
 
-        cutoff = datetime.utcnow() - timedelta(hours=timeout_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=timeout_hours)
         candidates = db.exec(
             select(Booking).where(
                 Booking.status == "pending",
@@ -132,7 +132,7 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
 
 @celery_app.task
 def task_reinstate_expired_teacher_suspensions() -> Dict[str, int]:
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from sqlmodel import Session, select
 
@@ -144,7 +144,7 @@ def task_reinstate_expired_teacher_suspensions() -> Dict[str, int]:
     engine = get_engine()
 
     with Session(engine) as db:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = db.exec(
             select(TeacherProfile).where(
                 TeacherProfile.status == "suspended",
@@ -178,7 +178,7 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
     refunded 100% and the teacher gets the same escalating strike as a
     booking no-response (see task_auto_cancel_unanswered_bookings above).
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from sqlmodel import Session, select
 
@@ -201,7 +201,7 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
     with Session(engine) as db:
         settings_row = db.get(PlatformSettings, True)
         grace_minutes = settings_row.online_no_show_grace_minutes if settings_row else 20
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         candidates = db.exec(
             select(TutoringSession).where(
@@ -276,7 +276,7 @@ def task_detect_online_student_no_show() -> Dict[str, int]:
     student no-shows escalate a booking-only suspension
     (apply_student_strike) — never a full account lock.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from sqlmodel import Session, select
 
@@ -294,7 +294,7 @@ def task_detect_online_student_no_show() -> Dict[str, int]:
     with Session(engine) as db:
         settings_row = db.get(PlatformSettings, True)
         grace_minutes = settings_row.online_no_show_grace_minutes if settings_row else 20
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         candidates = db.exec(
             select(TutoringSession).where(
@@ -355,7 +355,7 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
     equivalent for at_home/at_student sessions, which have no join-timestamp
     signal to detect absence automatically.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from sqlmodel import Session, select
 
@@ -378,7 +378,7 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
     engine = get_engine()
 
     with Session(engine) as db:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         candidates = db.exec(
             select(SessionValidation).where(
                 SessionValidation.status == "disputed",
@@ -519,7 +519,7 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
     simply never reconciled in time (a process failure worth checking), not
     necessarily that nothing was ever paid.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from sqlmodel import Session, select
 
@@ -536,7 +536,7 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
     with Session(engine) as db:
         settings_row = db.get(PlatformSettings, True)
         expiry_hours = settings_row.manual_payment_expiry_hours if settings_row else 48
-        cutoff = datetime.utcnow() - timedelta(hours=expiry_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=expiry_hours)
 
         candidates = db.exec(
             select(Booking).where(
@@ -569,7 +569,7 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
             for s in linked_sessions:
                 if s.status not in ("completed", "cancelled"):
                     s.status = "cancelled"
-                    s.cancelled_at = datetime.utcnow()
+                    s.cancelled_at = datetime.now(timezone.utc)
                     s.cancellation_reason = "manual_payment_expired"
                     s.refund_percentage = 100
                     db.add(s)
