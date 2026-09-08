@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, field_validator
 from sqlmodel import Session, select
 
@@ -22,10 +22,9 @@ from app.dependencies import get_current_user, get_db
 from app.models.profile import Profile, UserRole
 from app.models.referral import Referral
 from app.services.referral import (
-    REFERRAL_KP,
-    REFEREE_KP,
     apply_referral_code,
     get_or_create_code,
+    referral_kp_tables,
 )
 
 router = APIRouter(tags=["Referrals"])
@@ -124,10 +123,11 @@ def get_my_referral_code(
         "total_kp": sum(r.kp_awarded for r in rows),
     }
 
+    referrer_kp_table, referee_kp_table = referral_kp_tables(db)
     return MyCodeResponse(
         code=code,
         link=link,
-        rewards={"referrer_kp": REFERRAL_KP.get(role, 200), "referee_kp": REFEREE_KP.get(role, 100)},
+        rewards={"referrer_kp": referrer_kp_table.get(role, 200), "referee_kp": referee_kp_table.get(role, 100)},
         stats=stats,
         referrals=items,
     )
@@ -136,6 +136,7 @@ def get_my_referral_code(
 @router.post("/apply", status_code=status.HTTP_200_OK)
 def apply_code(
     payload: ApplyCodeRequest,
+    request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -143,11 +144,13 @@ def apply_code(
     Apply a referral code.  Call this once after registration/onboarding.
     The caller is the REFEREE (the newly registered user).
     """
+    from app.core.rate_limit import get_client_ip
+
     uid = _me(current_user)
     role = _role(uid, db)
 
     try:
-        result = apply_referral_code(uid, role, payload.code, db)
+        result = apply_referral_code(uid, role, payload.code, db, referee_ip=get_client_ip(request))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -186,11 +189,12 @@ def preview_code(
     if referrer is None:
         raise HTTPException(status_code=404, detail="Code de parrainage introuvable.")
 
+    referrer_kp_table, referee_kp_table = referral_kp_tables(db)
     return {
         "valid": True,
         "referrer_name": referrer.full_name or "Un ami",
-        "referee_kp": REFEREE_KP.get(referee_role, 100),
-        "referrer_kp": REFERRAL_KP.get(referee_role, 200),
+        "referee_kp": referee_kp_table.get(referee_role, 100),
+        "referrer_kp": referrer_kp_table.get(referee_role, 200),
     }
 
 
@@ -204,12 +208,13 @@ def get_stats(
     role = _role(uid, db)
 
     rows = db.exec(select(Referral).where(Referral.referrer_id == uid)).all()
+    referrer_kp_table, referee_kp_table = referral_kp_tables(db)
 
     return {
         "code": (
             db.exec(select(Profile).where(Profile.id == uid)).first() or Profile()
         ).referral_code,
-        "rewards": {"referrer_kp": REFERRAL_KP.get(role, 200), "referee_kp": REFEREE_KP.get(role, 100)},
+        "rewards": {"referrer_kp": referrer_kp_table.get(role, 200), "referee_kp": referee_kp_table.get(role, 100)},
         "total": len(rows),
         "registered": sum(1 for r in rows if r.status == "registered"),
         "validated": sum(1 for r in rows if r.status == "validated"),

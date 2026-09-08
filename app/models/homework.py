@@ -78,7 +78,10 @@ class HomeworkGrade(SQLModel, table=True):
     Mirrors public.homework_grades.
     One grade per homework (UNIQUE on homework_id).
     files: jsonb array of teacher's return documents.
-    The handle_homework_grade() trigger in Supabase populates kp_awarded automatically.
+    kp_awarded is set explicitly by app/routers/homework.py's grade_homework
+    (which also calls award_kp for the real KP transaction) — migration 109
+    removed a DB trigger that used to ALSO award KP here with a different,
+    inconsistent formula, double-crediting every graded homework.
     """
 
     __tablename__ = "homework_grades"

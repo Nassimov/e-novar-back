@@ -15,12 +15,15 @@ from sqlmodel import Session
 from app.models.profile import TeacherProfile
 from app.services.kp import spend_kp
 
-# days -> EP cost. Mirrors what was previously only shown client-side.
-BOOST_PLANS: dict[int, int] = {
-    7: 100,
-    30: 350,
-    90: 900,
-}
+
+def get_boost_plans(db: Session) -> dict[int, int]:
+    """days -> EP cost. Admin-configurable (business/EP audit, 2026-09-08,
+    migration 110) via PlatformSettings.kp_boost_cost_*d — was a hardcoded
+    dict; defaults reproduce the previous values exactly."""
+    from app.services.pricing import get_platform_settings
+
+    s = get_platform_settings(db)
+    return {7: s.kp_boost_cost_7d, 30: s.kp_boost_cost_30d, 90: s.kp_boost_cost_90d}
 
 
 def is_boost_active(tp: TeacherProfile) -> bool:
@@ -37,16 +40,33 @@ def is_boost_active(tp: TeacherProfile) -> bool:
     return expires > datetime.now(timezone.utc)
 
 
-def activate_boost(tp: TeacherProfile, days: int, db: Session) -> TeacherProfile:
+def activate_boost(
+    tp: TeacherProfile, days: int, db: Session, *, idempotency_key: Optional[str] = None,
+) -> TeacherProfile:
     """Spend EP and activate (or extend) the teacher's visibility boost.
-    Raises ValueError on an invalid plan or insufficient EP balance."""
-    if days not in BOOST_PLANS:
-        raise ValueError(f"Offre de boost invalide (choix valides : {sorted(BOOST_PLANS)} jours).")
-    cost = BOOST_PLANS[days]
+    Raises ValueError on an invalid plan or insufficient EP balance.
+
+    idempotency_key is optional and caller-supplied (the frontend generates
+    one per purchase *attempt* — stable across a double-click/retry of that
+    same attempt, refreshed on the next one) — buying the same plan again
+    in a genuinely separate attempt still stacks more boost time (see the
+    extend-from-current-expiry logic below); only a replay of the exact
+    same attempt is deduped, via was_spent below."""
+    plans = get_boost_plans(db)
+    if days not in plans:
+        raise ValueError(f"Offre de boost invalide (choix valides : {sorted(plans)} jours).")
+    cost = plans[days]
 
     # spend_kp raises ValueError itself if the balance is insufficient —
     # let it propagate, the caller maps it to a 400.
-    spend_kp(tp.user_id, cost, f"Boost visibilité {days} jours", db)
+    _account, was_spent = spend_kp(
+        tp.user_id, cost, f"Boost visibilité {days} jours", db, idempotency_key=idempotency_key,
+    )
+    if not was_spent:
+        # Deduped replay of the same attempt — the first call already
+        # extended boost_expires_at, doing it again would double-credit
+        # the SAME payment with two extensions.
+        return tp
 
     now = datetime.now(timezone.utc)
     # Extend from the current expiry if a boost is already active, so buying

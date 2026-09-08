@@ -245,10 +245,17 @@ def create_club(
     skip_eligibility: bool = False,
     skip_cost: bool = False,
     actor_email: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Club:
     """skip_eligibility/skip_cost=True is the admin-created-club path (see
     app/routers/admin/club.py's admin_create_club) — an admin bypasses
-    eligibility/cost entirely, per spec."""
+    eligibility/cost entirely, per spec.
+
+    idempotency_key is optional and caller-supplied (the frontend generates
+    one per creation *attempt*) — nothing here otherwise stops a double-
+    submit/retry from creating two separate clubs, each charging EP (no
+    unique constraint on Club.owner_id, and check_club_creation_eligibility
+    doesn't check "already owns a club" — only suspension/level/rating)."""
     validate_club_name(db, name, tag)
 
     if not skip_eligibility:
@@ -262,9 +269,19 @@ def create_club(
     cost = settings_row.competitive_club_creation_cost_ep or 0
     if not skip_cost and cost > 0:
         try:
-            spend_kp(owner_id, cost, "Création de club", db)
+            _account, was_spent = spend_kp(owner_id, cost, "Création de club", db, idempotency_key=idempotency_key)
         except ValueError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="EP insuffisant pour créer un club.")
+        if not was_spent:
+            # Deduped replay of the same creation attempt — the EP was
+            # already spent by the first call. There's no club-id to look
+            # up and return here (the club doesn't exist yet when the
+            # spend happens), so rather than silently creating a SECOND,
+            # free club for the same payment, surface it clearly.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cette création de club a déjà été traitée — vérifie tes clubs avant de réessayer.",
+            )
 
     club = Club(
         name=name.strip(), tag=tag.strip(), description=description, logo_url=logo_url, banner_url=banner_url,

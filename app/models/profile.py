@@ -142,6 +142,12 @@ class TeacherProfile(SQLModel, table=True):
     """Mirrors public.teacher_profiles — one row per teacher user."""
 
     __tablename__ = "teacher_profiles"
+    # Last-resort floor, independent of application code — see migration
+    # 111. The real safety comes from the row lock app/services/wallet.py
+    # takes before checking balance; this only catches what that misses.
+    __table_args__ = (
+        sa.CheckConstraint("wallet_balance_dzd >= 0", name="chk_wallet_balance_non_negative"),
+    )
 
     user_id: UUID = Field(primary_key=True, foreign_key="profiles.id")
     headline: Optional[str] = Field(default=None)

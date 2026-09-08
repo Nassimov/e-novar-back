@@ -29,6 +29,9 @@ class ClubCreateRequest(BaseModel):
     subject_focus_id: Optional[UUID] = None
     primary_language: Optional[str] = None
     region: Optional[str] = None
+    # Frontend generates this once per creation attempt (stable across a
+    # double-click/retry of that same attempt) — see club_service.create_club.
+    idempotency_key: Optional[str] = Field(default=None, max_length=100)
 
     @field_validator("privacy")
     @classmethod

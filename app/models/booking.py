@@ -119,6 +119,10 @@ class TutoringSession(SQLModel, table=True):
     refund_percentage: Optional[int] = Field(default=None)
     refund_amount: int = Field(default=0)
     teacher_payout_amount: int = Field(default=0)
+    # Platform commission actually taken on this session's payout (migration
+    # 110) — 0 while PlatformSettings.commission_percent is 0 (today's
+    # default, 100% passthrough). See credit_session_payout.
+    platform_commission_amount: int = Field(default=0)
     no_show: bool = Field(default=False)
     # Per-participant join timestamps for online sessions — see
     # app/routers/classroom.py::get_classroom_room and

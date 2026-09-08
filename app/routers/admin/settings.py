@@ -13,6 +13,7 @@ from app.schemas.admin import (
     BankTransferSettings,
     BookingPolicySettings,
     CompetitiveArenaSettings,
+    KpEconomySettings,
     PlatformPricingSettings,
 )
 from app.services.pricing import get_platform_settings
@@ -104,6 +105,61 @@ def update_booking_policy_settings(
     db.refresh(settings)
     cache_invalidate("public:booking-policy")
     return _serialize_booking_policy(settings)
+
+
+def _serialize_kp_economy(s: PlatformSettings) -> dict:
+    return {
+        "commission_percent": s.commission_percent,
+        "kp_boost_cost_7d": s.kp_boost_cost_7d,
+        "kp_boost_cost_30d": s.kp_boost_cost_30d,
+        "kp_boost_cost_90d": s.kp_boost_cost_90d,
+        "kp_referral_referrer_student": s.kp_referral_referrer_student,
+        "kp_referral_referrer_teacher": s.kp_referral_referrer_teacher,
+        "kp_referral_referrer_parent": s.kp_referral_referrer_parent,
+        "kp_referral_referee_student": s.kp_referral_referee_student,
+        "kp_referral_referee_teacher": s.kp_referral_referee_teacher,
+        "kp_referral_referee_parent": s.kp_referral_referee_parent,
+        "kp_source_daily_caps": s.kp_source_daily_caps,
+        "kp_suspicious_daily_threshold": s.kp_suspicious_daily_threshold,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/kp-economy")
+def get_kp_economy_settings(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    return _serialize_kp_economy(get_platform_settings(db))
+
+
+@router.put("/kp-economy")
+def update_kp_economy_settings(
+    body: KpEconomySettings,
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    settings = db.get(PlatformSettings, True)
+    if settings is None:
+        settings = PlatformSettings(id=True)
+        db.add(settings)
+    settings.commission_percent = body.commission_percent
+    settings.kp_boost_cost_7d = body.kp_boost_cost_7d
+    settings.kp_boost_cost_30d = body.kp_boost_cost_30d
+    settings.kp_boost_cost_90d = body.kp_boost_cost_90d
+    settings.kp_referral_referrer_student = body.kp_referral_referrer_student
+    settings.kp_referral_referrer_teacher = body.kp_referral_referrer_teacher
+    settings.kp_referral_referrer_parent = body.kp_referral_referrer_parent
+    settings.kp_referral_referee_student = body.kp_referral_referee_student
+    settings.kp_referral_referee_teacher = body.kp_referral_referee_teacher
+    settings.kp_referral_referee_parent = body.kp_referral_referee_parent
+    settings.kp_source_daily_caps = body.kp_source_daily_caps
+    settings.kp_suspicious_daily_threshold = body.kp_suspicious_daily_threshold
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settings)
+    cache_invalidate("public:kp-economy")
+    return _serialize_kp_economy(settings)
 
 
 def _serialize_bank_transfer(s: PlatformSettings) -> dict:

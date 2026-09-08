@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -219,3 +219,39 @@ class BookingPolicySettings(BaseModel):
     @classmethod
     def validate_student_escalating(cls, v: List[int]) -> List[int]:
         return _validate_escalating_days(v)
+
+
+class KpEconomySettings(BaseModel):
+    """Business/EP audit (2026-09-08, migration 110) — every value here was
+    previously hardcoded in Python (referral bonuses, boost plan costs) or
+    a no-op (commission_percent=0, kp_source_daily_caps=None). Changing one
+    of these is the only way any of it takes effect — nothing is decided
+    by this schema itself."""
+    commission_percent: int = Field(ge=0, le=100)
+    kp_boost_cost_7d: int = Field(ge=0)
+    kp_boost_cost_30d: int = Field(ge=0)
+    kp_boost_cost_90d: int = Field(ge=0)
+    kp_referral_referrer_student: int = Field(ge=0)
+    kp_referral_referrer_teacher: int = Field(ge=0)
+    kp_referral_referrer_parent: int = Field(ge=0)
+    kp_referral_referee_student: int = Field(ge=0)
+    kp_referral_referee_teacher: int = Field(ge=0)
+    kp_referral_referee_parent: int = Field(ge=0)
+    # {"<kp_source>": max_ep_per_user_per_day}. Omit a source, or the whole
+    # field (null/{}), to leave it uncapped. Valid keys are KpSource values
+    # (lesson, quiz, badge, reward, challenge, bonus, referral, homework,
+    # evaluation, promo, competitive) — an unknown key is simply never
+    # matched by award_kp, not rejected, so a typo silently has no effect
+    # rather than breaking the whole settings save.
+    kp_source_daily_caps: Optional[Dict[str, int]] = None
+    # Monitoring-only threshold (Point 5.3) — a user whose last-24h EP earn
+    # total crosses this appears in GET /admin/kp/suspicious for manual
+    # review. Never auto-blocks anyone.
+    kp_suspicious_daily_threshold: int = Field(ge=1)
+
+    @field_validator("kp_source_daily_caps")
+    @classmethod
+    def validate_caps_non_negative(cls, v: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
+        if v and any(cap < 0 for cap in v.values()):
+            raise ValueError("Un plafond EP quotidien ne peut pas être négatif.")
+        return v

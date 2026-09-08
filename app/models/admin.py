@@ -319,6 +319,32 @@ class PlatformSettings(SQLModel, table=True):
     moderation_default_mute_hours: int = Field(default=24)
     moderation_default_suspension_days: int = Field(default=7)
 
+    # Business/EP audit (2026-09-08, migration 110) — admin-configurable EP
+    # economy + commission mechanism. Every default below reproduces what
+    # was previously hardcoded in Python, or preserves current behavior
+    # (commission_percent=0 = today's 100% teacher payout passthrough) — no
+    # value here was decided by code, only the mechanism was built.
+    commission_percent: int = Field(default=0)
+    # Was app/services/boost.py's hardcoded BOOST_PLANS dict.
+    kp_boost_cost_7d: int = Field(default=100)
+    kp_boost_cost_30d: int = Field(default=350)
+    kp_boost_cost_90d: int = Field(default=900)
+    # Was app/services/referral.py's hardcoded REFERRAL_KP / REFEREE_KP dicts.
+    kp_referral_referrer_student: int = Field(default=200)
+    kp_referral_referrer_teacher: int = Field(default=500)
+    kp_referral_referrer_parent: int = Field(default=200)
+    kp_referral_referee_student: int = Field(default=100)
+    kp_referral_referee_teacher: int = Field(default=300)
+    kp_referral_referee_parent: int = Field(default=100)
+    # Optional {"<kp_source>": max_ep_per_user_per_day}. None = uncapped
+    # everywhere (current behavior) — see app/services/kp.py's award_kp.
+    kp_source_daily_caps: Optional[dict] = Field(
+        default=None,
+        sa_column=sa.Column(JSONB, nullable=True),
+    )
+    # Monitoring-only (Point 5.3) — never auto-blocks, see GET /admin/kp/suspicious.
+    kp_suspicious_daily_threshold: int = Field(default=1000)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

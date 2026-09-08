@@ -119,6 +119,11 @@ class TeacherDetailResponse(BaseModel):
 
 class BoostActivateRequest(BaseModel):
     days: int
+    # Frontend generates this once per purchase attempt (kept stable across
+    # a double-click or a retried request for that SAME attempt, refreshed
+    # on the next attempt) — lets spend_kp dedupe a retry without also
+    # blocking a deliberate second purchase (stacking more boost time).
+    idempotency_key: Optional[str] = Field(default=None, max_length=100)
 
 
 class BoostStatusResponse(BaseModel):

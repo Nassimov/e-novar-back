@@ -275,14 +275,22 @@ def grade_homework(
     hw.updated_at = datetime.utcnow()
     db.add(hw)
     db.commit()
+    db.refresh(grade)
 
     if kp_earned > 0:
+        # ref_type/ref_id makes this idempotent per homework — a retried
+        # request can't award KP twice for the same grade (see
+        # app/services/kp.py). A stray DB trigger used to ALSO award KP for
+        # this same event with a different formula (migration 109 removed
+        # it) — this was the one real double-award bug the EP audit found.
         award_kp(
             hw.student_id,
             kp_earned,
             KpSource.homework,
             f"Devoir noté: {hw.title} ({payload.score}/20)",
             db,
+            ref_type="homework_grade",
+            ref_id=grade.id,
         )
 
     from app.services.notification_engine import emit

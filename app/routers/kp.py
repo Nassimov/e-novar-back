@@ -4,7 +4,7 @@ import math
 from typing import Any, Dict, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlmodel import Session, select
 
@@ -12,31 +12,27 @@ from app.dependencies import get_current_user, get_db
 from app.models.kp import KpAccount, KpTransaction
 from app.models.user import User
 from app.schemas.kp import (
-    BadgeResponse,
     KpBalanceResponse,
-    KpSpendRequest,
     KpTransactionResponse,
     LeaderboardEntry,
 )
-from app.services.kp import award_kp, get_or_create_kp_account, spend_kp, LEVEL_THRESHOLDS
+from app.services.kp import get_or_create_kp_account, LEVEL_THRESHOLDS
 
 router = APIRouter(tags=["kp"])
 
-BADGES = [
-    BadgeResponse(id="first_booking", name="Première réservation", description="Première session réservée", required_level=1, kp_cost=0),
-    BadgeResponse(id="week_streak", name="Semaine de feu", description="7 jours consécutifs d'activité", required_level=2, kp_cost=0),
-    BadgeResponse(id="top_student", name="Top Étudiant", description="Dans le top 10 hebdomadaire", required_level=3, kp_cost=200),
-    BadgeResponse(id="homework_master", name="Maître des devoirs", description="10 devoirs complétés", required_level=2, kp_cost=100),
-    BadgeResponse(id="challenger", name="Challenger", description="5 challenges complétés", required_level=3, kp_cost=300),
-    BadgeResponse(id="referral_king", name="Ambassadeur", description="5 amis référencés", required_level=2, kp_cost=200),
-]
-
-STORE_REWARDS = [
-    {"id": "discount_10", "name": "Réduction 10%", "description": "10% de réduction sur la prochaine session", "kp_cost": 500, "type": "discount"},
-    {"id": "discount_20", "name": "Réduction 20%", "description": "20% de réduction sur la prochaine session", "kp_cost": 900, "type": "discount"},
-    {"id": "free_session", "name": "Session gratuite", "description": "Une session offerte avec un tuteur", "kp_cost": 2000, "type": "session"},
-    {"id": "priority_support", "name": "Support prioritaire", "description": "Accès prioritaire au support pendant 1 mois", "kp_cost": 300, "type": "perk"},
-]
+# NOTE (business/EP audit, 2026-09-08): this router used to also expose
+# POST /spend, GET /badges and POST /badges/{id}/unlock, backed by two
+# hardcoded Python lists (BADGES, STORE_REWARDS) that predate — and are
+# unrelated to — the real reward systems (app/services/store.py's
+# StoreItem-backed redeem_item, and app/routers/student_badges.py's
+# DB-backed Badge/UserBadge). Confirmed via grep that no frontend code
+# called any of the three (src/lib/api/*.ts has zero references), yet they
+# were live, reachable-with-any-auth-token endpoints. /spend in particular
+# took `amount` straight from the request body and handed it to spend_kp()
+# with no server-side derivation from a real cost — exactly the "a user
+# sends amount=1000000 and gets it" failure mode. Removed rather than
+# patched: they were dead weight duplicating a system that already exists
+# and works correctly.
 
 
 @router.get("/balance", response_model=KpBalanceResponse)
@@ -94,30 +90,6 @@ def get_kp_transactions(
     }
 
 
-@router.post("/spend")
-def spend_kp_endpoint(
-    payload: KpSpendRequest,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Spend KP points on a reward."""
-    stmt = select(User).where(User.id == UUID(current_user["id"]))
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    try:
-        account = spend_kp(user.id, payload.amount, payload.label, db)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    return {
-        "message": f"Spent {payload.amount} KP",
-        "new_balance": account.balance,
-        "reward_id": payload.reward_id,
-    }
-
-
 @router.get("/levels")
 def get_levels():
     """Get all KP level definitions."""
@@ -142,51 +114,6 @@ def _get_level_title(level: int) -> str:
         7: "Légende",
     }
     return titles.get(level, f"Niveau {level}")
-
-
-@router.get("/badges", response_model=List[BadgeResponse])
-def list_badges(
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """List all available badges and unlock status."""
-    stmt = select(User).where(User.id == UUID(current_user["id"]))
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    account = get_or_create_kp_account(user.id, db)
-    result = []
-    for badge in BADGES:
-        b = badge.model_copy()
-        b.is_unlocked = account.level >= badge.required_level
-        result.append(b)
-    return result
-
-
-@router.post("/badges/{badge_id}/unlock")
-def unlock_badge(
-    badge_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Unlock a badge using KP."""
-    stmt = select(User).where(User.id == UUID(current_user["id"]))
-    user = db.exec(stmt).first()
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    badge = next((b for b in BADGES if b.id == badge_id), None)
-    if badge is None:
-        raise HTTPException(status_code=404, detail="Badge not found")
-
-    if badge.kp_cost > 0:
-        try:
-            spend_kp(user.id, badge.kp_cost, f"Badge unlocked: {badge.name}", db)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-
-    return {"message": f"Badge '{badge.name}' unlocked!", "badge_id": badge_id}
 
 
 @router.get("/leaderboard", response_model=List[LeaderboardEntry])

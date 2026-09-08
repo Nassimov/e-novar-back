@@ -56,8 +56,74 @@ def _register_sqlite_compile_shims() -> None:
     def _compile_array_sqlite(element, compiler, **kw):
         return "JSON"
 
+    # NOTE: this only fixes DDL (CREATE TABLE) rendering. ARRAY's actual
+    # bind/result processing is still postgres-specific (psycopg2's array
+    # wire format), so inserting a real Python list through a raw ARRAY
+    # column under SQLite still fails ("Error binding parameter: type
+    # 'list' is not supported") — and a naive JSON-based bind/result
+    # patch was tried and reverted: several models declare a Postgres
+    # literal server_default (e.g. "'{}'") on ARRAY/JSONB columns, which
+    # SQLite applies verbatim as a raw string whenever a row omits that
+    # column — not valid JSON, so a global result-processor patch broke
+    # every OTHER test touching any such column, for tables that have
+    # nothing to do with whatever a given test actually cares about. The
+    # established workaround (see tests/test_kp_economy.py's
+    # _set_platform_settings) is to avoid exercising a full ORM-level
+    # insert of a row with unrelated ARRAY-typed columns in the first
+    # place — construct the object in memory (fine — only the DB write
+    # fails) and monkeypatch call sites to use it instead.
+
 
 _register_sqlite_compile_shims()
+
+
+def _register_sqlite_kp_trigger_shim() -> None:
+    """Test-infrastructure-only: production maintains kp_balances entirely
+    via the Postgres trigger apply_kp_transaction() (app/services/kp.py's
+    award_kp/spend_kp only ever insert a KpTransaction row, never touch
+    balance/xp directly) — SQLite has no such trigger, so without this,
+    every balance in a test would stay frozen at 0 regardless of what
+    award_kp/spend_kp do. Mirrors the trigger's exact upsert logic so tests
+    exercise the real balance effect, including the chk_kp_balance_non_negative
+    CHECK constraint (migration 109) rejecting an over-spend at the DB
+    level. Never touches production model files or the real Postgres schema."""
+    from sqlalchemy import event
+
+    from app.models.kp import KpBalance, KpTransaction
+
+    @event.listens_for(KpTransaction, "after_insert")
+    def _apply_kp_transaction(mapper, connection, target) -> None:
+        table = KpBalance.__table__
+        gained = max(target.amount, 0)
+        existing = connection.execute(
+            table.select().where(table.c.user_id == target.user_id)
+        ).first()
+        if existing is None:
+            connection.execute(
+                table.insert().values(
+                    user_id=target.user_id,
+                    balance=target.amount,
+                    total_earned=gained,
+                    week_earned=gained,
+                    xp=gained,
+                    level=1,
+                    next_level_at=200,
+                )
+            )
+        else:
+            connection.execute(
+                table.update()
+                .where(table.c.user_id == target.user_id)
+                .values(
+                    balance=table.c.balance + target.amount,
+                    total_earned=table.c.total_earned + gained,
+                    week_earned=table.c.week_earned + gained,
+                    xp=table.c.xp + gained,
+                )
+            )
+
+
+_register_sqlite_kp_trigger_shim()
 
 
 @pytest.fixture(scope="session")

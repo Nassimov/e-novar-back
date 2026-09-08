@@ -15,7 +15,6 @@ from app.dependencies import get_admin_user, get_db
 from app.models.booking import Booking, TutoringSession
 from app.models.profile import Profile
 from app.models.session_validation import SessionValidation
-from app.models.teacher import TeacherProfile
 from app.schemas.session_validation import AdminDecisionRequest, AdminReviewItem, TrustScoreSettings
 from app.services.pricing import get_platform_settings
 from app.services.session_validation import credit_session_payout, generate_token, log_audit
@@ -202,23 +201,42 @@ def reject_validation(
                 # go negative here, so this is logged for manual follow-up
                 # instead of silently under-clawing-back.
                 if sv.payment_credited_at is not None and session_row.teacher_payout_amount:
-                    teacher_profile = db.get(TeacherProfile, sv.teacher_id)
-                    if teacher_profile is not None:
-                        clawback_amount = session_row.teacher_payout_amount
-                        shortfall = max(0, clawback_amount - teacher_profile.wallet_balance_dzd)
-                        teacher_profile.wallet_balance_dzd = max(0, teacher_profile.wallet_balance_dzd - clawback_amount)
-                        db.add(teacher_profile)
-                        if shortfall > 0:
-                            log_audit(
-                                db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=admin_id,
-                                actor_ip=None, action="payout_clawback_shortfall",
-                                metadata={"teacher_id": str(sv.teacher_id), "clawback_amount": clawback_amount, "shortfall": shortfall},
-                            )
+                    from app.services.wallet import debit_wallet
+                    clawback_amount = session_row.teacher_payout_amount
+                    try:
+                        _tp, actual = debit_wallet(
+                            sv.teacher_id, clawback_amount, "clawback", "Séance rejetée — reprise du paiement", db,
+                            ref_type="session_clawback", ref_id=session_row.id, actor_id=admin_id, clamp=True,
+                        )
+                    except ValueError:
+                        actual = 0  # teacher profile not found — nothing to claw back
+                    shortfall = clawback_amount - actual
+                    if shortfall > 0:
+                        log_audit(
+                            db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=admin_id,
+                            actor_ip=None, action="payout_clawback_shortfall",
+                            metadata={"teacher_id": str(sv.teacher_id), "clawback_amount": clawback_amount, "shortfall": shortfall},
+                        )
                 session_row.refund_percentage = 100
                 session_row.refund_amount = refund_amount
                 session_row.teacher_payout_amount = 0
                 db.add(session_row)
                 db.commit()
+
+                # Reverse the student's lesson-completion EP too, if this
+                # session had already been credited (business/EP audit,
+                # 2026-09-08, Point 5.5) — a session an admin just ruled
+                # "didn't happen" shouldn't leave the student keeping EP for
+                # it. Writes an explicit, auditable 'reversal' transaction
+                # rather than editing history; a no-op if there was nothing
+                # to reverse (booking.kp_reward was 0, or already reversed).
+                if sv.payment_credited_at is not None:
+                    from app.services.kp import reverse_kp_transaction
+                    reverse_kp_transaction(
+                        ref_type="booking_completed", ref_id=sv.session_id,
+                        reason="Séance rejetée après vérification administrative",
+                        db=db, actor_id=admin_id,
+                    )
 
     from app.services.session_validation import _notify
     _notify(db, sv.teacher_id, "❌ Séance rejetée",

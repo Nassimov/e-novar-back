@@ -111,6 +111,7 @@ from app.models.conversation import (  # noqa: F401
 
 # Gamification
 from app.models.kp import KpBalance, KpLevel, KpTransaction  # noqa: F401
+from app.models.wallet import TeacherWalletTransaction  # noqa: F401
 from app.models.gamification import (  # noqa: F401
     Badge,
     Challenge,

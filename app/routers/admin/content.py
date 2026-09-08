@@ -412,22 +412,17 @@ def process_withdrawal(
             payout.status = "approved"
             payout.processed_at = datetime.utcnow()
         else:
-            if payload.dzd_amount is None:
-                raise HTTPException(status_code=400, detail="dzd_amount requis pour approuver un retrait")
-            payout.status = "approved"
-            payout.dzd_amount = payload.dzd_amount
-            payout.processed_at = datetime.utcnow()
-
-            # Deduct EP from teacher's balance via kp_transactions
-            from app.models.kp import KpTransaction
-            db.add(KpTransaction(
-                user_id=payout.teacher_id,
-                amount=-payout.ep_amount,
-                source="reward",
-                label=f"Retrait EP → DZD ({payload.dzd_amount} DZD)",
-                ref_type="payout",
-                ref_id=payout.id,
-            ))
+            # ep_conversion approvals disabled (business/EP audit,
+            # 2026-09-08) — no new EP -> DZD conversion may be approved,
+            # per the validated EP value model. request_withdrawal (the
+            # only way to CREATE one) is disabled too, so this only
+            # matters for whatever pending rows already existed —
+            # rejecting one (below) still works, to let an admin clear
+            # the backlog without approving a conversion.
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="La conversion EP → DZD n'est plus disponible — cette demande ne peut plus être approuvée, seulement rejetée.",
+            )
 
     elif payload.action == "reject":
         payout.status = "rejected"
@@ -435,11 +430,11 @@ def process_withdrawal(
         if is_wallet and payout.dzd_amount:
             # Refund what request_dzd_withdrawal already deducted — a
             # rejected wallet cash-out must not just vanish the money.
-            from app.models.profile import TeacherProfile as _TeacherProfile
-            tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == payout.teacher_id)).first()
-            if tp is not None:
-                tp.wallet_balance_dzd += payout.dzd_amount
-                db.add(tp)
+            from app.services.wallet import credit_wallet
+            credit_wallet(
+                payout.teacher_id, payout.dzd_amount, "withdrawal_rejected", "Retrait rejeté — remboursement", db,
+                ref_type="teacher_payout", ref_id=payout.id,
+            )
     else:
         raise HTTPException(status_code=400, detail="action invalide. Utilise 'approve' ou 'reject'")
 

@@ -27,5 +27,9 @@ class Referral(SQLModel, table=True):
     status: str = Field(default="registered")            # registered | validated
     referee_role: str = Field(default="student")         # student | teacher | parent
     kp_awarded: int = Field(default=0)                   # KP credited to referrer
+    # Multi-account monitoring (Point 5.3, migration 112) — best-effort
+    # client IP captured when the referee applied the code. Purely
+    # observational: see GET /admin/referrals/suspicious-ips.
+    referee_ip: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     validated_at: Optional[datetime] = Field(default=None)

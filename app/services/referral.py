@@ -12,9 +12,26 @@ from uuid import UUID
 
 from sqlmodel import Session, select
 
-# KP rewards by referee role (student-tier | teacher-tier)
-REFERRAL_KP = {"student": 200, "teacher": 500, "parent": 200}
-REFEREE_KP  = {"student": 100, "teacher": 300, "parent": 100}
+
+def referral_kp_tables(db: Session) -> tuple[dict, dict]:
+    """KP rewards by referee role — admin-configurable (business/EP audit,
+    2026-09-08, migration 110) via PlatformSettings.kp_referral_*. Was a
+    hardcoded dict; defaults reproduce the previous hardcoded values
+    exactly, so nothing changes until an admin edits them."""
+    from app.services.pricing import get_platform_settings
+
+    s = get_platform_settings(db)
+    referrer_kp = {
+        "student": s.kp_referral_referrer_student,
+        "teacher": s.kp_referral_referrer_teacher,
+        "parent": s.kp_referral_referrer_parent,
+    }
+    referee_kp = {
+        "student": s.kp_referral_referee_student,
+        "teacher": s.kp_referral_referee_teacher,
+        "parent": s.kp_referral_referee_parent,
+    }
+    return referrer_kp, referee_kp
 
 
 def _generate_code(name: str, role: str) -> str:
@@ -54,6 +71,8 @@ def apply_referral_code(
     referee_role: str,
     code: str,
     db: Session,
+    *,
+    referee_ip: Optional[str] = None,
 ) -> dict:
     """
     Apply a referral code for a newly registered user.
@@ -65,6 +84,10 @@ def apply_referral_code(
 
     Returns a dict with the referrer info and the KP awarded to the referee.
     Raises ValueError on any violation.
+
+    referee_ip: best-effort client IP (Point 5.3 — multi-account
+    monitoring), stored purely for GET /admin/referrals/suspicious-ips to
+    surface for manual review. Never used to block anything here.
     """
     from app.models.profile import Profile
     from app.models.referral import Referral
@@ -88,7 +111,8 @@ def apply_referral_code(
         raise ValueError("Tu ne peux pas utiliser ton propre code.")
 
     # Determine kp to give referee immediately
-    kp_referee = REFEREE_KP.get(referee_role, 100)
+    _referrer_kp, referee_kp_table = referral_kp_tables(db)
+    kp_referee = referee_kp_table.get(referee_role, 100)
 
     row = Referral(
         referrer_id=referrer_profile.id,
@@ -97,17 +121,23 @@ def apply_referral_code(
         status="registered",
         referee_role=referee_role,
         kp_awarded=0,   # will be set at validation
+        referee_ip=referee_ip,
     )
     db.add(row)
     db.flush()
 
-    # Award KP to referee immediately (welcome bonus)
+    # Award KP to referee immediately (welcome bonus). ref_type/ref_id makes
+    # this idempotent per Referral row — a retried request can't grant the
+    # welcome bonus twice (a user can only be referred once anyway, but this
+    # also protects against a retry landing between the two checks above).
     award_kp(
         referee_id,
         kp_referee,
         KpSource.referral,
         f"Bonus parrainage — inscription via {referrer_profile.full_name or 'un ami'}",
         db,
+        ref_type="referral_welcome",
+        ref_id=row.id,
     )
 
     db.commit()
@@ -135,7 +165,8 @@ def validate_referral_for_user(user_id: UUID, db: Session) -> bool:
     if row is None:
         return False
 
-    kp_referrer = REFERRAL_KP.get(row.referee_role, 200)
+    referrer_kp_table, _referee_kp = referral_kp_tables(db)
+    kp_referrer = referrer_kp_table.get(row.referee_role, 200)
 
     row.status = "validated"
     row.validated_at = datetime.now(timezone.utc)
@@ -149,6 +180,8 @@ def validate_referral_for_user(user_id: UUID, db: Session) -> bool:
         KpSource.referral,
         f"Parrainage validé — {row.referee_role}",
         db,
+        ref_type="referral_validated",
+        ref_id=row.id,
     )
 
     db.commit()

@@ -163,6 +163,31 @@ class KpSource(str, Enum):
     competitive = "competitive"
 
 
+class WalletTransactionType(str, Enum):
+    """Nature of a teacher_wallet_transactions row — see
+    app/models/wallet.py's TeacherWalletTransaction docstring."""
+
+    credit = "credit"
+    debit = "debit"
+    adjustment = "adjustment"
+    reversal = "reversal"
+
+
+class KpTransactionType(str, Enum):
+    """Nature of a kp_transactions row — distinct from KpSource, which is
+    WHY it happened. earn/spend = ordinary award or debit. bonus =
+    promo/event extra. adjustment = manual admin correction (actor_id
+    required). reversal = undoes a prior transaction (see ref_type/ref_id)
+    — e.g. a cancelled homework grade. expiration = time-limited EP lapsing."""
+
+    earn = "earn"
+    spend = "spend"
+    bonus = "bonus"
+    adjustment = "adjustment"
+    reversal = "reversal"
+    expiration = "expiration"
+
+
 class BadgeTier(str, Enum):
     bronze = "bronze"
     silver = "silver"

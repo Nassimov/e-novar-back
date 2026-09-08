@@ -147,3 +147,65 @@ def admin_list_referrals(
         )
         for r in rows
     ]
+
+
+class SuspiciousIpGroup(BaseModel):
+    referee_ip: str
+    referral_count: int
+    referrals: List[AdminReferralRow]
+
+
+@router.get("/suspicious-ips", response_model=List[SuspiciousIpGroup])
+def admin_list_suspicious_referral_ips(
+    min_count: int = Query(2, ge=2, le=50, description="Minimum referrals sharing an IP to be flagged"),
+    _: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Monitoring aid for multi-account farming (Point 5.3) — groups
+    referrals by the referee's IP at apply-time and flags any IP behind at
+    least `min_count` referrals. Purely informational: several honest
+    referrals from one household/office IP are common and NOT auto-
+    blocked or penalized — an admin decides what (if anything) to do after
+    reviewing the actual accounts involved."""
+    from collections import defaultdict
+
+    rows = db.exec(select(Referral).where(Referral.referee_ip.is_not(None))).all()
+
+    by_ip: dict[str, list[Referral]] = defaultdict(list)
+    for r in rows:
+        by_ip[r.referee_ip].append(r)
+
+    flagged_ips = {ip: group for ip, group in by_ip.items() if len(group) >= min_count}
+    if not flagged_ips:
+        return []
+
+    uids: set[UUID] = set()
+    for group in flagged_ips.values():
+        for r in group:
+            uids.add(r.referrer_id)
+            if r.referee_id:
+                uids.add(r.referee_id)
+    profiles: dict[UUID, Profile] = {}
+    if uids:
+        for p in db.exec(select(Profile).where(Profile.id.in_(list(uids)))).all():
+            profiles[p.id] = p
+
+    def _n(uid: Optional[UUID]) -> Optional[str]:
+        return _name(profiles, uid)
+
+    result = []
+    for ip, group in sorted(flagged_ips.items(), key=lambda kv: len(kv[1]), reverse=True):
+        result.append(SuspiciousIpGroup(
+            referee_ip=ip,
+            referral_count=len(group),
+            referrals=[
+                AdminReferralRow(
+                    id=str(r.id), referrer_id=str(r.referrer_id), referrer_name=_n(r.referrer_id) or "—",
+                    referee_id=str(r.referee_id) if r.referee_id else None, referee_name=_n(r.referee_id),
+                    code=r.code, referee_role=r.referee_role, status=r.status, kp_awarded=r.kp_awarded,
+                    created_at=r.created_at.isoformat(), validated_at=r.validated_at.isoformat() if r.validated_at else None,
+                )
+                for r in group
+            ],
+        ))
+    return result

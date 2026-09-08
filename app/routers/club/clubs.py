@@ -58,6 +58,7 @@ def create_club(
         logo_url=payload.logo_url, banner_url=payload.banner_url, privacy=payload.privacy,
         max_members=payload.max_members, subject_focus_id=payload.subject_focus_id,
         primary_language=payload.primary_language, region=payload.region,
+        idempotency_key=payload.idempotency_key,
     )
     return club_service.club_to_out(db, club)
 

@@ -159,8 +159,8 @@ def get_my_boost_status(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Current visibility-boost status + the fixed server-side plans/pricing."""
-    from app.services.boost import BOOST_PLANS, clear_expired, is_boost_active
+    """Current visibility-boost status + the admin-configured plans/pricing."""
+    from app.services.boost import get_boost_plans, clear_expired, is_boost_active
     from app.services.kp import get_or_create_kp_account
 
     uid = UUID(current_user["id"])
@@ -174,7 +174,7 @@ def get_my_boost_status(
     return BoostStatusResponse(
         active=is_boost_active(profile),
         expires_at=profile.boost_expires_at,
-        plans=BOOST_PLANS,
+        plans=get_boost_plans(db),
         balance=account.balance,
     )
 
@@ -189,7 +189,7 @@ def activate_my_boost(
     real EP debit + real promotion in student search/recommendation ranking
     (see app.services.boost.is_boost_active, consumed by
     app.services.recommendation and app.routers.student_teachers)."""
-    from app.services.boost import BOOST_PLANS, activate_boost, is_boost_active
+    from app.services.boost import get_boost_plans, activate_boost, is_boost_active
     from app.services.kp import get_or_create_kp_account
 
     uid = UUID(current_user["id"])
@@ -198,7 +198,7 @@ def activate_my_boost(
         raise HTTPException(status_code=404, detail="Teacher profile not found")
 
     try:
-        profile = activate_boost(profile, payload.days, db)
+        profile = activate_boost(profile, payload.days, db, idempotency_key=payload.idempotency_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -210,7 +210,7 @@ def activate_my_boost(
     return BoostStatusResponse(
         active=is_boost_active(profile),
         expires_at=profile.boost_expires_at,
-        plans=BOOST_PLANS,
+        plans=get_boost_plans(db),
         balance=account.balance,
     )
 
@@ -1458,18 +1458,14 @@ def request_dzd_withdrawal(
             detail=f"Solde insuffisant. Disponible : {tp.wallet_balance_dzd} DA",
         )
 
-    # Deduct from wallet (admin processes the transfer manually, to the
-    # PROFILE's saved/verified destination — not whatever this request body
-    # happened to contain).
-    tp.wallet_balance_dzd -= payload.amount_dzd
-    db.add(tp)
-
     # Persisted so an admin can actually see and act on it — previously this
     # request silently deducted the wallet with nothing recorded anywhere,
     # so nobody (admin included) had any way to know a payout was owed.
     # Shares the same admin queue as the EP->DZD conversion flow (see
     # app/routers/admin/content.py's list/process_withdrawal), distinguished
-    # by `source`.
+    # by `source`. Flushed (not committed) so its id exists for the ledger
+    # ref below — app/services/wallet.py's debit_wallet does the actual
+    # balance mutation + ledger row + commit for both together, atomically.
     payout = TeacherPayout(
         teacher_id=teacher_id,
         source="wallet",
@@ -1482,7 +1478,13 @@ def request_dzd_withdrawal(
         payout_phone=tp.payout_phone if tp.payout_rail == "baridimob" else None,
     )
     db.add(payout)
-    db.commit()
+    db.flush()
+
+    from app.services.wallet import debit_wallet
+    tp, _ = debit_wallet(
+        teacher_id, payload.amount_dzd, "withdrawal_request", "Demande de retrait", db,
+        ref_type="teacher_payout", ref_id=payout.id,
+    )
     return {
         "message": f"Demande de retrait de {payload.amount_dzd} DA enregistrée. Un virement sera effectué sous 72h.",
         "remaining_balance": tp.wallet_balance_dzd,
@@ -1510,56 +1512,21 @@ def request_withdrawal(
     current_user: Dict[str, Any] = Depends(require_role("teacher")),
     db: Session = Depends(get_db),
 ):
-    """Request an EP → DZD payout. Requires at least 1 completed session."""
-    from app.models.kp import KpBalance
-    from app.models.profile import TeacherProfile as _TeacherProfile
-
-    uid = UUID(current_user["id"])
-
-    # Verify at least 1 completed session
-    from app.models.booking import Booking
-    done = db.exec(
-        select(Booking)
-        .where(Booking.teacher_id == uid)
-        .where(Booking.status == "completed")
-    ).first()
-    if done is None:
-        raise HTTPException(
-            status_code=403,
-            detail="Au moins une séance complétée est requise avant de demander un retrait.",
-        )
-
-    # Same payout-destination gate as request_dzd_withdrawal above — and the
-    # persisted payout record uses the PROFILE's own saved iban/bank_holder,
-    # never whatever this request body contains: trusting a per-request
-    # bank destination with zero validation would let anyone with a live
-    # session redirect a real payout to an arbitrary account.
-    tp = db.exec(select(_TeacherProfile).where(_TeacherProfile.user_id == uid)).first()
-    if tp is None or not (tp.iban and tp.bank_holder):
-        raise HTTPException(
-            status_code=403,
-            detail="Configurez d'abord votre RIB dans votre profil avant de demander un retrait.",
-        )
-
-    # Check EP balance
-    kp = db.exec(select(KpBalance).where(KpBalance.user_id == uid)).first()
-    available = kp.balance if kp else 0
-    if available < payload.ep_amount:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Solde EP insuffisant. Disponible : {available} EP.",
-        )
-
-    payout = TeacherPayout(
-        teacher_id=uid,
-        ep_amount=payload.ep_amount,
-        iban=tp.iban,
-        bank_holder=tp.bank_holder,
+    """DISABLED (business/EP audit, 2026-09-08) — this used to let a teacher
+    request an EP -> DZD conversion, with no published exchange rate (an
+    admin fixed dzd_amount ad hoc per request in app/routers/admin/
+    content.py's process_withdrawal). Explicitly incompatible with the
+    validated EP value model ("no direct monetary value" — see the EP
+    tokenomics audit) and removed rather than fixed. The 'wallet' source
+    (a teacher cashing out real session earnings from wallet_balance_dzd,
+    via /me/withdrawals/dzd above) is unrelated and unaffected — that's
+    real money the teacher already earned, not an EP conversion.
+    Kept as a 410 rather than deleted so any client still calling it gets
+    a clear, explicit reason instead of a 404."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="La conversion EP → DZD n'est plus disponible. L'EP n'a pas de valeur monétaire directe sur E-NOVAR.",
     )
-    db.add(payout)
-    db.commit()
-    db.refresh(payout)
-    return WithdrawalResponse.model_validate(payout)
 
 
 @router.get("/me/evaluations")

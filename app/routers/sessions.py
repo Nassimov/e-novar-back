@@ -354,22 +354,32 @@ async def complete_session(
     if booking is None:
         raise HTTPException(status_code=400, detail="Session has no associated booking")
 
-    pack_size = PACK_SIZES.get(booking.formula, 1)
-    payout = round(booking.amount / pack_size)
+    # Delegates to the SAME credit logic the real validation flow uses
+    # (app.services.session_validation.credit_session_payout) instead of
+    # reimplementing the payout math here a second time — this used to
+    # compute its own gross payout with no commission applied, silently
+    # diverging from the real flow the moment commission became
+    # admin-configurable (business audit, 2026-09-08).
+    from app.models.session_validation import SessionValidation
+    from app.services.session_validation import credit_session_payout
 
-    session.status = "completed"
-    session.ended_at = datetime.now(timezone.utc)
-    session.teacher_payout_amount = payout
-    db.add(session)
+    sv = db.exec(
+        select(SessionValidation).where(SessionValidation.session_id == session.id)
+    ).first()
+    if sv is None:
+        sv = SessionValidation(
+            session_id=session.id, booking_id=session.booking_id,
+            student_id=session.student_id, teacher_id=session.teacher_id,
+            status="approved", admin_decision="approved",
+        )
+        db.add(sv)
+        db.flush()
 
-    teacher_profile = db.get(TeacherProfile, session.teacher_id)
-    if teacher_profile is not None:
-        teacher_profile.wallet_balance_dzd += payout
-        db.add(teacher_profile)
-
+    payout = credit_session_payout(db, session, sv)
     db.commit()
     db.refresh(session)
 
+    teacher_profile = db.get(TeacherProfile, session.teacher_id)
     return {
         "id": str(session.id),
         "status": session.status,

@@ -30,7 +30,6 @@ from sqlmodel import Session, select
 
 from app.models.admin import PlatformSettings
 from app.models.booking import Booking, TutoringSession
-from app.models.profile import TeacherProfile
 from app.models.session_validation import SessionValidation, SessionValidationAuditLog
 from app.services.pricing import PACK_SIZES
 
@@ -264,7 +263,12 @@ def teacher_has_clean_history(db: Session, teacher_id: UUID, lookback: int = 20)
 def credit_session_payout(db: Session, session: TutoringSession, sv: SessionValidation) -> int:
     """The only place a teacher's wallet is ever credited for a lesson.
     Idempotent — a session already payment_credited_at is a no-op (returns 0)
-    rather than double-crediting."""
+    rather than double-crediting.
+    Commission (business audit, 2026-09-08): PlatformSettings.commission_percent
+    is taken net-at-payout — the teacher never sees a "gross then clawed
+    back" amount, and since a completed session can never be
+    cancelled/refunded (see app/routers/sessions.py's cancel_session), a
+    commission taken here is never at risk of needing to be reversed."""
     if sv.payment_credited_at is not None:
         return 0
 
@@ -272,28 +276,59 @@ def credit_session_payout(db: Session, session: TutoringSession, sv: SessionVali
     if booking is None:
         return 0
 
+    from app.services.pricing import get_platform_settings
+
     pack_size = PACK_SIZES.get(booking.formula, 1)
-    payout = round(booking.amount / pack_size)
+    gross = round(booking.amount / pack_size)
+    commission_pct = get_platform_settings(db).commission_percent or 0
+    commission = round(gross * commission_pct / 100) if commission_pct > 0 else 0
+    payout = gross - commission
 
     session.status = "completed"
     if session.ended_at is None:
         session.ended_at = datetime.now(timezone.utc)
     session.teacher_payout_amount = payout
+    session.platform_commission_amount = commission
     db.add(session)
 
-    teacher_profile = db.get(TeacherProfile, session.teacher_id)
-    if teacher_profile is not None:
-        teacher_profile.wallet_balance_dzd += payout
-        db.add(teacher_profile)
+    if payout > 0:
+        from app.services.wallet import credit_wallet
+        try:
+            credit_wallet(
+                session.teacher_id, payout, "session_payout", "Paiement séance validée", db,
+                ref_type="session_payout", ref_id=session.id,
+            )
+        except ValueError:
+            pass  # teacher profile not found — nothing to credit
 
     sv.payment_credited_at = datetime.now(timezone.utc)
     sv.updated_at = sv.payment_credited_at
     db.add(sv)
 
+    # Student's advertised lesson-completion EP (business/EP audit,
+    # 2026-09-08): booking.kp_reward is set from the teacher's profile at
+    # booking time and shown to the student as "you'll earn N EP for this
+    # lesson" — but nothing ever actually granted it. The only prior
+    # mechanism was a DB trigger (handle_booking_completed, removed by
+    # migration 109/110) keyed on bookings.status turning 'completed',
+    # which no code path ever sets (bookings only ever reach pending/
+    # confirmed/cancelled) — so it had never fired. Granted here instead,
+    # at the point a session actually completes; ref_id is the SESSION
+    # (not the booking) so a multi-lesson pack correctly grants once per
+    # lesson, not once total.
+    if booking.kp_reward > 0:
+        from app.models.kp import KpSource
+        from app.services.kp import award_kp
+        award_kp(
+            session.student_id, booking.kp_reward, KpSource.lesson,
+            "Séance terminée", db,
+            ref_type="booking_completed", ref_id=session.id,
+        )
+
     log_audit(
         db, session_id=session.id, booking_id=session.booking_id,
         actor_user_id=None, actor_ip=None, action="payment_credited",
-        metadata={"amount": payout},
+        metadata={"amount": payout, "gross": gross, "commission": commission},
     )
     _notify(
         db, session.teacher_id, "💰 Paiement crédité",
