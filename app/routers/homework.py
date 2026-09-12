@@ -17,6 +17,9 @@ from app.schemas.homework import (
     HomeworkGradeRequest,
     HomeworkResponse,
     HomeworkSubmitRequest,
+    HwFileOut,
+    HwGradeOut,
+    HwSubmissionOut,
 )
 from app.services.kp import award_kp, KpSource
 
@@ -35,14 +38,69 @@ def _resolve_subject_name(db: Session, hw: Homework) -> Optional[str]:
     return None
 
 
-def _to_response(db: Session, hw: Homework) -> HomeworkResponse:
+def _parse_files(raw) -> List[HwFileOut]:
+    if not raw:
+        return []
+    try:
+        return [HwFileOut(**f) if isinstance(f, dict) else f for f in raw]
+    except Exception:
+        return []
+
+
+def _to_response(
+    db: Session,
+    hw: Homework,
+    *,
+    student_name: Optional[str] = None,
+    submission: Optional[HomeworkSubmission] = None,
+    grade: Optional[HomeworkGrade] = None,
+) -> HomeworkResponse:
+    """student_name/submission/grade can be pre-fetched (batch queries in
+    list_homework) or left None to be looked up here (get_homework, create,
+    update — single-row paths where a batch query would be overkill)."""
+    if student_name is None:
+        student = db.get(Profile, hw.student_id)
+        student_name = (student.full_name if student else None) or None
+
+    if submission is None:
+        submission = db.exec(
+            select(HomeworkSubmission).where(HomeworkSubmission.homework_id == hw.id)
+        ).first()
+    submission_data = (
+        HwSubmissionOut(
+            text=submission.text,
+            files=_parse_files(submission.files),
+            submitted_at=submission.submitted_at,
+        )
+        if submission
+        else None
+    )
+
+    if grade is None:
+        grade = db.exec(
+            select(HomeworkGrade).where(HomeworkGrade.homework_id == hw.id)
+        ).first()
+    grade_data = (
+        HwGradeOut(
+            score=grade.score,
+            feedback=grade.feedback,
+            files=_parse_files(grade.files),
+            kp_awarded=grade.kp_awarded,
+            graded_at=grade.graded_at,
+        )
+        if grade
+        else None
+    )
+
     return HomeworkResponse(
         id=hw.id, teacher_id=hw.teacher_id, student_id=hw.student_id,
+        student_name=student_name,
         session_id=hw.session_id, subject_name=_resolve_subject_name(db, hw),
         title=hw.title, statement=hw.statement, hints=hw.hints or [],
         due_at=hw.due_at, due_label=hw.due_label,
         status=hw.status.value if hasattr(hw.status, "value") else hw.status,
         kp_reward=hw.kp_reward, created_at=hw.created_at, updated_at=hw.updated_at,
+        submission=submission_data, grade=grade_data,
     )
 
 
@@ -76,8 +134,35 @@ def list_homework(
     offset = (page - 1) * size
     paginated = homeworks[offset: offset + size]
 
+    hw_ids = [h.id for h in paginated]
+    students_map: Dict[UUID, str] = {}
+    submissions_map: Dict[UUID, HomeworkSubmission] = {}
+    grades_map: Dict[UUID, HomeworkGrade] = {}
+    if hw_ids:
+        student_ids = list({h.student_id for h in paginated})
+        students = db.exec(select(Profile).where(Profile.id.in_(student_ids))).all()
+        students_map = {p.id: (p.full_name or "Élève") for p in students}
+
+        subs = db.exec(
+            select(HomeworkSubmission).where(HomeworkSubmission.homework_id.in_(hw_ids))
+        ).all()
+        submissions_map = {s.homework_id: s for s in subs}
+
+        grades = db.exec(
+            select(HomeworkGrade).where(HomeworkGrade.homework_id.in_(hw_ids))
+        ).all()
+        grades_map = {g.homework_id: g for g in grades}
+
     return {
-        "items": [_to_response(db, h) for h in paginated],
+        "items": [
+            _to_response(
+                db, h,
+                student_name=students_map.get(h.student_id),
+                submission=submissions_map.get(h.id),
+                grade=grades_map.get(h.id),
+            )
+            for h in paginated
+        ],
         "total": total,
         "page": page,
         "size": size,

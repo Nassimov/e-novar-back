@@ -24,10 +24,32 @@ class HomeworkCreate(BaseModel):
     kp_reward: int = Field(default=50, ge=0, le=500)
 
 
+class HwFileOut(BaseModel):
+    name: str
+    size: int = 0
+    type: str = ""
+    url: Optional[str] = None
+
+
+class HwSubmissionOut(BaseModel):
+    text: Optional[str] = None
+    files: List[HwFileOut] = []
+    submitted_at: datetime
+
+
+class HwGradeOut(BaseModel):
+    score: float
+    feedback: Optional[str] = None
+    files: List[HwFileOut] = []
+    kp_awarded: int = 0
+    graded_at: datetime
+
+
 class HomeworkResponse(BaseModel):
     id: UUID
     teacher_id: UUID
     student_id: UUID
+    student_name: Optional[str] = None
     session_id: Optional[UUID] = None
     subject_name: Optional[str] = None
     title: str
@@ -39,6 +61,8 @@ class HomeworkResponse(BaseModel):
     kp_reward: int
     created_at: datetime
     updated_at: Optional[datetime] = None
+    submission: Optional[HwSubmissionOut] = None
+    grade: Optional[HwGradeOut] = None
 
     model_config = {"from_attributes": True}
 
