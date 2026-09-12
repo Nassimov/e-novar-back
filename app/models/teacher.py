@@ -3,6 +3,3 @@ from app.models.catalog import TeacherDiploma  # noqa: F401
 from app.models.payment import TeacherPayout  # noqa: F401
 from app.models.profile import TeacherProfile  # noqa: F401
 from app.models.scheduling import TeacherSlot  # noqa: F401
-
-# Legacy alias
-TeacherWithdrawal = TeacherPayout

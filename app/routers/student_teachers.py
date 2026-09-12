@@ -1567,6 +1567,11 @@ def book_teacher_slot(
         ).first()
         subject_price = tsp.price_single if tsp else 0
 
+    # Resolve the final hourly rate per the priority documented above:
+    # slot-level price, then per-subject/level price, then the teacher's
+    # generic default rate — whichever is the first non-zero one.
+    price_single = slot_price or subject_price or tp.price_per_session
+
     # price_single is the teacher's HOURLY rate — a booking's amount is
     # always price_single * (that leg's own duration in hours), never a
     # flat per-session figure, so a 1h/2h/3h selection (see the

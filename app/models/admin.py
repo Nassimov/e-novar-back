@@ -282,7 +282,6 @@ class PlatformSettings(SQLModel, table=True):
     competitive_ranked_min_ep_balance: int = Field(default=0)
     competitive_ranked_require_phone_verified: bool = Field(default=False)
     competitive_ranked_require_email_verified: bool = Field(default=False)
-    competitive_promotion_series_enabled: bool = Field(default=False)
 
     # Phase 14 — Achievements, Titles, Cosmetics & Player Progression (migration 094).
     competitive_badge_showcase_max: int = Field(default=6)

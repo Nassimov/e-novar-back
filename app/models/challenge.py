@@ -10,8 +10,3 @@ from app.models.gamification import (  # noqa: F401
     ChallengeParticipation,
     UserBadge,
 )
-
-# Legacy aliases
-ChallengeDef = Challenge
-ChallengeSubmission = ChallengeParticipation
-ChallengeSubmissionStatus = ChallengeStatus

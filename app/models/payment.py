@@ -124,6 +124,3 @@ class TeacherPayout(SQLModel, table=True):
     requested_at: datetime = Field(default_factory=datetime.utcnow)
     processed_at: Optional[datetime] = Field(default=None)
 
-
-# Legacy aliases — kept for import compatibility during transition
-Withdrawal = TeacherPayout

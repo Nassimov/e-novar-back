@@ -10,7 +10,9 @@ Architecture notes:
 - full_name     = PostgreSQL GENERATED ALWAYS AS column (read-only)
 - JSONB/ARRAY   = PostgreSQL native types; psycopg2 handles serialization
 - Circular FK   = bookings.payment_id <-> payments.id is DB-level only
-- Triggers      = apply_kp_transaction, handle_homework_grade, etc. live in Supabase
+- Triggers      = apply_kp_transaction, etc. live in Supabase (handle_homework_grade
+                  and handle_booking_completed were removed — migrations 109/110 — the
+                  KP grants they made now happen in Python instead, see app/services/kp.py)
 """
 
 from app.models.enums import (  # noqa: F401
@@ -96,7 +98,6 @@ from app.models.payment import (  # noqa: F401
     Payment,
     PaymentMethod,
     TeacherPayout,
-    Withdrawal,  # legacy alias → TeacherPayout
 )
 
 # Live classroom
