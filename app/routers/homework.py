@@ -223,6 +223,33 @@ def create_homework(
         if session is None or session.teacher_id != teacher.id or session.student_id != payload.student_id:
             raise HTTPException(status_code=400, detail="Session invalide pour cet élève")
 
+    # Admin-configurable homework rules (migration 113) — previously a
+    # hardcoded le=500 cap with no daily-volume limit at all.
+    from app.services.pricing import get_platform_settings
+    platform_settings = get_platform_settings(db)
+    if payload.kp_reward > platform_settings.homework_kp_reward_max:
+        raise HTTPException(
+            status_code=422,
+            detail=f"La récompense EP ne peut pas dépasser {platform_settings.homework_kp_reward_max} pour un devoir.",
+        )
+
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    homeworks_today = db.exec(
+        select(Homework).where(
+            Homework.teacher_id == teacher.id,
+            Homework.student_id == payload.student_id,
+            Homework.created_at >= today_start,
+        )
+    ).all()
+    if len(homeworks_today) >= platform_settings.homework_max_per_student_per_day:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Vous avez déjà assigné {len(homeworks_today)} devoir(s) à cet élève aujourd'hui "
+                f"(maximum {platform_settings.homework_max_per_student_per_day} par jour)."
+            ),
+        )
+
     hw = Homework(
         teacher_id=teacher.id,
         student_id=payload.student_id,

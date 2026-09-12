@@ -21,7 +21,11 @@ class HomeworkCreate(BaseModel):
     hints: List[str] = []
     due_at: Optional[datetime] = None
     due_label: Optional[str] = None
-    kp_reward: int = Field(default=50, ge=0, le=500)
+    # Sanity ceiling only — the real, admin-configurable cap
+    # (PlatformSettings.homework_kp_reward_max, migration 113) is enforced
+    # in app/routers/homework.py's create_homework, since a static schema
+    # bound can't read DB config.
+    kp_reward: int = Field(default=50, ge=0, le=5000)
 
 
 class HwFileOut(BaseModel):

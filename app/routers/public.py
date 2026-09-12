@@ -75,6 +75,27 @@ def get_public_booking_policy(response: Response, db: Session = Depends(get_db))
     return BookingPolicyPublic(**cached_json("public:booking-policy", _SETTINGS_TTL, _load))
 
 
+class HomeworkPolicyPublic(BaseModel):
+    homework_kp_reward_max: int
+    homework_max_per_student_per_day: int
+
+
+@router.get("/homework-policy", response_model=HomeworkPolicyPublic)
+def get_public_homework_policy(response: Response, db: Session = Depends(get_db)):
+    """Homework limits shown to the teacher when assigning one (max EP
+    input bound, daily-count hint) — admin-configurable in
+    app/routers/admin/settings.py, enforced in
+    app/routers/homework.py's create_homework."""
+    response.headers["Cache-Control"] = f"public, max-age={_SETTINGS_TTL}"
+    def _load():
+        settings = get_platform_settings(db)
+        return {
+            "homework_kp_reward_max": settings.homework_kp_reward_max,
+            "homework_max_per_student_per_day": settings.homework_max_per_student_per_day,
+        }
+    return HomeworkPolicyPublic(**cached_json("public:homework-policy", _SETTINGS_TTL, _load))
+
+
 class BankTransferInfoPublic(BaseModel):
     beneficiary_name: str
     rib_cib: Optional[str] = None

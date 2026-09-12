@@ -255,3 +255,12 @@ class KpEconomySettings(BaseModel):
         if v and any(cap < 0 for cap in v.values()):
             raise ValueError("Un plafond EP quotidien ne peut pas être négatif.")
         return v
+
+
+class HomeworkSettings(BaseModel):
+    """Migration 113 — previously a hardcoded `le=500` in
+    app/schemas/homework.py (HomeworkCreate.kp_reward) with no admin
+    control, and no daily-volume limit at all. Enforced in
+    app/routers/homework.py's create_homework."""
+    homework_kp_reward_max: int = Field(ge=1, le=5000)
+    homework_max_per_student_per_day: int = Field(ge=1, le=100)

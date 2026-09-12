@@ -344,6 +344,14 @@ class PlatformSettings(SQLModel, table=True):
     # Monitoring-only (Point 5.3) — never auto-blocks, see GET /admin/kp/suspicious.
     kp_suspicious_daily_threshold: int = Field(default=1000)
 
+    # Homework rules (migration 113) — previously a hardcoded `le=500` in
+    # app/schemas/homework.py with zero admin control, and no daily-volume
+    # limit at all (a teacher could assign unlimited homeworks to the same
+    # student in one day). Enforced in app/routers/homework.py's
+    # create_homework.
+    homework_kp_reward_max: int = Field(default=500)
+    homework_max_per_student_per_day: int = Field(default=3)
+
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

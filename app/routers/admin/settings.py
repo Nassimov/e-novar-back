@@ -13,6 +13,7 @@ from app.schemas.admin import (
     BankTransferSettings,
     BookingPolicySettings,
     CompetitiveArenaSettings,
+    HomeworkSettings,
     KpEconomySettings,
     PlatformPricingSettings,
 )
@@ -203,6 +204,41 @@ def update_bank_transfer_settings(
     db.refresh(settings)
     cache_invalidate("public:bank-transfer-info")
     return _serialize_bank_transfer(settings)
+
+
+def _serialize_homework(s: PlatformSettings) -> dict:
+    return {
+        "homework_kp_reward_max": s.homework_kp_reward_max,
+        "homework_max_per_student_per_day": s.homework_max_per_student_per_day,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/homework")
+def get_homework_settings(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    return _serialize_homework(get_platform_settings(db))
+
+
+@router.put("/homework")
+def update_homework_settings(
+    body: HomeworkSettings,
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    settings = db.get(PlatformSettings, True)
+    if settings is None:
+        settings = PlatformSettings(id=True)
+        db.add(settings)
+    settings.homework_kp_reward_max = body.homework_kp_reward_max
+    settings.homework_max_per_student_per_day = body.homework_max_per_student_per_day
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settings)
+    cache_invalidate("public:homework-policy")
+    return _serialize_homework(settings)
 
 
 def _serialize_competitive(s: PlatformSettings) -> dict:
