@@ -353,6 +353,7 @@ def grade_homework(
         score=payload.score,
         feedback=payload.feedback,
         kp_awarded=kp_earned,
+        files=[f.model_dump(exclude_none=True) for f in payload.files],
     )
     db.add(grade)
 

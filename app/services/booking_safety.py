@@ -50,6 +50,12 @@ TEACHER_STRIKE_WEIGHTS = {
 
 STUDENT_STRIKE_WEIGHTS = {
     "student_no_show": 1,
+    # A teacher can only file this once the student's own validation window
+    # has already lapsed AND an admin has independently confirmed the
+    # session really happened (see app/routers/admin/session_validation.py's
+    # approve_validation) — same weight as a no-show since both mean the
+    # student's own inaction cost the teacher a payout delay.
+    "student_validation_neglect": 1,
 }
 
 

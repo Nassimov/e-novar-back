@@ -139,6 +139,22 @@ def approve_validation(
     db.flush()
 
     credit_session_payout(db, session, sv)
+
+    # A teacher only files a 'student_validation_neglect' report once the
+    # student's own validation window has already lapsed (see
+    # app/routers/session_validation.py's dispute_session) — an admin
+    # approving it means they've independently confirmed the session really
+    # happened. That's the one thing that actually differentiates "student
+    # was genuinely busy once" from "student is repeatedly paralyzing the
+    # validation workflow" — hence a strike here, not at report-filing time
+    # (which would be a strike on a mere unverified accusation).
+    if sv.dispute_reason_code == "student_validation_neglect":
+        from app.services.booking_safety import apply_student_strike
+        apply_student_strike(
+            db, sv.student_id, "student_validation_neglect",
+            human_label="N'a pas validé une séance confirmée par l'administration comme s'étant bien déroulée.",
+        )
+
     log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=admin_id,
               actor_ip=None, action="admin_approved", metadata={"note": body.note})
     db.commit()

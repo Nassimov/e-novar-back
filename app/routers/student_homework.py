@@ -360,6 +360,23 @@ def student_submit_homework(
     db.add(hw)
     db.commit()
 
+    student = db.get(Profile, uid)
+    student_name = student.full_name if student and student.full_name else "Un élève"
+    # title_override/body_override bypass NotificationTemplate entirely
+    # (see app/services/notification_engine.py's _emit_inner — without a
+    # seeded template row for this event_type, emit() would otherwise
+    # silently no-op) — same pattern app/services/session_validation.py's
+    # _notify() uses throughout.
+    from app.services.notification_engine import emit
+    emit(
+        db, event_type="homework_submitted", user_id=hw.teacher_id,
+        title_override="📩 Devoir soumis",
+        body_override=f"{student_name} a soumis sa réponse au devoir « {hw.title} ».",
+        deep_link_override="/teacher/homework",
+        data={"homework_id": str(hw.id)},
+        dedup_key=f"homework_submitted:{hw.id}",
+    )
+
     return {"message": "Devoir soumis avec succès"}
 
 

@@ -343,6 +343,16 @@ def teacher_confirm_session(
 
 
 _AUTO_RESOLVABLE_REASON_CODES = ("student_absent", "teacher_absent")
+# 'student_validation_neglect': the teacher reports that a session genuinely
+# happened but the student never validated it (only usable once the window
+# has actually lapsed — sv.status == "expired", see the check below) —
+# deliberately NOT auto-resolvable (there's nothing for the student to
+# "counter": either they validate, which they no longer can once expired, or
+# they don't — an admin has to judge whether the teacher's account of the
+# session holds up). If approved, the student takes a strike for repeatedly
+# forcing this path (see app/routers/admin/session_validation.py's
+# approve_validation).
+_RECOGNIZED_REASON_CODES = _AUTO_RESOLVABLE_REASON_CODES + ("student_validation_neglect",)
 
 
 @router.post("/{session_id}/validation/dispute")
@@ -370,6 +380,10 @@ async def dispute_session(
     disputed, that's treated as a counter — contested claims always go to
     a human (admin_review), never auto-resolve.
 
+    reason_code 'student_validation_neglect' (teacher only, sv.status ==
+    'expired' only): "the session happened, my student just never
+    validated it" — routed straight to a human, no auto-resolve timer.
+
     Only usable on a CONFIRMED (paid/accepted) booking — disputing
     attendance on a booking nobody ever confirmed would let either party
     manufacture a payout/refund/strike out of nothing (there's no real
@@ -381,14 +395,22 @@ async def dispute_session(
     if sv.status in ("approved", "rejected", "cancelled"):
         raise HTTPException(status_code=409, detail=f"Cannot dispute a session in status '{sv.status}'")
 
-    normalized_reason_code = reason_code if reason_code in _AUTO_RESOLVABLE_REASON_CODES else None
+    normalized_reason_code = reason_code if reason_code in _RECOGNIZED_REASON_CODES else None
+    if normalized_reason_code == "student_validation_neglect":
+        if not is_teacher:
+            raise HTTPException(status_code=403, detail="Seul le professeur peut signaler ce cas")
+        if sv.status != "expired":
+            raise HTTPException(
+                status_code=409,
+                detail="Ce signalement n'est possible qu'une fois le délai de validation de l'élève dépassé.",
+            )
     if normalized_reason_code:
         from app.models.booking import Booking
         booking = db.get(Booking, session.booking_id) if session.booking_id else None
         if booking is None or booking.status != "confirmed":
             raise HTTPException(
                 status_code=409,
-                detail="Cette réservation n'est pas confirmée — impossible de signaler une absence dessus.",
+                detail="Cette réservation n'est pas confirmée — impossible de signaler ceci dessus.",
             )
 
     from app.services.storage import (
@@ -430,7 +452,11 @@ async def dispute_session(
         db.add(sv)
         action = "dispute_countered"
     else:
-        sv.status = "disputed"
+        # A validation-neglect report has no counter-claim to wait on (the
+        # student either validates — no longer possible once expired — or
+        # doesn't) — send it straight to a human instead of sitting in
+        # "disputed" as if the other party might still respond.
+        sv.status = "admin_review" if normalized_reason_code == "student_validation_neglect" else "disputed"
         sv.dispute_reason = reason
         sv.dispute_comment = comment or None
         sv.dispute_attachments = attachment_urls
@@ -438,7 +464,7 @@ async def dispute_session(
         sv.dispute_reason_code = normalized_reason_code
         sv.dispute_filed_by = sv.dispute_filed_by or uid
         sv.updated_at = now
-        if normalized_reason_code:
+        if normalized_reason_code in _AUTO_RESOLVABLE_REASON_CODES:
             settings = get_platform_settings(db)
             sv.dispute_auto_resolve_at = now + timedelta(hours=settings.in_person_dispute_auto_resolve_hours)
         db.add(sv)
@@ -469,6 +495,12 @@ async def dispute_session(
             _notify(db, original_filer, "Ton signalement a été contesté",
                     "L'autre partie a contesté ton signalement — un administrateur va trancher.",
                     {"session_id": str(session.id)})
+    elif normalized_reason_code == "student_validation_neglect":
+        _notify(db, session.student_id, "⚠️ Ton professeur a signalé une séance non validée",
+                "Ton professeur a signalé à l'administration que la séance a bien eu lieu mais que tu ne "
+                "l'as jamais validée. Un administrateur va vérifier — répète-le trop souvent et ton compte "
+                "pourra être limité.",
+                {"session_id": str(session.id)})
     elif normalized_reason_code:
         accused_id = session.teacher_id if uid == session.student_id else session.student_id
         deadline_hours = get_platform_settings(db).in_person_dispute_auto_resolve_hours

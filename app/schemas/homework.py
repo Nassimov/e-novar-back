@@ -72,7 +72,15 @@ class HomeworkSubmitRequest(BaseModel):
     attachment_url: Optional[str] = None
 
 
+class HwFileIn(BaseModel):
+    name: str
+    size: int = 0
+    type: str = ""
+    url: Optional[str] = None
+
+
 class HomeworkGradeRequest(BaseModel):
     score: float = Field(ge=0.0, le=20.0)
     feedback: Optional[str] = None
     kp_awarded: Optional[int] = Field(default=None, ge=0)  # if None, use homework.kp_reward
+    files: List[HwFileIn] = []

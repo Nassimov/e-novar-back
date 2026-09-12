@@ -1797,6 +1797,8 @@ def get_my_student_detail(
     from collections import Counter
 
     from app.models.booking import TutoringSession
+    from app.models.evaluation import Evaluation
+    from app.models.gamification import Badge, UserBadge
     from app.models.parent_link import ParentStudentLink
     from app.models.profile import StudentProfile
 
@@ -1842,6 +1844,39 @@ def get_my_student_detail(
     ).first()
     parent_profile = db.get(Profile, parent_link.parent_id) if parent_link else None
 
+    # This teacher's own evaluation "note" for this student — same
+    # computation as students-overview above. Not a public rating: students
+    # are never rated by teachers via app.models.review.Review (that
+    # direction only ever goes student -> teacher).
+    evals = db.exec(
+        select(Evaluation)
+        .where(Evaluation.teacher_id == teacher_id, Evaluation.student_id == student_id)
+        .order_by(Evaluation.created_at.asc())
+    ).all()
+    eval_scores = [e.score_global for e in evals if e.score_global is not None]
+    progress = round((sum(eval_scores) / len(eval_scores)) / 20 * 100) if eval_scores else 0
+    trend = "flat"
+    if len(eval_scores) >= 2:
+        if eval_scores[-1] > eval_scores[-2]:
+            trend = "up"
+        elif eval_scores[-1] < eval_scores[-2]:
+            trend = "down"
+
+    # Achievements — this student's unlocked badges (student-facing
+    # catalogue only; a teacher's own audience="teacher" trophies never
+    # apply to a student).
+    unlocked = db.exec(
+        select(UserBadge, Badge)
+        .join(Badge, Badge.id == UserBadge.badge_id)  # type: ignore[arg-type]
+        .where(UserBadge.user_id == student_id, Badge.audience.in_(["student", "both"]))
+        .order_by(UserBadge.unlocked_at.desc())
+    ).all()
+    total_badges_count = len(
+        db.exec(
+            select(Badge).where(Badge.active == True, Badge.audience.in_(["student", "both"]))  # noqa: E712
+        ).all()
+    )
+
     return {
         "student_id": str(student_id),
         "full_name": profile.full_name or "—",
@@ -1854,6 +1889,21 @@ def get_my_student_detail(
         "parent_name": parent_profile.full_name if parent_profile else None,
         "parent_phone": parent_profile.phone if parent_profile else None,
         "student_phone": profile.phone,
+        "progress": progress,
+        "trend": trend,
+        "badges": [
+            {
+                "id": b.id,
+                "name": b.name,
+                "icon": b.icon,
+                "tier": b.tier,
+                "category": b.category,
+                "unlocked_at": ub.unlocked_at.isoformat(),
+            }
+            for ub, b in unlocked
+        ],
+        "badges_unlocked_count": len(unlocked),
+        "badges_total_count": total_badges_count,
         "sessions": [
             {
                 "id": str(s.id),
