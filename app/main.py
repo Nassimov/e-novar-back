@@ -346,6 +346,7 @@ from app.routers.admin.bookings import router as admin_bookings_router
 from app.routers.admin.settings import router as admin_settings_router
 from app.routers.admin.session_validation import router as admin_session_validation_router
 from app.routers.admin.notification_campaigns import router as admin_campaigns_router
+from app.routers.admin.notification_failures import router as admin_notification_failures_router
 from app.routers.admin.competitive import router as admin_competitive_router
 from app.routers.promos import router as promos_router
 from app.routers.public import router as public_router
@@ -425,6 +426,7 @@ app.include_router(admin_session_validation_router, prefix="/api/admin/session-v
 app.include_router(store_router,            prefix="/api/store",            tags=["Store"])
 app.include_router(admin_store_router,      prefix="/api/admin/store",      tags=["Admin — Store"])
 app.include_router(admin_campaigns_router,  prefix="/api/admin/campaigns",  tags=["Admin — Notification Campaigns"])
+app.include_router(admin_notification_failures_router, prefix="/api/admin/notification-failures", tags=["Admin — Notification Failures"])
 app.include_router(admin_competitive_router, prefix="/api/admin/competitive", tags=["Admin — Competitive"])
 app.include_router(competitive_matches_router,     prefix="/api/competitive", tags=["Competitive"])
 app.include_router(competitive_lobby_router,       prefix="/api/competitive", tags=["Competitive"])

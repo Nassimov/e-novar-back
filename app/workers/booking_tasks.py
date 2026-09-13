@@ -99,26 +99,60 @@ def task_auto_cancel_unanswered_bookings() -> Dict[str, int]:
                 for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
                     emit(
                         db, event_type="system", user_id=ar.user_id,
-                        title_override="⚠️ Remboursement Edahabia manuel requis",
-                        body_override=(
-                            f"Réservation auto-annulée (professeur sans réponse) déjà payée en "
-                            f"Edahabia ({booking.amount} DA) — remboursement manuel requis."
-                        ),
+                        title_i18n={
+                            "fr": "⚠️ Remboursement Edahabia manuel requis",
+                            "en": "⚠️ Manual Edahabia refund required",
+                            "ar": "⚠️ يتطلب استرجاع يدوي عبر Edahabia",
+                            "tm": "⚠️ Yesra tuɣalin s ufus s Edahabia",
+                        },
+                        body_i18n={
+                            "fr": (
+                                f"Réservation auto-annulée (professeur sans réponse) déjà payée en "
+                                f"Edahabia ({booking.amount} DA) — remboursement manuel requis."
+                            ),
+                            "en": (
+                                f"Auto-cancelled booking (teacher didn't respond) already paid via "
+                                f"Edahabia ({booking.amount} DZD) — manual refund required."
+                            ),
+                            "ar": (
+                                f"حجز أُلغي تلقائيًا (الأستاذ لم يرد) وتم دفعه مسبقًا عبر Edahabia "
+                                f"({booking.amount} دج) — يتطلب استرجاع يدوي."
+                            ),
+                            "tm": (
+                                f"Aḥerz yettwasefsex s wudem awurman (aselmad ur d-yerri ara) yettwaxlaṣ yakan s "
+                                f"Edahabia ({booking.amount} DA) — yesra tuɣalin s ufus."
+                            ),
+                        },
                         data={"booking_id": str(booking.id)},
                         dedup_key=f"edahabia_refund_needed:{booking.id}:{ar.user_id}",
                     )
 
             emit(
                 db, event_type="booking_cancelled_timeout", user_id=booking.student_id,
-                title_override="Réservation annulée automatiquement",
-                body_override="Le professeur n'a pas répondu à temps à ta demande. Ta réservation a été annulée et tu n'as pas été débité·e.",
+                title_i18n={
+                    "fr": "Réservation annulée automatiquement",
+                    "en": "Booking automatically cancelled",
+                    "ar": "تم إلغاء الحجز تلقائيًا",
+                    "tm": "Aḥerz yettwasefsex s wudem awurman",
+                },
+                body_i18n={
+                    "fr": "Le professeur n'a pas répondu à temps à ta demande. Ta réservation a été annulée et tu n'as pas été débité·e.",
+                    "en": "The teacher didn't respond to your request in time. Your booking was cancelled and you were not charged.",
+                    "ar": "لم يرد الأستاذ على طلبك في الوقت المحدد. تم إلغاء حجزك ولم يتم خصم أي مبلغ منك.",
+                    "tm": "Aselmad ur d-yerri ara ɣef unadi-inek/inem deg lawan. Aḥerz-ik/inem yettwasefsex, ur ak/akem-nekkis idrimen.",
+                },
                 data={"booking_id": str(booking.id)},
                 dedup_key=f"booking_cancelled_timeout:{booking.id}",
             )
 
             apply_teacher_strike(
                 db, booking.teacher_id, "no_response",
-                human_label=f"Tu n'as pas répondu à une demande de réservation dans les {timeout_hours}h.",
+                human_label_i18n={
+                    "fr": f"Tu n'as pas répondu à une demande de réservation dans les {timeout_hours}h.",
+                    "en": f"You didn't respond to a booking request within {timeout_hours}h.",
+                    "ar": f"لم ترد على طلب حجز خلال {timeout_hours} ساعة.",
+                    "tm": f"Ur d-terriḍ ara ɣef unadi n uḥerz deg {timeout_hours}h.",
+                },
             )
 
             cancelled += 1
@@ -159,8 +193,18 @@ def task_reinstate_expired_teacher_suspensions() -> Dict[str, int]:
             db.commit()
             emit(
                 db, event_type="teacher_reinstated", user_id=tp.user_id,
-                title_override="Compte réactivé",
-                body_override="Ta suspension automatique est terminée — ton compte est de nouveau actif.",
+                title_i18n={
+                    "fr": "Compte réactivé",
+                    "en": "Account reinstated",
+                    "ar": "تمت إعادة تفعيل الحساب",
+                    "tm": "Amiḍan yuɣal-d",
+                },
+                body_i18n={
+                    "fr": "Ta suspension automatique est terminée — ton compte est de nouveau actif.",
+                    "en": "Your automatic suspension has ended — your account is active again.",
+                    "ar": "انتهى إيقافك التلقائي — حسابك نشط من جديد.",
+                    "tm": "Aḥbas-ik/inem awurman yekfa — amiḍan-ik/inem yuɣal-d yermed.",
+                },
                 dedup_key=f"teacher_reinstated:{tp.user_id}:{now.date()}",
             )
             reinstated += 1
@@ -236,14 +280,30 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
             )
             apply_cancellation_side_effects(db, booking, reason="teacher_no_response")
 
+            body_i18n = (
+                {
+                    "fr": "Le professeur ne s'est pas connecté à ta séance. Tu as été remboursé·e intégralement.",
+                    "en": "The teacher didn't join your lesson. You were fully refunded.",
+                    "ar": "لم يتصل الأستاذ بحصتك. تم استرجاع كامل المبلغ.",
+                    "tm": "Aselmad ur d-yeqqin ara ɣer tiɣimit-ik/inem. Tettwarreḍ-d s lekmal.",
+                }
+                if refund_result["refunded"] else
+                {
+                    "fr": "Le professeur ne s'est pas connecté à ta séance. Ton remboursement est en cours de traitement.",
+                    "en": "The teacher didn't join your lesson. Your refund is being processed.",
+                    "ar": "لم يتصل الأستاذ بحصتك. جارٍ معالجة استرجاع مبلغك.",
+                    "tm": "Aselmad ur d-yeqqin ara ɣer tiɣimit-ik/inem. Tuɣalin n idrimen-ik/inem tettwaxdem tura.",
+                }
+            )
             emit(
                 db, event_type="session_no_show", user_id=session.student_id,
-                title_override="Séance non honorée par le professeur",
-                body_override=(
-                    "Le professeur ne s'est pas connecté à ta séance. Tu as été remboursé·e intégralement."
-                    if refund_result["refunded"] else
-                    "Le professeur ne s'est pas connecté à ta séance. Ton remboursement est en cours de traitement."
-                ),
+                title_i18n={
+                    "fr": "Séance non honorée par le professeur",
+                    "en": "Lesson not honored by the teacher",
+                    "ar": "لم يلتزم الأستاذ بالحصة",
+                    "tm": "Tiɣimit ur tettwaḍfar ara sɣur uselmad",
+                },
+                body_i18n=body_i18n,
                 data={"session_id": str(session.id)},
                 dedup_key=f"session_no_show:{session.id}",
             )
@@ -253,7 +313,12 @@ def task_detect_online_teacher_no_show() -> Dict[str, int]:
                 struck_incidents.add(incident_key)
                 apply_teacher_strike(
                     db, session.teacher_id, "teacher_no_show",
-                    human_label="Tu ne t'es pas connecté·e à une séance confirmée.",
+                    human_label_i18n={
+                        "fr": "Tu ne t'es pas connecté·e à une séance confirmée.",
+                        "en": "You didn't join a confirmed lesson.",
+                        "ar": "لم تتصل بحصة مؤكدة.",
+                        "tm": "Ur d-teqqineḍ ara ɣer tiɣimit yettwasenteḍen.",
+                    },
                 )
 
             flagged += 1
@@ -327,15 +392,30 @@ def task_detect_online_student_no_show() -> Dict[str, int]:
 
             emit(
                 db, event_type="session_student_no_show", user_id=session.teacher_id,
-                title_override="Élève absent",
-                body_override="L'élève ne s'est pas connecté à la séance. Tu es payé·e normalement — ce n'est pas ta faute.",
+                title_i18n={
+                    "fr": "Élève absent",
+                    "en": "Student absent",
+                    "ar": "غياب التلميذ",
+                    "tm": "Anelmad ur d-yusi ara",
+                },
+                body_i18n={
+                    "fr": "L'élève ne s'est pas connecté à la séance. Tu es payé·e normalement — ce n'est pas ta faute.",
+                    "en": "The student didn't join the lesson. You are paid as usual — this isn't your fault.",
+                    "ar": "لم يتصل التلميذ بالحصة. تتقاضى أجرك كالعادة — ليس هذا خطأك.",
+                    "tm": "Anelmad ur d-yeqqin ara ɣer tiɣimit. Tettwaxelseḍ akken tettwalin — mačči d ddnub-ik/inem.",
+                },
                 data={"session_id": str(session.id)},
                 dedup_key=f"session_student_no_show:{session.id}",
             )
 
             apply_student_strike(
                 db, session.student_id, "student_no_show",
-                human_label="Tu ne t'es pas connecté·e à une séance confirmée.",
+                human_label_i18n={
+                    "fr": "Tu ne t'es pas connecté·e à une séance confirmée.",
+                    "en": "You didn't join a confirmed lesson.",
+                    "ar": "لم تتصل بحصة مؤكدة.",
+                    "tm": "Ur d-teqqineḍ ara ɣer tiɣimit yettwasenteḍen.",
+                },
             )
 
             flagged += 1
@@ -435,8 +515,18 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                     for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
                         emit(
                             db, event_type="dispute_gps_contradiction_admin_alert", user_id=ar.user_id,
-                            title_override="Litige contredit par le GPS — décision requise",
-                            body_override=sv.admin_review_note,
+                            title_i18n={
+                                "fr": "Litige contredit par le GPS — décision requise",
+                                "en": "Dispute contradicted by GPS — decision required",
+                                "ar": "تناقض في النزاع بحسب GPS — يتطلب قرارًا",
+                                "tm": "Amennuɣ yemgirred akked GPS — yesra tasuret",
+                            },
+                            body_i18n={
+                                "fr": sv.admin_review_note or "",
+                                "en": f"Both parties' GPS positions match (~{round(dist)}m apart), contradicting the absence report.",
+                                "ar": f"مواقع GPS للطرفين متطابقة (~{round(dist)} م فرق)، ما يناقض بلاغ الغياب.",
+                                "tm": f"Imukan GPS n snat n yiḍfaren mṣadan (~{round(dist)}m gar-asen), ayagi yemgirred akked uneqqis n tuɣalin.",
+                            },
                             data={"session_id": str(session.id)},
                             dedup_key=f"dispute_gps_contradiction:{sv.id}:{ar.user_id}",
                         )
@@ -456,14 +546,29 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
 
                 emit(
                     db, event_type="session_student_no_show", user_id=session.teacher_id,
-                    title_override="Absence élève confirmée",
-                    body_override="Ton signalement n'a pas été contesté — tu es payé·e normalement.",
+                    title_i18n={
+                        "fr": "Absence élève confirmée",
+                        "en": "Student absence confirmed",
+                        "ar": "تأكد غياب التلميذ",
+                        "tm": "Tuɣalin n unelmad tettwasenteḍ",
+                    },
+                    body_i18n={
+                        "fr": "Ton signalement n'a pas été contesté — tu es payé·e normalement.",
+                        "en": "Your report was not contested — you are paid as usual.",
+                        "ar": "لم يُعترض على بلاغك — تتقاضى أجرك كالعادة.",
+                        "tm": "Aneqqis-ik/inem ur yettwanaḍar ara — tettwaxelseḍ akken tettwalin.",
+                    },
                     data={"session_id": str(session.id)},
                     dedup_key=f"dispute_resolved_student_absent:{sv.id}",
                 )
                 apply_student_strike(
                     db, session.student_id, "student_no_show",
-                    human_label="Une absence signalée par ton professeur n'a pas été contestée.",
+                    human_label_i18n={
+                        "fr": "Une absence signalée par ton professeur n'a pas été contestée.",
+                        "en": "An absence reported by your teacher was not contested.",
+                        "ar": "لم يتم الاعتراض على غياب أبلغ عنه أستاذك.",
+                        "tm": "Tuɣalin i d-yebbedd uselmad-ik ur tettwanaḍar ara.",
+                    },
                 )
 
             elif sv.dispute_reason_code == "teacher_absent":
@@ -486,8 +591,18 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                     )
                 emit(
                     db, event_type="session_no_show", user_id=session.student_id,
-                    title_override="Absence professeur confirmée",
-                    body_override="Ton signalement n'a pas été contesté — tu as été remboursé·e.",
+                    title_i18n={
+                        "fr": "Absence professeur confirmée",
+                        "en": "Teacher absence confirmed",
+                        "ar": "تأكد غياب الأستاذ",
+                        "tm": "Tuɣalin n uselmad tettwasenteḍ",
+                    },
+                    body_i18n={
+                        "fr": "Ton signalement n'a pas été contesté — tu as été remboursé·e.",
+                        "en": "Your report was not contested — you have been refunded.",
+                        "ar": "لم يُعترض على بلاغك — تم استرجاع مبلغك.",
+                        "tm": "Aneqqis-ik/inem ur yettwanaḍar ara — tettwarreḍ-d idrimen-ik/inem.",
+                    },
                     data={"session_id": str(session.id)},
                     dedup_key=f"dispute_resolved_teacher_absent:{sv.id}",
                 )
@@ -496,7 +611,12 @@ def task_auto_resolve_disputes() -> Dict[str, int]:
                     struck_incidents.add(incident_key)
                     apply_teacher_strike(
                         db, session.teacher_id, "teacher_no_show",
-                        human_label="Une absence signalée par ton élève n'a pas été contestée.",
+                        human_label_i18n={
+                            "fr": "Une absence signalée par ton élève n'a pas été contestée.",
+                            "en": "An absence reported by your student was not contested.",
+                            "ar": "لم يتم الاعتراض على غياب أبلغ عنه تلميذك.",
+                            "tm": "Tuɣalin i d-yebbedd unelmad-ik ur tettwanaḍar ara.",
+                        },
                     )
 
             resolved += 1
@@ -578,22 +698,60 @@ def task_expire_unconfirmed_manual_payments() -> Dict[str, int]:
 
             emit(
                 db, event_type="booking_cancelled_timeout", user_id=booking.student_id,
-                title_override="Réservation annulée — paiement non confirmé",
-                body_override=(
-                    f"Ton paiement {booking.payment_method} n'a pas été confirmé dans les délais. "
-                    "Ta réservation a été annulée. Si tu as déjà envoyé le paiement, contacte le support."
-                ),
+                title_i18n={
+                    "fr": "Réservation annulée — paiement non confirmé",
+                    "en": "Booking cancelled — payment unconfirmed",
+                    "ar": "تم إلغاء الحجز — لم يتم تأكيد الدفع",
+                    "tm": "Aḥerz yettwasefsex — axelaṣ ur yettwasenteḍ ara",
+                },
+                body_i18n={
+                    "fr": (
+                        f"Ton paiement {booking.payment_method} n'a pas été confirmé dans les délais. "
+                        "Ta réservation a été annulée. Si tu as déjà envoyé le paiement, contacte le support."
+                    ),
+                    "en": (
+                        f"Your {booking.payment_method} payment was not confirmed in time. "
+                        "Your booking was cancelled. If you already sent the payment, contact support."
+                    ),
+                    "ar": (
+                        f"لم يتم تأكيد دفعتك عبر {booking.payment_method} في الوقت المحدد. "
+                        "تم إلغاء حجزك. إذا كنت قد أرسلت الدفعة بالفعل، تواصل مع الدعم."
+                    ),
+                    "tm": (
+                        f"Axelaṣ-ik/inem {booking.payment_method} ur yettwasenteḍ ara deg lawan. "
+                        "Aḥerz-ik/inem yettwasefsex. Ma yella teznḍ yakan axelaṣ, nermes tallalt."
+                    ),
+                },
                 data={"booking_id": str(booking.id)},
                 dedup_key=f"manual_payment_expired:{booking.id}",
             )
             for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
                 emit(
                     db, event_type="manual_payment_expired_admin_alert", user_id=ar.user_id,
-                    title_override="Paiement manuel expiré sans traitement",
-                    body_override=(
-                        f"Réservation {booking.id} ({booking.payment_method}, {booking.amount} DA) auto-annulée "
-                        f"après {expiry_hours}h sans confirmation admin. Vérifiez qu'aucun virement réel n'a été reçu."
-                    ),
+                    title_i18n={
+                        "fr": "Paiement manuel expiré sans traitement",
+                        "en": "Manual payment expired unprocessed",
+                        "ar": "انتهت صلاحية دفعة يدوية دون معالجة",
+                        "tm": "Axelaṣ s ufus yemmuger lawan war axeddim",
+                    },
+                    body_i18n={
+                        "fr": (
+                            f"Réservation {booking.id} ({booking.payment_method}, {booking.amount} DA) auto-annulée "
+                            f"après {expiry_hours}h sans confirmation admin. Vérifiez qu'aucun virement réel n'a été reçu."
+                        ),
+                        "en": (
+                            f"Booking {booking.id} ({booking.payment_method}, {booking.amount} DZD) auto-cancelled "
+                            f"after {expiry_hours}h without admin confirmation. Check that no real transfer was received."
+                        ),
+                        "ar": (
+                            f"تم إلغاء الحجز {booking.id} ({booking.payment_method}، {booking.amount} دج) تلقائيًا "
+                            f"بعد {expiry_hours} ساعة دون تأكيد من الإدارة. تحقق من عدم استلام أي تحويل فعلي."
+                        ),
+                        "tm": (
+                            f"Aḥerz {booking.id} ({booking.payment_method}, {booking.amount} DA) yettwasefsex s wudem awurman "
+                            f"ticki {expiry_hours}h war asentem n unedbal. Senqed ma yella ulac azuzen n tidet i d-yewḍen."
+                        ),
+                    },
                     data={"booking_id": str(booking.id)},
                     dedup_key=f"manual_payment_expired_admin_alert:{booking.id}:{ar.user_id}",
                 )

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import logging
-import random
+import secrets
 import string
 from typing import Any, Dict, Optional
 from uuid import UUID
@@ -31,11 +32,17 @@ def get_or_create_profile(
     last_name: str = "",
     phone: Optional[str] = None,
     db: Session = None,
+    email_verified: bool = False,
 ) -> Profile:
     """
     Fetch the profile row for `supabase_id`.
     If the Supabase trigger didn't fire yet (edge case), insert a minimal profile.
     Always updates first_name / last_name / phone when provided.
+
+    email_verified: only applied to a NEWLY created profile — Google OAuth
+    callers pass True (Google already verified the address, no need for our
+    own email-link flow); the plain email/password register() flow leaves
+    this False so the new verify-email gate applies.
     """
     uid = UUID(supabase_id)
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
@@ -47,6 +54,7 @@ def get_or_create_profile(
             first_name=first_name or email.split("@")[0],
             last_name=last_name,
             phone=phone,
+            email_verified=email_verified,
         )
         db.add(profile)
         existing_role = db.exec(
@@ -88,25 +96,73 @@ def ensure_role(supabase_id: str, role: str, db: Session) -> None:
 
 
 def generate_otp_code(length: int = 6) -> str:
-    return "".join(random.choices(string.digits, k=length))
+    """Cryptographically random — this used to be `random.choices` (not
+    suitable for anything security-sensitive)."""
+    return "".join(secrets.choice(string.digits) for _ in range(length))
 
 
-def send_otp_email(email: str) -> str:
-    """Generate OTP, store in Redis with 10-min TTL, return the code."""
+def _hash_otp(code: str) -> str:
+    """Redis stores only this hash, never the plaintext code — a leaked
+    Redis snapshot/log line shouldn't hand out a live reset code."""
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
+def request_password_reset_code(email: str) -> None:
+    """Best-effort: if a profile with this email exists, generate a 6-digit
+    code, store its hash in Redis (10-min TTL), and email it. Silently
+    no-ops for an unregistered email — app/routers/auth.py's forgot_password
+    always returns the same generic message either way, so this never
+    reveals whether an address is registered."""
+    from sqlmodel import Session, select
+    from app.database import get_engine
+
+    with Session(get_engine()) as db:
+        profile = db.exec(select(Profile).where(Profile.email == email)).first()
+        if profile is None:
+            return
+
     code = generate_otp_code()
     redis = get_redis_client()
-    redis.setex(f"otp:{email}", 600, code)
-    return code
+    redis.setex(f"otp:{email}", 600, _hash_otp(code))
+
+    from app.workers.email_tasks import send_password_reset_code_email
+    send_password_reset_code_email.delay(email, code)
 
 
-def verify_otp(email: str, code: str) -> bool:
-    """Verify OTP and delete on success."""
+def verify_otp(email: str, code: str) -> Optional[str]:
+    """Verify the emailed code (single-use — deleted from Redis on match).
+    Returns a short-lived signed password_reset token on success (see
+    app/core/security.py::create_password_reset_jwt), or None on any
+    failure (wrong code, expired, or no profile for this email)."""
     redis = get_redis_client()
-    stored = redis.get(f"otp:{email}")
-    if stored and stored == code:
-        redis.delete(f"otp:{email}")
-        return True
-    return False
+    stored_hash = redis.get(f"otp:{email}")
+    if not stored_hash or stored_hash != _hash_otp(code):
+        return None
+    redis.delete(f"otp:{email}")
+
+    from sqlmodel import Session, select
+    from app.database import get_engine
+    from app.core.security import create_password_reset_jwt
+
+    with Session(get_engine()) as db:
+        profile = db.exec(select(Profile).where(Profile.email == email)).first()
+        if profile is None:
+            return None
+        return create_password_reset_jwt(str(profile.id))
+
+
+def reset_password_with_token(token: str, new_password: str) -> None:
+    """Set a new password via the Supabase admin/service-role client — the
+    only client that can set an arbitrary user's password without an
+    active session for them (the previous implementation called
+    update_user() on a shared anon client with no session ever set on it,
+    so it never actually worked)."""
+    from app.core.security import decode_password_reset_jwt
+
+    user_id = decode_password_reset_jwt(token)
+    if user_id is None:
+        raise Exception("Invalid or expired reset token")
+    get_supabase_service().auth.admin.update_user_by_id(user_id, {"password": new_password})
 
 
 def register_user_in_supabase(
@@ -164,21 +220,6 @@ def refresh_supabase_token(refresh_token: str) -> Any:
     from app.database import get_supabase_anon
 
     return get_supabase_anon().auth.refresh_session(refresh_token)
-
-
-def send_password_reset(email: str) -> None:
-    from app.database import get_supabase_anon
-
-    get_supabase_anon().auth.reset_password_email(
-        email,
-        options={"redirect_to": f"{settings.frontend_url}/reset-password"},
-    )
-
-
-def reset_password_with_token(token: str, new_password: str) -> None:
-    from app.database import get_supabase_anon
-
-    get_supabase_anon().auth.update_user({"password": new_password})
 
 
 def exchange_google_code(code: str, code_verifier: Optional[str] = None) -> Any:

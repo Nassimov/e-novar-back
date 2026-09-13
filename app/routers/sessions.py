@@ -281,7 +281,12 @@ def cancel_session(
         apply_cancellation_side_effects(db, booking, reason="teacher_refused")
         apply_teacher_strike(
             db, session.teacher_id, "teacher_cancelled_confirmed",
-            human_label="Tu as annulé une séance déjà confirmée.",
+            human_label_i18n={
+                "fr": "Tu as annulé une séance déjà confirmée.",
+                "en": "You cancelled an already confirmed lesson.",
+                "ar": "ألغيت حصة تم تأكيدها بالفعل.",
+                "tm": "Tsefsexeḍ tiɣimit yettwasenteḍen yakan.",
+            },
         )
 
     # Notify whichever party didn't take the cancelling action themselves —

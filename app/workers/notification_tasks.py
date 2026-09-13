@@ -82,6 +82,7 @@ def _deliver_queue_row(db, row: Dict[str, Any]) -> Optional[str]:
     body = ctx.get("body", "")
     data = ctx.get("data") or {}
     deep_link = ctx.get("deep_link")
+    category = ctx.get("category")
 
     try:
         if channel == "push":
@@ -97,7 +98,9 @@ def _deliver_queue_row(db, row: Dict[str, Any]) -> Optional[str]:
             profile = db.get(Profile, row["user_id"])
             if not profile or not profile.email:
                 return "no email on file"
-            ok = send_generic_notification_email.run(profile.email, title, body, deep_link)
+            ok = send_generic_notification_email.run(
+                profile.email, title, body, deep_link, category, str(row["user_id"]),
+            )
             return None if ok else "email send failed"
 
         return f"unknown channel: {channel}"
@@ -123,7 +126,8 @@ def task_process_notification_queue(self, batch_size: int = 200) -> Dict[str, in
     from sqlalchemy import text
     from sqlmodel import Session
 
-    from app.database import engine
+    from app.database import get_engine
+    engine = get_engine()
     from app.models.notification import NotificationDeliveryLog, NotificationFailure
 
     processed = 0
@@ -206,15 +210,27 @@ def task_send_session_reminders() -> Dict[str, int]:
     """
     Daily at 09:00 → send push + email reminders for sessions scheduled tomorrow.
     Runs via Celery Beat (configured in celery_app.py).
+
+    Goes through notification_engine.emit() (event_type="session_reminder",
+    a real NotificationTemplate already seeded: category=lessons,
+    channels=[in_app,push,email]) rather than the old app/services/
+    notification.py wrapper this used to call — that path had no dedup_key
+    (a retried/duplicated task run could double-send) and checked the
+    wrong preference field (NotificationPreference.push, a legacy flat
+    column, instead of category_prefs["lessons"]["push"] like every other
+    notification in the system). dedup_key is keyed on the session's own id
+    so this task can safely re-run without re-notifying the same session.
     """
     from datetime import date, timedelta
 
     from sqlmodel import Session, select
 
-    from app.database import engine
+    from app.database import get_engine
+    engine = get_engine()
     from app.models.booking import TutoringSession
     from app.models.profile import Profile
-    from app.services.notification import notify_session_reminder
+    from app.services.notification_engine import emit
+    from app.workers.sms_tasks import send_session_reminder_sms
 
     tomorrow = date.today() + timedelta(days=1)
     sent = 0
@@ -233,16 +249,35 @@ def task_send_session_reminders() -> Dict[str, int]:
             teacher = db.get(Profile, session.teacher_id)
             if student is None or teacher is None:
                 continue
-            notify_session_reminder(
+            teacher_name = teacher.full_name or ""
+            time_str = session.scheduled_at.strftime("%H:%M")
+            emit(
                 db,
+                event_type="session_reminder",
                 user_id=session.student_id,
-                email=student.email,
-                phone=getattr(student, "phone", None),
-                name=student.first_name or "",
-                teacher_name=teacher.full_name or "",
-                date_str=str(session.scheduled_at.date()),
-                time_str=session.scheduled_at.strftime("%H:%M"),
+                title_i18n={
+                    "fr": "Rappel de séance",
+                    "en": "Lesson reminder",
+                    "ar": "تذكير بالحصة",
+                    "tm": "Aweɛd n tiɣimit",
+                },
+                body_i18n={
+                    "fr": f"Votre séance avec {teacher_name} est demain à {time_str}.",
+                    "en": f"Your lesson with {teacher_name} is tomorrow at {time_str}.",
+                    "ar": f"حصتك مع {teacher_name} غدًا الساعة {time_str}.",
+                    "tm": f"Tiɣimit-ik/inem akked {teacher_name} azekka ɣef {time_str}.",
+                },
+                data={
+                    "session_id": str(session.id),
+                    "teacher_name": teacher_name,
+                    "date": str(session.scheduled_at.date()),
+                    "time": time_str,
+                },
+                dedup_key=f"session_reminder:{session.id}",
             )
+            phone = getattr(student, "phone", None)
+            if phone:
+                send_session_reminder_sms.delay(phone, teacher_name, time_str)
             sent += 1
 
     logger.info("Session reminders sent: %d", sent)
@@ -259,7 +294,8 @@ def task_send_inactivity_reminders() -> Dict[str, int]:
 
     from sqlmodel import Session, select
 
-    from app.database import engine
+    from app.database import get_engine
+    engine = get_engine()
     from app.models.profile import Profile
     from app.config import get_settings
 
@@ -323,7 +359,8 @@ def task_send_weekly_summary() -> Dict[str, int]:
 
     from sqlmodel import Session, func, select
 
-    from app.database import engine
+    from app.database import get_engine
+    engine = get_engine()
     from app.models.booking import TutoringSession
     from app.models.kp import KpBalance
     from app.models.profile import Profile, StudentProfile

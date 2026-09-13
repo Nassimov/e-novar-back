@@ -21,6 +21,7 @@ from app.schemas.auth import (
     TokenResponse,
     UpdateRoleRequest,
     UserBrief,
+    VerifyEmailRequest,
 )
 from app.services import auth as auth_service
 
@@ -96,6 +97,16 @@ def _guard_reset_password_rate_limit(request: Request) -> None:
     )
 
 
+def _guard_resend_verification_rate_limit(request: Request, user_id: str) -> None:
+    ip = get_client_ip(request)
+    check_rate_limit(
+        f"ratelimit:resend_verification:ipacct:{ip}:{user_id}",
+        limit=5,
+        window_seconds=60 * 60,
+        detail="Too many verification email requests. Please try again later.",
+    )
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     """Register a new user via Supabase Auth and create local profile."""
@@ -127,8 +138,12 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     )
 
     try:
-        from app.workers.email_tasks import send_welcome_email
-        send_welcome_email.delay(payload.email, payload.full_name or "")
+        from app.core.security import create_email_verification_jwt
+        from app.workers.email_tasks import send_verification_email
+
+        token = create_email_verification_jwt(str(profile.id))
+        verify_url = f"{settings.frontend_url}/verify-email?token={token}"
+        send_verification_email.delay(payload.email, payload.full_name or "", verify_url)
     except Exception:
         pass
 
@@ -148,10 +163,83 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
             full_name=profile.full_name or payload.full_name or "",
             role=payload.role,
             avatar_url=profile.avatar_url,
-            is_verified=False,
+            is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
         ),
     )
+
+
+@router.post("/verify-email", response_model=UserBrief)
+def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
+    """Click-through target for the registration verification link (see
+    send_verification_email). Activates the account — see
+    auth-context.tsx's redirect guard, which sends any authenticated but
+    unverified user here until this succeeds."""
+    from uuid import UUID
+    from sqlmodel import select
+    from app.core.security import decode_email_verification_jwt
+    from app.models.profile import Profile, UserRole
+
+    user_id_str = decode_email_verification_jwt(payload.token)
+    if user_id_str is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link")
+
+    profile = db.get(Profile, UUID(user_id_str))
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if not profile.email_verified:
+        profile.email_verified = True
+        db.add(profile)
+        db.commit()
+        db.refresh(profile)
+        try:
+            from app.workers.email_tasks import send_welcome_email
+            send_welcome_email.delay(profile.email, profile.full_name or "")
+        except Exception:
+            pass
+
+    _priority = {"admin": 4, "teacher": 3, "parent": 2, "student": 1}
+    role_rows = db.exec(select(UserRole).where(UserRole.user_id == profile.id)).all()
+    role = max(role_rows, key=lambda r: _priority.get(r.role, 0)).role if role_rows else "student"
+
+    return UserBrief(
+        id=str(profile.id),
+        email=profile.email or "",
+        full_name=profile.full_name or "",
+        role=role,
+        avatar_url=profile.avatar_url,
+        phone=profile.phone,
+        is_verified=profile.email_verified,
+        onboarding_completed=profile.onboarding_completed,
+    )
+
+
+@router.post("/resend-verification")
+def resend_verification(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Re-send the verification link to the currently authenticated
+    (but not yet verified) user."""
+    from uuid import UUID
+    from app.core.security import create_email_verification_jwt
+    from app.models.profile import Profile
+    from app.workers.email_tasks import send_verification_email
+
+    _guard_resend_verification_rate_limit(request, current_user["id"])
+
+    profile = db.get(Profile, UUID(current_user["id"]))
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if profile.email_verified:
+        return {"message": "Email already verified"}
+
+    token = create_email_verification_jwt(str(profile.id))
+    verify_url = f"{settings.frontend_url}/verify-email?token={token}"
+    send_verification_email.delay(profile.email, profile.full_name or "", verify_url)
+    return {"message": "Verification email sent"}
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -203,7 +291,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             full_name=profile.full_name or full_name,
             role=role,
             avatar_url=profile.avatar_url,
-            is_verified=False,
+            is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
         ),
     )
@@ -257,7 +345,7 @@ def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
             full_name=profile.full_name or full_name,
             role=role,
             avatar_url=profile.avatar_url,
-            is_verified=False,
+            is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
         ),
     )
@@ -323,7 +411,7 @@ def update_role(
             full_name=profile.full_name if profile else "",
             role=payload.role,
             avatar_url=profile.avatar_url if profile else None,
-            is_verified=False,
+            is_verified=profile.email_verified if profile else False,
             onboarding_completed=profile.onboarding_completed if profile else False,
         ),
     )
@@ -331,20 +419,23 @@ def update_role(
 
 @router.post("/forgot-password")
 def forgot_password(payload: ForgotPasswordRequest, request: Request):
-    """Send a password reset email."""
+    """Email a 6-digit password-reset code — see POST /verify-otp for the
+    next step. Always returns the same generic message regardless of
+    whether the email is actually registered (never reveal that)."""
     _guard_forgot_password_rate_limit(request, payload.email)
-    auth_service.send_password_reset(payload.email)
-    return {"message": "If that email is registered, you will receive a reset link"}
+    auth_service.request_password_reset_code(payload.email)
+    return {"message": "If that email is registered, you will receive a reset code"}
 
 
 @router.post("/verify-otp")
 def verify_otp(payload: OtpVerifyRequest, request: Request):
-    """Verify an OTP code sent to an email."""
+    """Verify the emailed code. On success, returns a short-lived
+    password_reset token — pass it to POST /reset-password next."""
     _guard_otp_verify_rate_limit(request, payload.email)
-    success = auth_service.verify_otp(payload.email, payload.token)
-    if not success:
+    reset_token = auth_service.verify_otp(payload.email, payload.token)
+    if reset_token is None:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP code")
-    return {"message": "OTP verified successfully", "verified": True}
+    return {"message": "OTP verified successfully", "verified": True, "reset_token": reset_token}
 
 
 @router.post("/reset-password")
@@ -437,6 +528,7 @@ def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(get_db
             first_name=parts[0],
             last_name=parts[1] if len(parts) > 1 else "",
             db=db,
+            email_verified=True,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Profile creation failed: {exc}")
@@ -465,7 +557,7 @@ def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(get_db
             full_name=profile.full_name or full_name,
             role=role,
             avatar_url=profile.avatar_url,
-            is_verified=True,
+            is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
         ),
     )
@@ -523,6 +615,7 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
                 first_name=parts[0],
                 last_name=parts[1] if len(parts) > 1 else "",
                 db=db,
+                email_verified=True,
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Profile creation failed: {exc}")
@@ -542,7 +635,7 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
                 full_name=profile.full_name or full_name,
                 role=role,
                 avatar_url=profile.avatar_url,
-                is_verified=True,
+                is_verified=profile.email_verified,
                 onboarding_completed=profile.onboarding_completed,
             ),
         )
@@ -594,7 +687,7 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
             full_name=profile.full_name or full_name,
             role=role,
             avatar_url=profile.avatar_url,
-            is_verified=False,
+            is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
         ),
     )
@@ -661,6 +754,6 @@ def get_me(
         role=role,
         avatar_url=profile.avatar_url,
         phone=profile.phone,
-        is_verified=False,
+        is_verified=profile.email_verified,
         onboarding_completed=profile.onboarding_completed,
     )

@@ -157,6 +157,133 @@ class CompetitiveArenaSettings(BaseModel):
     competitive_club_name_min_length: int = Field(ge=1, le=100)
     competitive_club_name_max_length: int = Field(ge=1, le=200)
 
+    # Phase 2 — Duel invitation lifecycle (app/services/competitive/)
+    competitive_question_count_options: List[int] = Field(min_length=1, max_length=10)
+    competitive_invitation_expiry_minutes: int = Field(ge=1, le=1440)
+    competitive_max_scheduling_days: int = Field(ge=1, le=365)
+    competitive_disconnect_grace_minutes: int = Field(ge=1, le=60)
+    competitive_disconnect_policy: str
+    competitive_reminder_minutes_before: List[int] = Field(min_length=0, max_length=10)
+    competitive_max_invitations_per_day: int = Field(ge=1, le=1000)
+    competitive_max_pending_invitations: int = Field(ge=1, le=100)
+    competitive_invitation_cooldown_seconds: int = Field(ge=0, le=3600)
+
+    # Phase 3/5 — Live Match Engine gameplay timings
+    competitive_match_countdown_seconds: int = Field(ge=0, le=60)
+    competitive_reading_time_seconds: int = Field(ge=0, le=120)
+    competitive_transition_time_seconds: int = Field(ge=0, le=60)
+    competitive_points_per_correct: int = Field(ge=0, le=10000)
+    competitive_speed_bonus_enabled: bool
+    competitive_speed_bonus_max_points: int = Field(ge=0, le=10000)
+    competitive_ingame_disconnect_grace_seconds: int = Field(ge=1, le=600)
+    competitive_heartbeat_timeout_seconds: int = Field(ge=1, le=600)
+
+    # Phase 6 — Matchmaking & Queue Engine
+    competitive_mmr_expansion_seconds: List[int] = Field(min_length=0, max_length=10)
+    competitive_mmr_expansion_radius: List[int] = Field(min_length=0, max_length=10)
+    competitive_matchmaking_accept_seconds: int = Field(ge=1, le=300)
+    competitive_min_match_quality_score: int = Field(ge=0, le=100)
+    competitive_language_fallback_seconds: int = Field(ge=0, le=600)
+    competitive_queue_default_wait_estimate_sec: int = Field(ge=0, le=3600)
+
+    # Phase 7 — Ranking, seasons & leagues (season lifecycle)
+    competitive_season_ending_soon_hours: int = Field(ge=1, le=8760)
+
+    # Phase 11 Part B/C — Club reputation & club-vs-club battles
+    competitive_club_reputation_battle_win: int = Field(ge=0, le=1000)
+    competitive_club_reputation_activity_daily: int = Field(ge=0, le=100)
+    competitive_club_reputation_achievement: int = Field(ge=0, le=1000)
+    competitive_club_reputation_abuse_report: int = Field(ge=-1000, le=0)
+    competitive_club_battle_team_size_default: int = Field(ge=1, le=50)
+    competitive_club_battle_challenge_expiry_hours: int = Field(ge=1, le=336)
+    competitive_club_rating_victory_gain: int = Field(ge=0, le=1000)
+    competitive_club_rating_defeat_loss: int = Field(ge=0, le=1000)
+    competitive_club_rating_protection_battles: int = Field(ge=0, le=100)
+    competitive_club_rating_floor: int = Field(ge=0, le=5000)
+    competitive_club_battle_ep_reward_winner: int = Field(ge=0, le=100000)
+    competitive_club_battle_ep_reward_participation: int = Field(ge=0, le=100000)
+    competitive_club_battle_xp_reward_winner: int = Field(ge=0, le=10000)
+    competitive_club_battle_xp_reward_participation: int = Field(ge=0, le=10000)
+
+    # Phase 12 — Replay System & AI Match Analysis (grade thresholds, accuracy %)
+    competitive_grade_a_plus_min_accuracy: int = Field(ge=0, le=100)
+    competitive_grade_a_min_accuracy: int = Field(ge=0, le=100)
+    competitive_grade_b_plus_min_accuracy: int = Field(ge=0, le=100)
+    competitive_grade_b_min_accuracy: int = Field(ge=0, le=100)
+    competitive_grade_c_min_accuracy: int = Field(ge=0, le=100)
+    competitive_grade_d_min_accuracy: int = Field(ge=0, le=100)
+    competitive_replay_default_visibility: str
+
+    # Phase 13 — Ranked Ladder V2
+    competitive_placement_matches_required: int = Field(ge=1, le=100)
+    competitive_placement_k_factor_multiplier: float = Field(ge=1, le=10)
+    competitive_ranked_match_types: str
+    competitive_casual_ep_reward_winner: int = Field(ge=0, le=10000)
+    competitive_casual_ep_reward_participation: int = Field(ge=0, le=10000)
+    competitive_fair_play_disconnect_penalty: int = Field(ge=-100, le=0)
+    competitive_fair_play_report_penalty: int = Field(ge=-100, le=0)
+    competitive_fair_play_afk_penalty: int = Field(ge=-100, le=0)
+    competitive_fair_play_clean_match_bonus: int = Field(ge=0, le=100)
+    competitive_fair_play_min_for_ranked: int = Field(ge=-1000, le=100)
+    competitive_inactivity_decay_enabled: bool
+    competitive_inactivity_decay_after_days: int = Field(ge=1, le=3650)
+    competitive_inactivity_decay_amount: int = Field(ge=0, le=1000)
+    competitive_inactivity_decay_floor: int = Field(ge=0, le=5000)
+    competitive_ranked_min_account_age_days: int = Field(ge=0, le=3650)
+    competitive_ranked_require_onboarding: bool
+    competitive_ranked_min_ep_balance: int = Field(ge=0, le=1000000)
+    competitive_ranked_require_phone_verified: bool
+    competitive_ranked_require_email_verified: bool
+
+    # Phase 14 — Achievements, Titles, Cosmetics & Progression (showcase caps)
+    competitive_badge_showcase_max: int = Field(ge=0, le=50)
+    competitive_sticker_showcase_max: int = Field(ge=0, le=50)
+    competitive_achievement_showcase_max: int = Field(ge=0, le=50)
+
+    # Phase 15 — Events, Missions, Daily Challenges & LiveOps
+    competitive_daily_missions_count: int = Field(ge=0, le=20)
+    competitive_weekly_missions_count: int = Field(ge=0, le=20)
+    competitive_monthly_missions_count: int = Field(ge=0, le=20)
+    competitive_mission_free_rerolls_daily: int = Field(ge=0, le=10)
+    competitive_mission_free_rerolls_weekly: int = Field(ge=0, le=10)
+    competitive_login_streak_grace_hours: int = Field(ge=0, le=72)
+    competitive_login_calendar_length: int = Field(ge=1, le=365)
+    competitive_event_ending_soon_hours: int = Field(ge=1, le=8760)
+    competitive_happy_hour_starting_soon_minutes: int = Field(ge=1, le=1440)
+    competitive_mission_almost_done_pct: int = Field(ge=1, le=99)
+
+    # Phase 16 — Production Hardening: feature flags, rate limits, moderation
+    feature_battle_royale_enabled: bool
+    feature_tournament_enabled: bool
+    feature_replay_enabled: bool
+    feature_ai_analysis_enabled: bool
+    feature_ranked_enabled: bool
+    feature_liveops_enabled: bool
+    feature_clubs_enabled: bool
+    feature_spectator_enabled: bool
+    rate_limit_match_creation_per_10s: int = Field(ge=1, le=1000)
+    rate_limit_answer_submit_per_10s: int = Field(ge=1, le=1000)
+    rate_limit_replay_request_per_10s: int = Field(ge=1, le=1000)
+    rate_limit_leaderboard_refresh_per_10s: int = Field(ge=1, le=1000)
+    rate_limit_report_submit_per_10s: int = Field(ge=1, le=1000)
+    rate_limit_invitation_create_per_10s: int = Field(ge=1, le=1000)
+    moderation_default_mute_hours: int = Field(ge=1, le=8760)
+    moderation_default_suspension_days: int = Field(ge=1, le=365)
+
+    @field_validator("competitive_disconnect_policy")
+    @classmethod
+    def _valid_disconnect_policy(cls, v: str) -> str:
+        if v not in ("cancel", "forfeit"):
+            raise ValueError("competitive_disconnect_policy must be one of cancel|forfeit")
+        return v
+
+    @field_validator("competitive_replay_default_visibility")
+    @classmethod
+    def _valid_replay_visibility(cls, v: str) -> str:
+        if v not in ("private", "friends", "club", "public"):
+            raise ValueError("competitive_replay_default_visibility must be one of private|friends|club|public")
+        return v
+
     @field_validator("competitive_club_default_max_members")
     @classmethod
     def _valid_club_default_max_members(cls, v: int) -> int:
@@ -264,3 +391,34 @@ class HomeworkSettings(BaseModel):
     app/routers/homework.py's create_homework."""
     homework_kp_reward_max: int = Field(ge=1, le=5000)
     homework_max_per_student_per_day: int = Field(ge=1, le=100)
+
+
+class SessionValidationSettings(BaseModel):
+    """Trust-score engine knobs for the post-lesson validation workflow —
+    see app/services/session_validation.py's compute_trust_score. Weights
+    don't need to sum to 100 (the engine normalizes by whatever total is
+    actually configured), but keeping them close to 100 keeps the two
+    threshold fields below intuitive to read as percentages."""
+    trust_weight_student_validation: int = Field(ge=0, le=100)
+    trust_weight_teacher_confirmation: int = Field(ge=0, le=100)
+    trust_weight_session_completed: int = Field(ge=0, le=100)
+    trust_weight_online_duration: int = Field(ge=0, le=100)
+    trust_weight_gps_proximity: int = Field(ge=0, le=100)
+    trust_weight_clean_history: int = Field(ge=0, le=100)
+    trust_auto_approve_threshold: int = Field(ge=0, le=100)
+    trust_manual_review_threshold: int = Field(ge=0, le=100)
+    token_visible_minutes_before: int = Field(ge=0, le=1440)
+    student_validation_window_hours: int = Field(ge=1, le=336)
+    teacher_confirmation_window_hours: int = Field(ge=1, le=336)
+    gps_proximity_threshold_meters: int = Field(ge=1, le=50000)
+
+    @field_validator("trust_manual_review_threshold")
+    @classmethod
+    def _manual_below_auto(cls, v: int, info) -> int:
+        auto = info.data.get("trust_auto_approve_threshold")
+        if auto is not None and v > auto:
+            raise ValueError(
+                "trust_manual_review_threshold must be <= trust_auto_approve_threshold "
+                "(a session below the review threshold should never score higher than the auto-approve one)."
+            )
+        return v

@@ -16,6 +16,7 @@ from app.schemas.admin import (
     HomeworkSettings,
     KpEconomySettings,
     PlatformPricingSettings,
+    SessionValidationSettings,
 )
 from app.services.pricing import get_platform_settings
 
@@ -44,6 +45,54 @@ def _serialize_booking_policy(s: PlatformSettings) -> dict:
         "manual_payment_expiry_hours": s.manual_payment_expiry_hours,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
+
+
+def _serialize_session_validation(s: PlatformSettings) -> dict:
+    return {
+        "trust_weight_student_validation": s.trust_weight_student_validation,
+        "trust_weight_teacher_confirmation": s.trust_weight_teacher_confirmation,
+        "trust_weight_session_completed": s.trust_weight_session_completed,
+        "trust_weight_online_duration": s.trust_weight_online_duration,
+        "trust_weight_gps_proximity": s.trust_weight_gps_proximity,
+        "trust_weight_clean_history": s.trust_weight_clean_history,
+        "trust_auto_approve_threshold": s.trust_auto_approve_threshold,
+        "trust_manual_review_threshold": s.trust_manual_review_threshold,
+        "token_visible_minutes_before": s.token_visible_minutes_before,
+        "student_validation_window_hours": s.student_validation_window_hours,
+        "teacher_confirmation_window_hours": s.teacher_confirmation_window_hours,
+        "gps_proximity_threshold_meters": s.gps_proximity_threshold_meters,
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    }
+
+
+@router.get("/session-validation")
+def get_session_validation_settings(
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Trust-score engine knobs — see app/services/session_validation.py's
+    compute_trust_score. Shipped with the session-validation feature itself
+    but never exposed via an admin endpoint until now (weights were only
+    ever changeable by direct DB access)."""
+    return _serialize_session_validation(get_platform_settings(db))
+
+
+@router.put("/session-validation")
+def update_session_validation_settings(
+    body: SessionValidationSettings,
+    current_user: Dict[str, Any] = Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    settings = db.get(PlatformSettings, True)
+    if settings is None:
+        settings = PlatformSettings(id=True)
+        db.add(settings)
+    for field, value in body.model_dump().items():
+        setattr(settings, field, value)
+    settings.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(settings)
+    return _serialize_session_validation(settings)
 
 
 @router.get("/pricing")
@@ -267,6 +316,99 @@ def _serialize_competitive(s: PlatformSettings) -> dict:
         "competitive_club_default_max_members": s.competitive_club_default_max_members,
         "competitive_club_name_min_length": s.competitive_club_name_min_length,
         "competitive_club_name_max_length": s.competitive_club_name_max_length,
+        "competitive_question_count_options": s.competitive_question_count_options,
+        "competitive_invitation_expiry_minutes": s.competitive_invitation_expiry_minutes,
+        "competitive_max_scheduling_days": s.competitive_max_scheduling_days,
+        "competitive_disconnect_grace_minutes": s.competitive_disconnect_grace_minutes,
+        "competitive_disconnect_policy": s.competitive_disconnect_policy,
+        "competitive_reminder_minutes_before": s.competitive_reminder_minutes_before,
+        "competitive_max_invitations_per_day": s.competitive_max_invitations_per_day,
+        "competitive_max_pending_invitations": s.competitive_max_pending_invitations,
+        "competitive_invitation_cooldown_seconds": s.competitive_invitation_cooldown_seconds,
+        "competitive_match_countdown_seconds": s.competitive_match_countdown_seconds,
+        "competitive_reading_time_seconds": s.competitive_reading_time_seconds,
+        "competitive_transition_time_seconds": s.competitive_transition_time_seconds,
+        "competitive_points_per_correct": s.competitive_points_per_correct,
+        "competitive_speed_bonus_enabled": s.competitive_speed_bonus_enabled,
+        "competitive_speed_bonus_max_points": s.competitive_speed_bonus_max_points,
+        "competitive_ingame_disconnect_grace_seconds": s.competitive_ingame_disconnect_grace_seconds,
+        "competitive_heartbeat_timeout_seconds": s.competitive_heartbeat_timeout_seconds,
+        "competitive_mmr_expansion_seconds": s.competitive_mmr_expansion_seconds,
+        "competitive_mmr_expansion_radius": s.competitive_mmr_expansion_radius,
+        "competitive_matchmaking_accept_seconds": s.competitive_matchmaking_accept_seconds,
+        "competitive_min_match_quality_score": s.competitive_min_match_quality_score,
+        "competitive_language_fallback_seconds": s.competitive_language_fallback_seconds,
+        "competitive_queue_default_wait_estimate_sec": s.competitive_queue_default_wait_estimate_sec,
+        "competitive_season_ending_soon_hours": s.competitive_season_ending_soon_hours,
+        "competitive_club_reputation_battle_win": s.competitive_club_reputation_battle_win,
+        "competitive_club_reputation_activity_daily": s.competitive_club_reputation_activity_daily,
+        "competitive_club_reputation_achievement": s.competitive_club_reputation_achievement,
+        "competitive_club_reputation_abuse_report": s.competitive_club_reputation_abuse_report,
+        "competitive_club_battle_team_size_default": s.competitive_club_battle_team_size_default,
+        "competitive_club_battle_challenge_expiry_hours": s.competitive_club_battle_challenge_expiry_hours,
+        "competitive_club_rating_victory_gain": s.competitive_club_rating_victory_gain,
+        "competitive_club_rating_defeat_loss": s.competitive_club_rating_defeat_loss,
+        "competitive_club_rating_protection_battles": s.competitive_club_rating_protection_battles,
+        "competitive_club_rating_floor": s.competitive_club_rating_floor,
+        "competitive_club_battle_ep_reward_winner": s.competitive_club_battle_ep_reward_winner,
+        "competitive_club_battle_ep_reward_participation": s.competitive_club_battle_ep_reward_participation,
+        "competitive_club_battle_xp_reward_winner": s.competitive_club_battle_xp_reward_winner,
+        "competitive_club_battle_xp_reward_participation": s.competitive_club_battle_xp_reward_participation,
+        "competitive_grade_a_plus_min_accuracy": s.competitive_grade_a_plus_min_accuracy,
+        "competitive_grade_a_min_accuracy": s.competitive_grade_a_min_accuracy,
+        "competitive_grade_b_plus_min_accuracy": s.competitive_grade_b_plus_min_accuracy,
+        "competitive_grade_b_min_accuracy": s.competitive_grade_b_min_accuracy,
+        "competitive_grade_c_min_accuracy": s.competitive_grade_c_min_accuracy,
+        "competitive_grade_d_min_accuracy": s.competitive_grade_d_min_accuracy,
+        "competitive_replay_default_visibility": s.competitive_replay_default_visibility,
+        "competitive_placement_matches_required": s.competitive_placement_matches_required,
+        "competitive_placement_k_factor_multiplier": s.competitive_placement_k_factor_multiplier,
+        "competitive_ranked_match_types": s.competitive_ranked_match_types,
+        "competitive_casual_ep_reward_winner": s.competitive_casual_ep_reward_winner,
+        "competitive_casual_ep_reward_participation": s.competitive_casual_ep_reward_participation,
+        "competitive_fair_play_disconnect_penalty": s.competitive_fair_play_disconnect_penalty,
+        "competitive_fair_play_report_penalty": s.competitive_fair_play_report_penalty,
+        "competitive_fair_play_afk_penalty": s.competitive_fair_play_afk_penalty,
+        "competitive_fair_play_clean_match_bonus": s.competitive_fair_play_clean_match_bonus,
+        "competitive_fair_play_min_for_ranked": s.competitive_fair_play_min_for_ranked,
+        "competitive_inactivity_decay_enabled": s.competitive_inactivity_decay_enabled,
+        "competitive_inactivity_decay_after_days": s.competitive_inactivity_decay_after_days,
+        "competitive_inactivity_decay_amount": s.competitive_inactivity_decay_amount,
+        "competitive_inactivity_decay_floor": s.competitive_inactivity_decay_floor,
+        "competitive_ranked_min_account_age_days": s.competitive_ranked_min_account_age_days,
+        "competitive_ranked_require_onboarding": s.competitive_ranked_require_onboarding,
+        "competitive_ranked_min_ep_balance": s.competitive_ranked_min_ep_balance,
+        "competitive_ranked_require_phone_verified": s.competitive_ranked_require_phone_verified,
+        "competitive_ranked_require_email_verified": s.competitive_ranked_require_email_verified,
+        "competitive_badge_showcase_max": s.competitive_badge_showcase_max,
+        "competitive_sticker_showcase_max": s.competitive_sticker_showcase_max,
+        "competitive_achievement_showcase_max": s.competitive_achievement_showcase_max,
+        "competitive_daily_missions_count": s.competitive_daily_missions_count,
+        "competitive_weekly_missions_count": s.competitive_weekly_missions_count,
+        "competitive_monthly_missions_count": s.competitive_monthly_missions_count,
+        "competitive_mission_free_rerolls_daily": s.competitive_mission_free_rerolls_daily,
+        "competitive_mission_free_rerolls_weekly": s.competitive_mission_free_rerolls_weekly,
+        "competitive_login_streak_grace_hours": s.competitive_login_streak_grace_hours,
+        "competitive_login_calendar_length": s.competitive_login_calendar_length,
+        "competitive_event_ending_soon_hours": s.competitive_event_ending_soon_hours,
+        "competitive_happy_hour_starting_soon_minutes": s.competitive_happy_hour_starting_soon_minutes,
+        "competitive_mission_almost_done_pct": s.competitive_mission_almost_done_pct,
+        "feature_battle_royale_enabled": s.feature_battle_royale_enabled,
+        "feature_tournament_enabled": s.feature_tournament_enabled,
+        "feature_replay_enabled": s.feature_replay_enabled,
+        "feature_ai_analysis_enabled": s.feature_ai_analysis_enabled,
+        "feature_ranked_enabled": s.feature_ranked_enabled,
+        "feature_liveops_enabled": s.feature_liveops_enabled,
+        "feature_clubs_enabled": s.feature_clubs_enabled,
+        "feature_spectator_enabled": s.feature_spectator_enabled,
+        "rate_limit_match_creation_per_10s": s.rate_limit_match_creation_per_10s,
+        "rate_limit_answer_submit_per_10s": s.rate_limit_answer_submit_per_10s,
+        "rate_limit_replay_request_per_10s": s.rate_limit_replay_request_per_10s,
+        "rate_limit_leaderboard_refresh_per_10s": s.rate_limit_leaderboard_refresh_per_10s,
+        "rate_limit_report_submit_per_10s": s.rate_limit_report_submit_per_10s,
+        "rate_limit_invitation_create_per_10s": s.rate_limit_invitation_create_per_10s,
+        "moderation_default_mute_hours": s.moderation_default_mute_hours,
+        "moderation_default_suspension_days": s.moderation_default_suspension_days,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 

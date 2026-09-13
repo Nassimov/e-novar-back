@@ -146,12 +146,35 @@ def warn_sender(
     from app.services.notification_engine import emit
     emit(
         db, event_type="warning", user_id=msg.sender_id,
-        title_override="Avertissement E-NOVAR",
-        body_override=(
-            "Un message que vous avez envoyé a été signalé car il suggère de "
-            "poursuivre la collaboration hors de la plateforme. "
-            "Rappel : toutes les interactions pédagogiques et financières doivent "
-            "rester sur E-NOVAR pour votre sécurité et celle de l'autre partie."
-        ),
+        title_i18n={
+            "fr": "Avertissement E-NOVAR",
+            "en": "E-NOVAR warning",
+            "ar": "تحذير من E-NOVAR",
+            "tm": "Alɣu n E-NOVAR",
+        },
+        body_i18n={
+            "fr": (
+                "Un message que vous avez envoyé a été signalé car il suggère de "
+                "poursuivre la collaboration hors de la plateforme. "
+                "Rappel : toutes les interactions pédagogiques et financières doivent "
+                "rester sur E-NOVAR pour votre sécurité et celle de l'autre partie."
+            ),
+            "en": (
+                "A message you sent was flagged for suggesting to continue the collaboration "
+                "outside the platform. "
+                "Reminder: all pedagogical and financial interactions must stay on E-NOVAR "
+                "for your safety and the other party's."
+            ),
+            "ar": (
+                "تم الإبلاغ عن رسالة أرسلتها لأنها تقترح متابعة التعاون خارج المنصة. "
+                "تذكير: يجب أن تبقى جميع التفاعلات التعليمية والمالية داخل E-NOVAR "
+                "لضمان سلامتك وسلامة الطرف الآخر."
+            ),
+            "tm": (
+                "Izen i teznedd yettwabeggen imi yesumer tikmalt n umeslay ur nelli ara deg tesnasɣit. "
+                "Asmekti: akk imeslayen n uselmed d idrimen ilaq ad qqimen deg E-NOVAR "
+                "i lamnaɛ-inek/inem d wayeḍ."
+            ),
+        },
     )
     return {"ok": True}

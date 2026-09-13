@@ -78,6 +78,14 @@ def _publish_badge_event(mapper, connection, target: "Notification") -> None:
                 "notification_type": target.type,
                 "id": str(target.id),
                 "created_at": target.created_at.isoformat(),
+                # Added for the live toast (F9/F10) — the badge-only consumer
+                # ignores these extra fields, but a toast needs real content
+                # without a second API round-trip.
+                "title": target.title,
+                "body": target.body,
+                "category": target.category,
+                "priority": target.priority,
+                "deep_link": target.deep_link,
             }),
         )
     except Exception:
@@ -151,6 +159,18 @@ class NotificationTemplate(SQLModel, table=True):
     )
     title_template: str = Field()
     body_template: str = Field()
+    # Per-language variants ({"fr": "...", "en": "...", "ar": "...", "tm": "..."}),
+    # keyed by Profile.language. Falls back to "fr" then to the legacy plain
+    # title_template/body_template above if a language is missing — see
+    # notification_engine.py's _render(). Added by migration 114.
+    title_i18n: Optional[Any] = Field(
+        default=None,
+        sa_column=sa.Column(JSONB, nullable=True),
+    )
+    body_i18n: Optional[Any] = Field(
+        default=None,
+        sa_column=sa.Column(JSONB, nullable=True),
+    )
     deep_link_template: Optional[str] = Field(default=None)
     active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)

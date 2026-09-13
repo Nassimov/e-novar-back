@@ -345,8 +345,18 @@ def approve_submission(
         db,
         event_type="challenge_approved",
         user_id=part.user_id,
-        title_override="Défi approuvé !",
-        body_override=f"Ta soumission pour « {challenge.title} » a été approuvée. Tu gagnes {challenge.reward} EP !",
+        title_i18n={
+            "fr": "Défi approuvé !",
+            "en": "Challenge approved!",
+            "ar": "تمت الموافقة على التحدي!",
+            "tm": "Anabaḍ yettwaqbel!",
+        },
+        body_i18n={
+            "fr": f"Ta soumission pour « {challenge.title} » a été approuvée. Tu gagnes {challenge.reward} EP !",
+            "en": f'Your submission for "{challenge.title}" was approved. You earn {challenge.reward} EP!',
+            "ar": f'تمت الموافقة على تقديمك لتحدي "{challenge.title}". ربحت {challenge.reward} EP!',
+            "tm": f'Tuzna-ik/inem n "{challenge.title}" tettwaqbel. Trebḥeḍ {challenge.reward} EP!',
+        },
         data={"challenge_id": str(challenge.id), "ep_awarded": challenge.reward},
         dedup_key=f"challenge_approved:{part.id}",
     )
@@ -389,8 +399,18 @@ def reject_submission(
         db,
         event_type="challenge_rejected",
         user_id=part.user_id,
-        title_override="Soumission refusée",
-        body_override=f"Ta soumission pour « {title_str} » n'a pas été acceptée. Motif : {reason or 'Non conforme aux critères.'}",
+        title_i18n={
+            "fr": "Soumission refusée",
+            "en": "Submission rejected",
+            "ar": "تم رفض التقديم",
+            "tm": "Tuzna tettwagi",
+        },
+        body_i18n={
+            "fr": f"Ta soumission pour « {title_str} » n'a pas été acceptée. Motif : {reason or 'Non conforme aux critères.'}",
+            "en": f'Your submission for "{title_str}" was not accepted. Reason: {reason or "Does not meet the criteria."}',
+            "ar": f'لم يتم قبول تقديمك لتحدي "{title_str}". السبب: {reason or "لا يطابق المعايير."}',
+            "tm": f'Tuzna-ik/inem n "{title_str}" ur tettwaqbal ara. Ssebba: {reason or "Ur temṣada ara d tebadutin."}',
+        },
         data={"challenge_id": str(challenge.id) if challenge else None, "reason": reason},
         dedup_key=f"challenge_rejected:{part.id}",
     )

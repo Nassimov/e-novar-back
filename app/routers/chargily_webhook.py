@@ -54,8 +54,18 @@ async def chargily_webhook(request: Request, db: Session = Depends(get_db)):
             from app.services.notification_engine import emit
             emit(
                 db, event_type="booking", user_id=booking.teacher_id,
-                title_override="💰 Nouveau paiement Edahabia reçu",
-                body_override="Un élève a payé sa réservation via Edahabia. Acceptez ou refusez la demande.",
+                title_i18n={
+                    "fr": "💰 Nouveau paiement Edahabia reçu",
+                    "en": "💰 New Edahabia payment received",
+                    "ar": "💰 تم استلام دفعة جديدة عبر Edahabia",
+                    "tm": "💰 Axelaṣ amaynut s Edahabia yettwarmes",
+                },
+                body_i18n={
+                    "fr": "Un élève a payé sa réservation via Edahabia. Acceptez ou refusez la demande.",
+                    "en": "A student paid for their booking via Edahabia. Accept or decline the request.",
+                    "ar": "دفع تلميذ حجزه عبر Edahabia. اقبل أو ارفض الطلب.",
+                    "tm": "Anelmad yexlaṣ aḥerz-is s Edahabia. Qbel neɣ agi anadi.",
+                },
                 data={"booking_id": str(booking.id)},
             )
     elif event_type in ("checkout.failed", "checkout.canceled"):

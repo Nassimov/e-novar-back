@@ -507,8 +507,18 @@ def link_parent_post_onboarding(
     from app.services.notification_engine import emit
     emit(
         db, event_type="system", user_id=parent_prof.user_id,
-        title_override="👨‍👩‍👧 Enfant lié",
-        body_override=f"{(student_profile.full_name if student_profile else None) or 'Votre enfant'} a lié son compte au vôtre.",
+        title_i18n={
+            "fr": "👨‍👩‍👧 Enfant lié",
+            "en": "👨‍👩‍👧 Child linked",
+            "ar": "👨‍👩‍👧 تم ربط الطفل",
+            "tm": "👨‍👩‍👧 Ameẓẓyan yettwadday",
+        },
+        body_i18n={
+            "fr": f"{(student_profile.full_name if student_profile else None) or 'Votre enfant'} a lié son compte au vôtre.",
+            "en": f"{(student_profile.full_name if student_profile else None) or 'Your child'} linked their account to yours.",
+            "ar": f"قام {(student_profile.full_name if student_profile else None) or 'طفلك'} بربط حسابه بحسابك.",
+            "tm": f"{(student_profile.full_name if student_profile else None) or 'Mmi-k/yell-ik'} yeddi amiḍan-is ɣer win-ik.",
+        },
         data={"student_id": str(uid)},
     )
 

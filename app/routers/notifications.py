@@ -6,10 +6,12 @@ from typing import Any, Dict
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlmodel import Session, select
 
+from app.core.security import decode_unsubscribe_jwt
 from app.dependencies import get_current_user, get_db
 from app.models.notification import NOTIFICATION_CATEGORIES, Notification, NotificationPreference
 from app.models.profile import Profile
@@ -291,3 +293,50 @@ def update_notification_preferences(
     db.commit()
     db.refresh(prefs)
     return prefs
+
+
+_UNSUBSCRIBE_PAGE = """
+<html><body style="font-family:Arial,sans-serif;max-width:480px;margin:80px auto;
+color:#111;text-align:center;">
+<h2 style="color:#4F46E5;">{title}</h2>
+<p>{message}</p>
+</body></html>
+"""
+
+
+@router.get("/unsubscribe", response_class=HTMLResponse)
+def unsubscribe_marketing_email(token: str = Query(...), db: Session = Depends(get_db)):
+    """Public (no auth) one-click unsubscribe link embedded in marketing/
+    campaign emails only (see email_tasks.py's _brand_wrap unsubscribe_url
+    param) — a recipient clicking this from their inbox is never expected
+    to be logged in. Only ever flips category_prefs["marketing"]["email"]
+    to False for the token's own user_id; nothing else is reachable through
+    this token (see app/core/security.py's create_unsubscribe_jwt)."""
+    user_id_str = decode_unsubscribe_jwt(token)
+    if user_id_str is None:
+        return HTMLResponse(
+            _UNSUBSCRIBE_PAGE.format(
+                title="Lien invalide",
+                message="Ce lien de désabonnement n'est plus valide.",
+            ),
+            status_code=400,
+        )
+
+    user_id = UUID(user_id_str)
+    prefs = db.get(NotificationPreference, user_id)
+    if prefs is None:
+        prefs = NotificationPreference(user_id=user_id)
+
+    matrix = dict(prefs.category_prefs or {})
+    matrix["marketing"] = {**matrix.get("marketing", {}), "email": False}
+    prefs.category_prefs = matrix
+    db.add(prefs)
+    db.commit()
+
+    return HTMLResponse(
+        _UNSUBSCRIBE_PAGE.format(
+            title="Désabonnement confirmé",
+            message="Vous ne recevrez plus d'e-mails promotionnels d'E-NOVAR. "
+            "Vous pouvez ajuster vos préférences à tout moment depuis votre profil.",
+        )
+    )

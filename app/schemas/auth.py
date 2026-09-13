@@ -57,6 +57,10 @@ class OtpVerifyRequest(BaseModel):
     token: str
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 

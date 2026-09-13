@@ -38,6 +38,9 @@ class ProfileResponse(BaseModel):
     updated_at: Optional[datetime] = None
 
 
+_SUPPORTED_LANGS = {"fr", "en", "ar", "tm"}
+
+
 class ProfileUpdateRequest(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -45,6 +48,19 @@ class ProfileUpdateRequest(BaseModel):
     phone: Optional[str] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    # The frontend's language switcher (src/i18n/index.ts's setLang) pushes
+    # its choice here so notification_engine.py knows what language to render
+    # in — previously nothing ever wrote this column, so Profile.language was
+    # permanently stuck at its "fr" default regardless of what a user
+    # actually selected in the UI.
+    language: Optional[str] = None
+
+    @field_validator("language")
+    @classmethod
+    def _valid_language(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in _SUPPORTED_LANGS:
+            raise ValueError(f"language must be one of {sorted(_SUPPORTED_LANGS)}")
+        return v
 
 
 _CARD_TYPES = {"cib", "edahabia", "visa"}
@@ -375,8 +391,18 @@ async def student_unlink_parent(
         db,
         event_type="system",
         user_id=parent_link.parent_id,
-        title_override="🔗 Liaison retirée",
-        body_override="Votre enfant s'est dissocié de votre espace parent.",
+        title_i18n={
+            "fr": "🔗 Liaison retirée",
+            "en": "🔗 Link removed",
+            "ar": "🔗 تم إلغاء الربط",
+            "tm": "🔗 Azday yettwakkes",
+        },
+        body_i18n={
+            "fr": "Votre enfant s'est dissocié de votre espace parent.",
+            "en": "Your child unlinked from your parent space.",
+            "ar": "قام طفلك بإلغاء ربطه بمساحة ولي الأمر.",
+            "tm": "Mmi-k/yell-ik yekkes azday ɣer wemḍiq-ik n umawal.",
+        },
         data={"student_id": str(uid)},
     )
 
@@ -545,6 +571,8 @@ def update_profile(
         profile.bio = payload.bio
     if payload.avatar_url is not None:
         profile.avatar_url = payload.avatar_url
+    if payload.language is not None:
+        profile.language = payload.language
 
     profile.updated_at = datetime.utcnow()
     db.add(profile)

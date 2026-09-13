@@ -370,8 +370,18 @@ def student_submit_homework(
     from app.services.notification_engine import emit
     emit(
         db, event_type="homework_submitted", user_id=hw.teacher_id,
-        title_override="📩 Devoir soumis",
-        body_override=f"{student_name} a soumis sa réponse au devoir « {hw.title} ».",
+        title_i18n={
+            "fr": "📩 Devoir soumis",
+            "en": "📩 Homework submitted",
+            "ar": "📩 تم تسليم الواجب",
+            "tm": "📩 Tawuri n wexxam tettwazen",
+        },
+        body_i18n={
+            "fr": f"{student_name} a soumis sa réponse au devoir « {hw.title} ».",
+            "en": f'{student_name} submitted their answer to the "{hw.title}" homework.',
+            "ar": f'قدّم {student_name} إجابته عن واجب "{hw.title}".',
+            "tm": f'{student_name} yeznedd tiririt-is n tewuri n wexxam "{hw.title}".',
+        },
         deep_link_override="/teacher/homework",
         data={"homework_id": str(hw.id)},
         dedup_key=f"homework_submitted:{hw.id}",

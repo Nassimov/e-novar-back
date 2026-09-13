@@ -32,7 +32,7 @@ for the full policy write-up):
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from uuid import UUID
 
 from sqlmodel import Session, select
@@ -119,7 +119,7 @@ def apply_cancellation_side_effects(db: Session, booking: Booking, reason: str) 
     )
 
 
-def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_label: str) -> Tuple[int, int]:
+def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_label_i18n: Dict[str, str]) -> Tuple[int, int]:
     """
     Increments the teacher's severity-weighted strike counter (see
     TEACHER_STRIKE_WEIGHTS), resetting it first if the last incident was
@@ -164,8 +164,18 @@ def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_la
 
     emit(
         db, event_type="teacher_suspended", user_id=teacher_id,
-        title_override="⚠️ Compte suspendu",
-        body_override=f"{human_label} Ton compte est suspendu {days} jour(s) (score de sévérité : {tp.no_response_strikes}).",
+        title_i18n={
+            "fr": "⚠️ Compte suspendu",
+            "en": "⚠️ Account suspended",
+            "ar": "⚠️ الحساب موقوف",
+            "tm": "⚠️ Amiḍan yeḥbes",
+        },
+        body_i18n={
+            "fr": f"{human_label_i18n['fr']} Ton compte est suspendu {days} jour(s) (score de sévérité : {tp.no_response_strikes}).",
+            "en": f"{human_label_i18n['en']} Your account is suspended for {days} day(s) (severity score: {tp.no_response_strikes}).",
+            "ar": f"{human_label_i18n['ar']} حسابك موقوف لمدة {days} يوم/أيام (درجة الخطورة: {tp.no_response_strikes}).",
+            "tm": f"{human_label_i18n['tm']} Amiḍan-ik/inem yeḥbes {days} n wussan (asezwer n tuzzelt: {tp.no_response_strikes}).",
+        },
         data={"reason": reason, "days": days},
         dedup_key=f"teacher_suspended:{teacher_id}:{tp.no_response_strikes}",
     )
@@ -174,15 +184,25 @@ def apply_teacher_strike(db: Session, teacher_id: UUID, reason: str, *, human_la
     for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
         emit(
             db, event_type="teacher_strike_admin_alert", user_id=ar.user_id,
-            title_override="Sanction automatique appliquée à un professeur",
-            body_override=f"{teacher_label} — {human_label} (score {tp.no_response_strikes}) — suspendu {days} jour(s).",
+            title_i18n={
+                "fr": "Sanction automatique appliquée à un professeur",
+                "en": "Automatic sanction applied to a teacher",
+                "ar": "تم تطبيق عقوبة تلقائية على أستاذ",
+                "tm": "Aɛaqeb awurman yettwasnas ɣef uselmad",
+            },
+            body_i18n={
+                "fr": f"{teacher_label} — {human_label_i18n['fr']} (score {tp.no_response_strikes}) — suspendu {days} jour(s).",
+                "en": f"{teacher_label} — {human_label_i18n['en']} (score {tp.no_response_strikes}) — suspended {days} day(s).",
+                "ar": f"{teacher_label} — {human_label_i18n['ar']} (الدرجة {tp.no_response_strikes}) — موقوف {days} يوم/أيام.",
+                "tm": f"{teacher_label} — {human_label_i18n['tm']} (asezwer {tp.no_response_strikes}) — yeḥbes {days} n wussan.",
+            },
             data={"teacher_id": str(teacher_id), "reason": reason, "days": days},
             dedup_key=f"teacher_strike_admin_alert:{teacher_id}:{tp.no_response_strikes}:{ar.user_id}",
         )
     return (tp.no_response_strikes, days)
 
 
-def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_label: str) -> Tuple[int, int]:
+def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_label_i18n: Dict[str, str]) -> Tuple[int, int]:
     """
     Student-side mirror of apply_teacher_strike — same escalating logic, but
     the consequence is a booking-only suspension (StudentProfile
@@ -226,16 +246,36 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
     if days > 0:
         emit(
             db, event_type="student_booking_suspended", user_id=student_id,
-            title_override="⚠️ Réservations temporairement bloquées",
-            body_override=f"{human_label} Tu ne peux plus créer de nouvelle réservation pendant {days} jour(s).",
+            title_i18n={
+                "fr": "⚠️ Réservations temporairement bloquées",
+                "en": "⚠️ Bookings temporarily blocked",
+                "ar": "⚠️ تم حظر الحجوزات مؤقتًا",
+                "tm": "⚠️ Iḥerzan ḥebsen i kra n wakud",
+            },
+            body_i18n={
+                "fr": f"{human_label_i18n['fr']} Tu ne peux plus créer de nouvelle réservation pendant {days} jour(s).",
+                "en": f"{human_label_i18n['en']} You can't create a new booking for {days} day(s).",
+                "ar": f"{human_label_i18n['ar']} لا يمكنك إنشاء حجز جديد لمدة {days} يوم/أيام.",
+                "tm": f"{human_label_i18n['tm']} Ur tezmireḍ ara ad tesnulfuḍ aḥerz amaynut i {days} n wussan.",
+            },
             data={"reason": reason, "days": days},
             dedup_key=f"student_booking_suspended:{student_id}:{sp.no_show_strikes}",
         )
     else:
         emit(
             db, event_type="student_no_show_warning", user_id=student_id,
-            title_override="Absence constatée",
-            body_override=f"{human_label} En cas de récidive, tes réservations pourront être temporairement bloquées.",
+            title_i18n={
+                "fr": "Absence constatée",
+                "en": "Absence recorded",
+                "ar": "تم تسجيل غياب",
+                "tm": "Tuɣalin tettwaskel",
+            },
+            body_i18n={
+                "fr": f"{human_label_i18n['fr']} En cas de récidive, tes réservations pourront être temporairement bloquées.",
+                "en": f"{human_label_i18n['en']} If this happens again, your bookings may be temporarily blocked.",
+                "ar": f"{human_label_i18n['ar']} في حال تكرار ذلك، قد يتم حظر حجوزاتك مؤقتًا.",
+                "tm": f"{human_label_i18n['tm']} Ma yuɣal ad yeḍru, iḥerzan-ik/inem zemren ad ḥebsen i kra n wakud.",
+            },
             data={"reason": reason},
             dedup_key=f"student_no_show_warning:{student_id}:{sp.no_show_strikes}",
         )
@@ -244,8 +284,18 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
     for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
         emit(
             db, event_type="student_no_show_admin_alert", user_id=ar.user_id,
-            title_override="Absence élève constatée",
-            body_override=f"{student_label} — {human_label} (score {sp.no_show_strikes})" + (f" — réservations bloquées {days} jour(s)." if days else " — avertissement envoyé."),
+            title_i18n={
+                "fr": "Absence élève constatée",
+                "en": "Student absence recorded",
+                "ar": "تم تسجيل غياب تلميذ",
+                "tm": "Tuɣalin n unelmad tettwaskel",
+            },
+            body_i18n={
+                "fr": f"{student_label} — {human_label_i18n['fr']} (score {sp.no_show_strikes})" + (f" — réservations bloquées {days} jour(s)." if days else " — avertissement envoyé."),
+                "en": f"{student_label} — {human_label_i18n['en']} (score {sp.no_show_strikes})" + (f" — bookings blocked {days} day(s)." if days else " — warning sent."),
+                "ar": f"{student_label} — {human_label_i18n['ar']} (الدرجة {sp.no_show_strikes})" + (f" — حجوزات محظورة {days} يوم/أيام." if days else " — تم إرسال تحذير."),
+                "tm": f"{student_label} — {human_label_i18n['tm']} (asezwer {sp.no_show_strikes})" + (f" — iḥerzan ḥebsen {days} n wussan." if days else " — alɣu yettwazen."),
+            },
             data={"student_id": str(student_id), "reason": reason, "days": days},
             dedup_key=f"student_no_show_admin_alert:{student_id}:{sp.no_show_strikes}:{ar.user_id}",
         )
@@ -266,11 +316,30 @@ def apply_student_strike(db: Session, student_id: UUID, reason: str, *, human_la
     for link in parent_links:
         emit(
             db, event_type="child_no_show_alert", user_id=link.parent_id,
-            title_override="Absence de votre enfant constatée",
-            body_override=(
-                f"{student_label} — {human_label}"
-                + (f" Réservations bloquées {days} jour(s)." if days else " Avertissement envoyé — récidive = blocage temporaire des réservations.")
-            ),
+            title_i18n={
+                "fr": "Absence de votre enfant constatée",
+                "en": "Your child's absence recorded",
+                "ar": "تم تسجيل غياب طفلك",
+                "tm": "Tuɣalin n mmi-k/yell-ik tettwaskel",
+            },
+            body_i18n={
+                "fr": (
+                    f"{student_label} — {human_label_i18n['fr']}"
+                    + (f" Réservations bloquées {days} jour(s)." if days else " Avertissement envoyé — récidive = blocage temporaire des réservations.")
+                ),
+                "en": (
+                    f"{student_label} — {human_label_i18n['en']}"
+                    + (f" Bookings blocked for {days} day(s)." if days else " Warning sent — a repeat will temporarily block bookings.")
+                ),
+                "ar": (
+                    f"{student_label} — {human_label_i18n['ar']}"
+                    + (f" حجوزات محظورة لمدة {days} يوم/أيام." if days else " تم إرسال تحذير — التكرار سيؤدي إلى حظر مؤقت للحجوزات.")
+                ),
+                "tm": (
+                    f"{student_label} — {human_label_i18n['tm']}"
+                    + (f" Iḥerzan ḥebsen i {days} n wussan." if days else " Alɣu yettwazen — tuɣalin ad d-tejbed aḥbas i kra n wakud n yiḥerzan.")
+                ),
+            },
             data={"student_id": str(student_id), "reason": reason, "days": days},
             dedup_key=f"child_no_show_alert:{student_id}:{sp.no_show_strikes}:{link.parent_id}",
         )

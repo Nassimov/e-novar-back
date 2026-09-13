@@ -57,49 +57,47 @@ def send_welcome_email(self, to: str, name: str) -> bool:
         raise self.retry(exc=exc)
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_booking_confirmation(self, to: str, booking_data: Dict[str, Any]) -> bool:
-    teacher_name = booking_data.get("teacher_name", "votre tuteur")
-    date_str = booking_data.get("date", "")
-    time_str = booking_data.get("slot_time", "")
-    amount = booking_data.get("amount_dzd", 0)
-    subject_name = booking_data.get("subject", "")
-
-    html = f"""
-    <html>
-    <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
-      <h1 style="color:#4F46E5;">Session confirmée</h1>
-      <p>Votre session avec <strong>{teacher_name}</strong> est confirmée.</p>
-      <table style="width:100%;border-collapse:collapse;margin:24px 0;">
-        <tr style="background:#F3F4F6;">
-          <td style="padding:12px;border:1px solid #E5E7EB;"><strong>Matière</strong></td>
-          <td style="padding:12px;border:1px solid #E5E7EB;">{subject_name}</td>
-        </tr>
-        <tr>
-          <td style="padding:12px;border:1px solid #E5E7EB;"><strong>Date</strong></td>
-          <td style="padding:12px;border:1px solid #E5E7EB;">{date_str}</td>
-        </tr>
-        <tr style="background:#F3F4F6;">
-          <td style="padding:12px;border:1px solid #E5E7EB;"><strong>Heure</strong></td>
-          <td style="padding:12px;border:1px solid #E5E7EB;">{time_str}</td>
-        </tr>
-        <tr>
-          <td style="padding:12px;border:1px solid #E5E7EB;"><strong>Montant</strong></td>
-          <td style="padding:12px;border:1px solid #E5E7EB;">{amount} DZD</td>
-        </tr>
-      </table>
-      <p>
-        <a href="{settings.frontend_url}/student/sessions"
-           style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;">
-          Voir mes sessions
-        </a>
-      </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
-    </body>
-    </html>
-    """
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
+def send_verification_email(self, to: str, name: str, verify_url: str) -> bool:
+    """Sent right after registration — the account stays gated (see
+    auth-context.tsx's verify-email redirect guard) until this link is
+    clicked. Uses _brand_wrap since this needs the CTA-button layout,
+    unlike send_welcome_email above which predates that shared helper."""
+    html = _brand_wrap(
+        preheader="Confirme ton adresse e-mail pour activer ton compte E-NOVAR.",
+        body_html=(
+            f"<h2 style='margin:0 0 12px;font-size:19px;'>Bienvenue sur E-NOVAR, {name} !</h2>"
+            "<p style='margin:0;color:#374151;'>Il ne reste qu'une étape avant d'accéder à ton compte : "
+            "confirme ton adresse e-mail en cliquant sur le bouton ci-dessous.</p>"
+            "<p style='margin:16px 0 0;color:#9CA3AF;font-size:13px;'>Ce lien expire dans 48 heures. "
+            "Si tu n'es pas à l'origine de cette inscription, ignore simplement cet e-mail.</p>"
+        ),
+        cta_label="Confirmer mon e-mail",
+        cta_url=verify_url,
+    )
     try:
-        return _send(to, "Confirmation de réservation — Enovar", html)
+        return _send(to, "Confirme ton e-mail — E-NOVAR", html)
+    except Exception as exc:
+        raise self.retry(exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=30)
+def send_password_reset_code_email(self, to: str, code: str) -> bool:
+    """The emailed half of the password-reset flow — see
+    app/services/auth.py's send_otp_email (Redis-side) and
+    app/routers/auth.py's POST /verify-otp + POST /reset-password."""
+    html = _brand_wrap(
+        preheader=f"Ton code de réinitialisation E-NOVAR : {code}",
+        body_html=(
+            "<h2 style='margin:0 0 12px;font-size:19px;'>Réinitialisation de mot de passe</h2>"
+            "<p style='margin:0 0 20px;color:#374151;'>Voici ton code à saisir pour réinitialiser ton mot de passe :</p>"
+            f"<p style='margin:0;font-size:32px;font-weight:800;letter-spacing:.15em;color:#000666;text-align:center;'>{code}</p>"
+            "<p style='margin:20px 0 0;color:#9CA3AF;font-size:13px;'>Ce code expire dans 10 minutes. "
+            "Si tu n'es pas à l'origine de cette demande, ignore simplement cet e-mail — ton mot de passe ne changera pas.</p>"
+        ),
+    )
+    try:
+        return _send(to, "Ton code de réinitialisation E-NOVAR", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
@@ -149,35 +147,6 @@ def send_password_reset_email(self, to: str, reset_link: str) -> bool:
     """
     try:
         return _send(to, "Réinitialisation de mot de passe — Enovar", html)
-    except Exception as exc:
-        raise self.retry(exc=exc)
-
-
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_session_reminder_email(
-    self, to: str, name: str, teacher_name: str, date_str: str, time_str: str
-) -> bool:
-    html = f"""
-    <html>
-    <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
-      <h1 style="color:#4F46E5;">Rappel de session</h1>
-      <p>Bonjour {name},</p>
-      <p>Votre session avec <strong>{teacher_name}</strong> est prévue demain :</p>
-      <div style="background:#F3F4F6;padding:20px;border-radius:8px;margin:20px 0;">
-        <p style="margin:0;font-size:18px;"><strong>{date_str} à {time_str}</strong></p>
-      </div>
-      <p>
-        <a href="{settings.frontend_url}/student/sessions"
-           style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;">
-          Voir les détails
-        </a>
-      </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
-    </body>
-    </html>
-    """
-    try:
-        return _send(to, f"Rappel de session demain — {teacher_name}", html)
     except Exception as exc:
         raise self.retry(exc=exc)
 
@@ -306,37 +275,14 @@ def send_teacher_rejected_email(self, to: str, name: str, reason: str) -> bool:
         raise self.retry(exc=exc)
 
 
-@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_withdrawal_processed_email(self, to: str, name: str, amount: int, status: str) -> bool:
-    status_label = "approuvée" if status == "approved" else "refusée"
-    color = "#10B981" if status == "approved" else "#EF4444"
-    html = f"""
-    <html>
-    <body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#111;">
-      <h1 style="color:{color};">Retrait {status_label}</h1>
-      <p>Bonjour {name},</p>
-      <p>Votre demande de retrait de <strong>{amount} DZD</strong> a été <strong>{status_label}</strong>.</p>
-      <p>
-        <a href="{settings.frontend_url}/teacher/wallet"
-           style="background:#4F46E5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;">
-          Voir mon portefeuille
-        </a>
-      </p>
-      <p style="color:#6B7280;font-size:13px;margin-top:40px;">L'équipe Enovar</p>
-    </body>
-    </html>
-    """
-    try:
-        return _send(to, f"Demande de retrait {status_label} — Enovar", html)
-    except Exception as exc:
-        raise self.retry(exc=exc)
-
-
 # ─── Notification engine emails ───────────────────────────────────────────────
 # Shared branded wrapper for the generic/catalogue-driven emails below (the
 # bespoke templates above keep their own inline markup untouched).
 
-def _brand_wrap(preheader: str, body_html: str, cta_label: Optional[str] = None, cta_url: Optional[str] = None) -> str:
+def _brand_wrap(
+    preheader: str, body_html: str, cta_label: Optional[str] = None, cta_url: Optional[str] = None,
+    unsubscribe_url: Optional[str] = None,
+) -> str:
     cta_html = ""
     if cta_label and cta_url:
         cta_html = f"""
@@ -366,7 +312,7 @@ def _brand_wrap(preheader: str, body_html: str, cta_label: Optional[str] = None,
             {cta_html}
             <tr><td style="padding:28px 40px 32px;color:#9CA3AF;font-size:12px;border-top:1px solid #F3F4F6;margin-top:20px;">
               L'équipe E-NOVAR — la plateforme algérienne de cours particuliers.<br/>
-              Gérez vos préférences de notification depuis votre profil.
+              {f'<a href="{unsubscribe_url}" style="color:#9CA3AF;">Se désabonner de ces e-mails</a>' if unsubscribe_url else "Gérez vos préférences de notification depuis votre profil."}
             </td></tr>
           </table>
         </td></tr>
@@ -377,16 +323,31 @@ def _brand_wrap(preheader: str, body_html: str, cta_label: Optional[str] = None,
 
 
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
-def send_generic_notification_email(self, to: str, title: str, body: str, deep_link: Optional[str] = None) -> bool:
+def send_generic_notification_email(
+    self, to: str, title: str, body: str, deep_link: Optional[str] = None,
+    category: Optional[str] = None, user_id: Optional[str] = None,
+) -> bool:
     """Fallback branded email for any notification_templates event that
     doesn't have a bespoke template above — used by
-    app/services/notification_engine.py's async delivery queue."""
+    app/services/notification_engine.py's async delivery queue.
+
+    category/user_id: only used to attach a real one-click unsubscribe link
+    for marketing/campaign emails (legal requirement for commercial email —
+    see app/routers/notifications.py's GET /unsubscribe). Every other
+    category is transactional and keeps the plain "manage your preferences"
+    footer, which doesn't need one."""
     url = f"{settings.frontend_url}{deep_link}" if deep_link and deep_link.startswith("/") else (deep_link or settings.frontend_url)
+    unsubscribe_url = None
+    if category == "marketing" and user_id:
+        from app.core.security import create_unsubscribe_jwt
+        token = create_unsubscribe_jwt(user_id)
+        unsubscribe_url = f"{settings.app_url}/api/notifications/unsubscribe?token={token}"
     html = _brand_wrap(
         preheader=body[:120],
         body_html=f"<h2 style='margin:0 0 12px;font-size:19px;color:#111827;'>{title}</h2><p style='margin:0;color:#374151;'>{body}</p>",
         cta_label="Voir sur Enovar",
         cta_url=url,
+        unsubscribe_url=unsubscribe_url,
     )
     try:
         return _send(to, title, html)

@@ -38,11 +38,14 @@ from app.models.notification import (
     NotificationQueue,
     NotificationTemplate,
 )
-from app.models.profile import UserRole
+from app.models.profile import Profile, UserRole
 
 # Mirrors app/routers/auth.py's GET /me role resolution exactly — a user may
 # hold multiple roles, this picks the one their frontend routes actually use.
 _ROLE_PRIORITY = {"admin": 4, "teacher": 3, "parent": 2, "student": 1}
+
+#: Kept in sync with the Postgres `lang` enum (migration 114 adds "tm").
+_SUPPORTED_LANGS = {"fr", "en", "ar", "tm"}
 
 
 def _resolve_role(db: Session, user_id: UUID) -> Optional[str]:
@@ -50,6 +53,12 @@ def _resolve_role(db: Session, user_id: UUID) -> Optional[str]:
     if not rows:
         return None
     return max(rows, key=lambda r: _ROLE_PRIORITY.get(r.role, 0)).role
+
+
+def _resolve_language(db: Session, user_id: UUID) -> str:
+    profile = db.get(Profile, user_id)
+    lang = getattr(profile, "language", None) if profile else None
+    return lang if lang in _SUPPORTED_LANGS else "fr"
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +70,26 @@ def _render(template: str, context: Dict[str, Any]) -> str:
         # Missing placeholder in context — better to show the raw template
         # than to 500 the caller's request over a cosmetic string issue.
         return template
+
+
+def _render_i18n(
+    lang: str,
+    i18n_dict: Optional[Dict[str, str]],
+    legacy_plain: Optional[str],
+    context: Dict[str, Any],
+) -> Optional[str]:
+    """Resolve the best available template string for `lang`: the exact
+    language, then "fr" (every template/override is guaranteed to have at
+    least French), then the legacy plain column/string for anything not yet
+    migrated to a per-language dict — then render placeholders as usual."""
+    source = None
+    if i18n_dict:
+        source = i18n_dict.get(lang) or i18n_dict.get("fr")
+    if source is None:
+        source = legacy_plain
+    if source is None:
+        return None
+    return _render(source, context)
 
 
 def _render_deep_link(template: str, context: Dict[str, Any]) -> Optional[str]:
@@ -109,6 +138,8 @@ def emit(
     data: Optional[Dict[str, Any]] = None,
     title_override: Optional[str] = None,
     body_override: Optional[str] = None,
+    title_i18n: Optional[Dict[str, str]] = None,
+    body_i18n: Optional[Dict[str, str]] = None,
     deep_link_override: Optional[str] = None,
 ) -> Optional[Notification]:
     """
@@ -117,6 +148,14 @@ def emit(
       - dedup_key collided with an existing notification for this user
         (constraint violation is swallowed — that IS the intended behavior),
       - or ANYTHING else went wrong (see the top-level guard below).
+
+    title_i18n/body_i18n (preferred over title_override/body_override for any
+    new call site): {"fr": "...", "en": "...", "ar": "...", "tm": "..."} —
+    rendered in the recipient's Profile.language (falling back to "fr"), so
+    push/email/in-app all carry correctly localized text from the single
+    point where it's rendered (see _render_i18n). title_override/body_override
+    are kept for callers not yet migrated — they always render the same
+    literal string regardless of the recipient's language.
 
     Notifications are a side effect, never the main point of the request
     that triggers them — a caller accepting a booking, awarding KP, etc.
@@ -128,7 +167,8 @@ def emit(
         return _emit_inner(
             db, event_type=event_type, user_id=user_id, context=context,
             dedup_key=dedup_key, data=data, title_override=title_override,
-            body_override=body_override, deep_link_override=deep_link_override,
+            body_override=body_override, title_i18n=title_i18n, body_i18n=body_i18n,
+            deep_link_override=deep_link_override,
         )
     except Exception:
         try:
@@ -149,6 +189,8 @@ def _emit_inner(
     data: Optional[Dict[str, Any]] = None,
     title_override: Optional[str] = None,
     body_override: Optional[str] = None,
+    title_i18n: Optional[Dict[str, str]] = None,
+    body_i18n: Optional[Dict[str, str]] = None,
     deep_link_override: Optional[str] = None,
 ) -> Optional[Notification]:
     context = dict(context) if context else {}
@@ -168,16 +210,35 @@ def _emit_inner(
 
     if template is not None and not template.active:
         return None
-    if template is None and not (title_override and body_override):
+    has_override = (title_override and body_override) or (title_i18n and body_i18n)
+    if template is None and not has_override:
         logger.warning("notification_engine.emit: no template for event_type=%s and no override given", event_type)
         return None
 
     category = template.category if template else "system"
     priority = template.priority if template else "normal"
     channels = template.channels if template else ["in_app"]
+    lang = _resolve_language(db, user_id)
 
-    title = title_override or _render(template.title_template, context)
-    body = body_override or _render(template.body_template, context)
+    # Caller-supplied title_i18n/body_i18n (an override) takes priority over
+    # the template's own i18n columns — matches the precedence
+    # title_override/body_override already had over the template.
+    title = (
+        title_override
+        or _render_i18n(
+            lang, title_i18n or (template.title_i18n if template else None),
+            template.title_template if template else None, context,
+        )
+        or ""
+    )
+    body = (
+        body_override
+        or _render_i18n(
+            lang, body_i18n or (template.body_i18n if template else None),
+            template.body_template if template else None, context,
+        )
+        or ""
+    )
     deep_link = deep_link_override or (
         _render_deep_link(template.deep_link_template, context)
         if template and template.deep_link_template
@@ -225,6 +286,10 @@ def _emit_inner(
                 "body": body,
                 "deep_link": deep_link,
                 "data": data or context,
+                # Read at delivery time by _deliver_queue_row so a marketing
+                # email (and only a marketing email) gets a one-click
+                # unsubscribe footer — see email_tasks.py's _brand_wrap.
+                "category": category,
             },
             dedup_key=f"{dedup_key}:{channel}" if dedup_key else None,
         ))

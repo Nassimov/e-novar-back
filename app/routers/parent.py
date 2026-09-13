@@ -328,8 +328,18 @@ def link_child(
     from app.services.notification_engine import emit
     emit(
         db, event_type="system", user_id=sp.user_id,
-        title_override="👨‍👩‍👧 Compte parent lié",
-        body_override=f"{(parent_profile.full_name if parent_profile else None) or 'Un parent'} suit désormais votre compte E-NOVAR.",
+        title_i18n={
+            "fr": "👨‍👩‍👧 Compte parent lié",
+            "en": "👨‍👩‍👧 Parent account linked",
+            "ar": "👨‍👩‍👧 تم ربط حساب ولي الأمر",
+            "tm": "👨‍👩‍👧 Amiḍan n umawal yettwadday",
+        },
+        body_i18n={
+            "fr": f"{(parent_profile.full_name if parent_profile else None) or 'Un parent'} suit désormais votre compte E-NOVAR.",
+            "en": f"{(parent_profile.full_name if parent_profile else None) or 'A parent'} is now following your E-NOVAR account.",
+            "ar": f"أصبح {(parent_profile.full_name if parent_profile else None) or 'ولي أمر'} يتابع حسابك في E-NOVAR.",
+            "tm": f"{(parent_profile.full_name if parent_profile else None) or 'Amawal'} yettabaɛ tura amiḍan-ik n E-NOVAR.",
+        },
         data={"parent_id": str(uid)},
     )
 
@@ -364,8 +374,18 @@ def unlink_child(
     from app.services.notification_engine import emit
     emit(
         db, event_type="system", user_id=student_id,
-        title_override="🔗 Liaison retirée",
-        body_override="Votre parent s'est dissocié de votre compte. Vous gérez maintenant votre espace en autonomie.",
+        title_i18n={
+            "fr": "🔗 Liaison retirée",
+            "en": "🔗 Link removed",
+            "ar": "🔗 تم إلغاء الربط",
+            "tm": "🔗 Azday yettwakkes",
+        },
+        body_i18n={
+            "fr": "Votre parent s'est dissocié de votre compte. Vous gérez maintenant votre espace en autonomie.",
+            "en": "Your parent unlinked from your account. You now manage your space independently.",
+            "ar": "قام ولي أمرك بإلغاء ربطه بحسابك. أنت الآن تدير مساحتك بشكل مستقل.",
+            "tm": "Amawal-ik yekkes azday ɣer umiḍan-ik. Tura tesduḍ wemḍiq-ik s timmad-ik.",
+        },
         data={"parent_id": str(uid)},
     )
     return {"status": "revoked"}

@@ -569,8 +569,18 @@ def submit_proof(
                 db,
                 event_type="system",
                 user_id=ar.user_id,
-                title_override="Nouvelle soumission de défi",
-                body_override=f"Une preuve a été soumise pour le défi « {challenge.title} ».",
+                title_i18n={
+                    "fr": "Nouvelle soumission de défi",
+                    "en": "New challenge submission",
+                    "ar": "تقديم جديد لتحدٍ",
+                    "tm": "Tuzna tamaynut n unabaḍ",
+                },
+                body_i18n={
+                    "fr": f"Une preuve a été soumise pour le défi « {challenge.title} ».",
+                    "en": f'Proof was submitted for the "{challenge.title}" challenge.',
+                    "ar": f'تم تقديم إثبات لتحدي "{challenge.title}".',
+                    "tm": f'Tabatit tettwazen i unabaḍ "{challenge.title}".',
+                },
                 dedup_key=f"challenge_submission:{part.id}:{ar.user_id}",
             )
     except Exception:

@@ -152,7 +152,12 @@ def approve_validation(
         from app.services.booking_safety import apply_student_strike
         apply_student_strike(
             db, sv.student_id, "student_validation_neglect",
-            human_label="N'a pas validé une séance confirmée par l'administration comme s'étant bien déroulée.",
+            human_label_i18n={
+                "fr": "N'a pas validé une séance confirmée par l'administration comme s'étant bien déroulée.",
+                "en": "Didn't validate a lesson the administration confirmed as having taken place.",
+                "ar": "لم يتم التحقق من حصة أكدت الإدارة أنها جرت بشكل جيد.",
+                "tm": "Ur yesenteḍ ara tiɣimit i d-yesenteḍ unedbal belli tedṛa akken iwata.",
+            },
         )
 
     log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=admin_id,

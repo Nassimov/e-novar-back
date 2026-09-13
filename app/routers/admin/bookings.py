@@ -154,25 +154,45 @@ def approve_manual_payment(
     teacher = db.get(Profile, booking.teacher_id)
     method_label = _METHOD_LABELS.get(booking.payment_method, booking.payment_method)
 
-    def _notify(user_id: UUID, title: str, body: str):
+    def _notify(user_id: UUID, title_i18n: Dict[str, str], body_i18n: Dict[str, str]):
         from app.services.notification_engine import emit
         emit(
             db, event_type="booking", user_id=user_id,
-            title_override=title, body_override=body,
+            title_i18n=title_i18n, body_i18n=body_i18n,
             data={"booking_id": str(booking.id)},
         )
 
     if student:
         _notify(
             booking.student_id,
-            "✅ Paiement confirmé",
-            f"Votre paiement {method_label} pour la réservation du {booking.booking_date} a été validé par l'administration. Votre séance est confirmée.",
+            {
+                "fr": "✅ Paiement confirmé",
+                "en": "✅ Payment confirmed",
+                "ar": "✅ تم تأكيد الدفع",
+                "tm": "✅ Axelaṣ yettwasenteḍ",
+            },
+            {
+                "fr": f"Votre paiement {method_label} pour la réservation du {booking.booking_date} a été validé par l'administration. Votre séance est confirmée.",
+                "en": f"Your {method_label} payment for the {booking.booking_date} booking was validated by the administration. Your lesson is confirmed.",
+                "ar": f"تم التحقق من دفعتك عبر {method_label} لحجز تاريخ {booking.booking_date} من قبل الإدارة. تم تأكيد حصتك.",
+                "tm": f"Axelaṣ-ik/inem {method_label} n uḥerz n {booking.booking_date} yettwasenteḍ sɣur unedbal. Tiɣimit-ik/inem tettwasenteḍ.",
+            },
         )
     if teacher:
         _notify(
             booking.teacher_id,
-            "📬 Réservation confirmée",
-            f"Un élève a réservé une séance pour le {booking.booking_date} (paiement {method_label} validé par l'administration).",
+            {
+                "fr": "📬 Réservation confirmée",
+                "en": "📬 Booking confirmed",
+                "ar": "📬 تم تأكيد الحجز",
+                "tm": "📬 Aḥerz yettwasenteḍ",
+            },
+            {
+                "fr": f"Un élève a réservé une séance pour le {booking.booking_date} (paiement {method_label} validé par l'administration).",
+                "en": f"A student booked a lesson for {booking.booking_date} ({method_label} payment validated by the administration).",
+                "ar": f"حجز تلميذ حصة بتاريخ {booking.booking_date} (تم التحقق من الدفع عبر {method_label} من قبل الإدارة).",
+                "tm": f"Anelmad yeḥraz tiɣimit i {booking.booking_date} (axelaṣ {method_label} yettwasenteḍ sɣur unedbal).",
+            },
         )
 
     db.commit()
@@ -246,11 +266,30 @@ def reject_manual_payment(
         for ar in db.exec(select(UserRole).where(UserRole.role == "admin")).all():
             emit(
                 db, event_type="manual_payment_expired_admin_alert", user_id=ar.user_id,
-                title_override="⚠️ Remboursement Edahabia manuel requis",
-                body_override=(
-                    f"Réservation rejetée par l'administration mais déjà payée en Edahabia "
-                    f"({booking.amount} DA) — remboursement manuel requis."
-                ),
+                title_i18n={
+                    "fr": "⚠️ Remboursement Edahabia manuel requis",
+                    "en": "⚠️ Manual Edahabia refund required",
+                    "ar": "⚠️ يتطلب استرجاع يدوي عبر Edahabia",
+                    "tm": "⚠️ Yesra tuɣalin s ufus s Edahabia",
+                },
+                body_i18n={
+                    "fr": (
+                        f"Réservation rejetée par l'administration mais déjà payée en Edahabia "
+                        f"({booking.amount} DA) — remboursement manuel requis."
+                    ),
+                    "en": (
+                        f"Booking rejected by the administration but already paid via Edahabia "
+                        f"({booking.amount} DZD) — manual refund required."
+                    ),
+                    "ar": (
+                        f"تم رفض الحجز من قبل الإدارة لكنه تم دفعه مسبقًا عبر Edahabia "
+                        f"({booking.amount} دج) — يتطلب استرجاع يدوي."
+                    ),
+                    "tm": (
+                        f"Aḥerz yettwagi sɣur unedbal maca yettwaxlaṣ yakan s Edahabia "
+                        f"({booking.amount} DA) — yesra tuɣalin s ufus."
+                    ),
+                },
                 data={"booking_id": str(booking.id)},
             )
 
@@ -259,8 +298,18 @@ def reject_manual_payment(
     if student:
         emit(
             db, event_type="booking", user_id=booking.student_id,
-            title_override="❌ Paiement non validé",
-            body_override=f"Votre paiement {method_label} pour la réservation du {booking.booking_date} n'a pas pu être validé. Contactez le support.",
+            title_i18n={
+                "fr": "❌ Paiement non validé",
+                "en": "❌ Payment not validated",
+                "ar": "❌ لم يتم التحقق من الدفع",
+                "tm": "❌ Axelaṣ ur yettwasenteḍ ara",
+            },
+            body_i18n={
+                "fr": f"Votre paiement {method_label} pour la réservation du {booking.booking_date} n'a pas pu être validé. Contactez le support.",
+                "en": f"Your {method_label} payment for the {booking.booking_date} booking could not be validated. Contact support.",
+                "ar": f"تعذر التحقق من دفعتك عبر {method_label} لحجز تاريخ {booking.booking_date}. تواصل مع الدعم.",
+                "tm": f"Axelaṣ-ik/inem {method_label} n uḥerz n {booking.booking_date} ur yezmir ara ad yettwasenteḍ. Nermes tallalt.",
+            },
             data={"booking_id": str(booking.id)},
         )
 

@@ -132,6 +132,89 @@ def decode_camera_jwt(token: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def create_email_verification_jwt(user_id: str) -> str:
+    """Issue a registration email-verification link token (see
+    app/routers/auth.py's POST /verify-email). 48h expiry — long enough
+    that a slow inbox check doesn't lock someone out of an account they
+    just created, short enough to bound how long a leaked/old link stays
+    exploitable. The only action a valid token can trigger is flipping
+    that one user's own Profile.email_verified to True — nothing else."""
+    now = datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {
+        "sub": user_id,
+        "type": "email_verification",
+        "iat": now,
+        "exp": now + timedelta(hours=48),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=_ALGORITHM)
+
+
+def decode_email_verification_jwt(token: str) -> Optional[str]:
+    """Validate an email-verification token, returning the user_id or None."""
+    try:
+        claims = jwt.decode(token, settings.secret_key, algorithms=[_ALGORITHM])
+        if claims.get("type") != "email_verification":
+            return None
+        return claims.get("sub")
+    except JWTError:
+        return None
+
+
+def create_password_reset_jwt(user_id: str) -> str:
+    """Issue a short-lived password-reset token, minted only after the
+    user has already proven control of their inbox by typing the emailed
+    OTP code correctly (see app/routers/auth.py's POST /verify-otp and
+    POST /reset-password). 15 minutes — this is the LAST step of an
+    already-completed verification, not a standalone link, so it can be
+    short-lived without hurting UX."""
+    now = datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {
+        "sub": user_id,
+        "type": "password_reset",
+        "iat": now,
+        "exp": now + timedelta(minutes=15),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=_ALGORITHM)
+
+
+def decode_password_reset_jwt(token: str) -> Optional[str]:
+    """Validate a password-reset token, returning the user_id or None."""
+    try:
+        claims = jwt.decode(token, settings.secret_key, algorithms=[_ALGORITHM])
+        if claims.get("type") != "password_reset":
+            return None
+        return claims.get("sub")
+    except JWTError:
+        return None
+
+
+def create_unsubscribe_jwt(user_id: str) -> str:
+    """Issue a one-click marketing-email unsubscribe link token (see
+    app/routers/notifications.py's GET /unsubscribe). Deliberately no `exp`
+    — a campaign email can sit unread in an inbox for months, and the link
+    inside it must still work whenever it's eventually clicked. Low-stakes
+    by design: the only action a valid token can ever trigger is flipping
+    one user's own marketing/email preference off, nothing else, so reusing
+    `settings.secret_key` (no dedicated secret) is fine here."""
+    payload: Dict[str, Any] = {
+        "sub": user_id,
+        "type": "unsubscribe_marketing",
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=_ALGORITHM)
+
+
+def decode_unsubscribe_jwt(token: str) -> Optional[str]:
+    """Validate an unsubscribe token, returning the user_id or None."""
+    try:
+        claims = jwt.decode(token, settings.secret_key, algorithms=[_ALGORITHM])
+        if claims.get("type") != "unsubscribe_marketing":
+            return None
+        return claims.get("sub")
+    except JWTError:
+        return None
+
+
 def extract_role(claims: Dict[str, Any]) -> str:
     """
     Extract the app role from JWT claims.

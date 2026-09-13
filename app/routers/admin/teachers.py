@@ -118,9 +118,9 @@ def _reliability_stats_for(teacher_id: UUID, db: Session) -> dict:
     }
 
 
-def _notify(db: Session, user_id: UUID, title: str, body: str) -> None:
+def _notify(db: Session, user_id: UUID, title_i18n: Dict[str, str], body_i18n: Dict[str, str]) -> None:
     from app.services.notification_engine import emit
-    emit(db, event_type="system", user_id=user_id, title_override=title, body_override=body)
+    emit(db, event_type="system", user_id=user_id, title_i18n=title_i18n, body_i18n=body_i18n)
 
 
 def _fire_approval_email(p: Profile) -> None:
@@ -340,12 +340,34 @@ def approve_teacher(
 
     _notify(
         db, user_id,
-        title="🎉 Profil validé !",
-        body=(
-            "Félicitations ! Votre profil enseignant a été approuvé. "
-            "Vous pouvez dès maintenant configurer vos disponibilités et recevoir des réservations. "
-            "50 EP vous ont été offerts en cadeau de bienvenue."
-        ),
+        title_i18n={
+            "fr": "🎉 Profil validé !",
+            "en": "🎉 Profile approved!",
+            "ar": "🎉 تم قبول الملف الشخصي!",
+            "tm": "🎉 Amaɣnu yettwaqbel!",
+        },
+        body_i18n={
+            "fr": (
+                "Félicitations ! Votre profil enseignant a été approuvé. "
+                "Vous pouvez dès maintenant configurer vos disponibilités et recevoir des réservations. "
+                "50 EP vous ont été offerts en cadeau de bienvenue."
+            ),
+            "en": (
+                "Congratulations! Your teacher profile has been approved. "
+                "You can now set your availability and start receiving bookings. "
+                "50 EP were gifted to you as a welcome bonus."
+            ),
+            "ar": (
+                "تهانينا! تم قبول ملفك الشخصي كأستاذ. "
+                "يمكنك الآن ضبط أوقات توفرك واستقبال الحجوزات. "
+                "حصلت على 50 EP كهدية ترحيبية."
+            ),
+            "tm": (
+                "Ay ajmil! Amaɣnu-ik n uselmad yettwaqbel. "
+                "Tzemreḍ tura ad tesbaduḍ lawan-ik akked ad tremseḍ iḥerzan. "
+                "Tremseḍ 50 EP d tikci n usnas."
+            ),
+        },
     )
 
     db.commit()
@@ -419,8 +441,18 @@ def suspend_teacher(
     db.add(tp)
     _notify(
         db, user_id,
-        title="⚠️ Compte suspendu",
-        body=f"Votre compte enseignant a été suspendu. Motif : {reason_text}",
+        title_i18n={
+            "fr": "⚠️ Compte suspendu",
+            "en": "⚠️ Account suspended",
+            "ar": "⚠️ الحساب موقوف",
+            "tm": "⚠️ Amiḍan yeḥbes",
+        },
+        body_i18n={
+            "fr": f"Votre compte enseignant a été suspendu. Motif : {reason_text}",
+            "en": f"Your teacher account has been suspended. Reason: {reason_text}",
+            "ar": f"تم إيقاف حسابك كأستاذ. السبب: {reason_text}",
+            "tm": f"Amiḍan-ik/inem n uselmad yeḥbes. Ssebba: {reason_text}",
+        },
     )
     db.commit()
 
@@ -447,8 +479,18 @@ def reinstate_teacher(
     db.add(tp)
     _notify(
         db, user_id,
-        title="✅ Compte réactivé",
-        body="Votre compte enseignant a été réactivé. Vous pouvez à nouveau recevoir des réservations.",
+        title_i18n={
+            "fr": "✅ Compte réactivé",
+            "en": "✅ Account reinstated",
+            "ar": "✅ تمت إعادة تفعيل الحساب",
+            "tm": "✅ Amiḍan yuɣal-d",
+        },
+        body_i18n={
+            "fr": "Votre compte enseignant a été réactivé. Vous pouvez à nouveau recevoir des réservations.",
+            "en": "Your teacher account has been reinstated. You can receive bookings again.",
+            "ar": "تمت إعادة تفعيل حسابك كأستاذ. يمكنك استقبال الحجوزات من جديد.",
+            "tm": "Amiḍan-ik/inem n uselmad yuɣal-d yermed. Tzemreḍ ad tremseḍ iḥerzan tikkelt-nniḍen.",
+        },
     )
     db.commit()
 

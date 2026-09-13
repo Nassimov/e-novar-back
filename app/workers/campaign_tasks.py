@@ -60,6 +60,7 @@ def _dispatch_campaign_notification(db, campaign, user_id: UUID) -> str:
             context={
                 "notification_id": str(notif.id), "channel": channel,
                 "title": campaign.title, "body": campaign.body, "deep_link": campaign.deep_link,
+                "category": campaign.category,
             },
             dedup_key=f"campaign:{campaign.id}:{channel}",
         ))
@@ -71,7 +72,8 @@ def _dispatch_campaign_notification(db, campaign, user_id: UUID) -> str:
 def task_send_campaign(self, campaign_id: str) -> Dict[str, Any]:
     from sqlmodel import Session, select
 
-    from app.database import engine
+    from app.database import get_engine
+    engine = get_engine()
     from app.models.notification import NotificationCampaign, NotificationCampaignTarget
     from app.routers.admin.notification_campaigns import resolve_campaign_targets
     from app.workers.notification_tasks import task_process_notification_queue
@@ -151,7 +153,8 @@ def task_dispatch_due_campaigns() -> Dict[str, int]:
 
     from sqlmodel import Session, select
 
-    from app.database import engine
+    from app.database import get_engine
+    engine = get_engine()
     from app.models.notification import NotificationCampaign
 
     dispatched = 0

@@ -25,7 +25,7 @@ Payment method behavior:
 """
 
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from sqlmodel import Session, select
 
@@ -71,7 +71,12 @@ def refund_amount_for_booking(db: Session, booking: Booking, amount_dzd: int, *,
                 result = {"refunded": True, "requires_manual_action": False, "method": "cib"}
             except Exception as exc:
                 logger.error("Stripe refund FAILED: booking_id=%s amount=%d error=%s", booking.id, amount_dzd, exc)
-                _flag_admins_manual_refund(db, booking, amount_dzd, f"Le remboursement Stripe automatique a échoué ({exc}). {note}")
+                _flag_admins_manual_refund(db, booking, amount_dzd, {
+                    "fr": f"Le remboursement Stripe automatique a échoué ({exc}). {note}",
+                    "en": f"The automatic Stripe refund failed ({exc}). {note}",
+                    "ar": f"فشل الاسترجاع التلقائي عبر Stripe ({exc}). {note}",
+                    "tm": f"Tuɣalin tawurmant s Stripe tefcel ({exc}). {note}",
+                })
                 result = {"refunded": False, "requires_manual_action": True, "method": "cib"}
         else:
             # Never captured (still just an authorization) — nothing was ever
@@ -79,10 +84,20 @@ def refund_amount_for_booking(db: Session, booking: Booking, amount_dzd: int, *,
             # released by the caller (cancel_payment_intent).
             return {"refunded": False, "requires_manual_action": False, "method": "cib"}
     elif method == "edahabia":
-        _flag_admins_manual_refund(db, booking, amount_dzd, f"Paiement Edahabia — Chargily n'a pas d'API de remboursement. {note}")
+        _flag_admins_manual_refund(db, booking, amount_dzd, {
+            "fr": f"Paiement Edahabia — Chargily n'a pas d'API de remboursement. {note}",
+            "en": f"Edahabia payment — Chargily has no refund API. {note}",
+            "ar": f"دفع عبر Edahabia — لا توفر Chargily واجهة استرجاع. {note}",
+            "tm": f"Axelaṣ s Edahabia — Chargily ur d-tefki ara API n tuɣalin. {note}",
+        })
         result = {"refunded": False, "requires_manual_action": True, "method": "edahabia"}
     elif method in ("cash", "transfer", "rib_cib", "rib_edahabia"):
-        _flag_admins_manual_refund(db, booking, amount_dzd, f"Paiement {method} — aucune passerelle à rembourser automatiquement. {note}")
+        _flag_admins_manual_refund(db, booking, amount_dzd, {
+            "fr": f"Paiement {method} — aucune passerelle à rembourser automatiquement. {note}",
+            "en": f"{method} payment — no gateway to refund automatically. {note}",
+            "ar": f"دفع عبر {method} — لا توجد بوابة لاسترجاع تلقائي. {note}",
+            "tm": f"Axelaṣ {method} — ulac tawwurt n tuɣalin tawurmant. {note}",
+        })
         result = {"refunded": False, "requires_manual_action": True, "method": method}
     else:
         return {"refunded": False, "requires_manual_action": False, "method": method}
@@ -109,28 +124,53 @@ def _notify_parent_of_refund(db: Session, booking: Booking, amount_dzd: int, res
     ).all()
     if not parent_links:
         return
-    body = (
-        f"{amount_dzd} DA ont été remboursés pour la réservation de votre enfant."
+    body_i18n = (
+        {
+            "fr": f"{amount_dzd} DA ont été remboursés pour la réservation de votre enfant.",
+            "en": f"{amount_dzd} DZD were refunded for your child's booking.",
+            "ar": f"تم استرجاع {amount_dzd} دج لحجز طفلك.",
+            "tm": f"{amount_dzd} DA ttwarran-d ɣef uḥerz n mmi-k/yell-ik.",
+        }
         if result["refunded"] else
-        f"Un remboursement de {amount_dzd} DA est en cours de traitement pour la réservation de votre enfant."
+        {
+            "fr": f"Un remboursement de {amount_dzd} DA est en cours de traitement pour la réservation de votre enfant.",
+            "en": f"A refund of {amount_dzd} DZD is being processed for your child's booking.",
+            "ar": f"جارٍ معالجة استرجاع مبلغ {amount_dzd} دج لحجز طفلك.",
+            "tm": f"Tuɣalin n {amount_dzd} DA tettwaxdem i uḥerz n mmi-k/yell-ik.",
+        }
     )
     for link in parent_links:
         emit(
             db, event_type="child_refund_alert", user_id=link.parent_id,
-            title_override="Remboursement — séance de votre enfant",
-            body_override=body,
+            title_i18n={
+                "fr": "Remboursement — séance de votre enfant",
+                "en": "Refund — your child's lesson",
+                "ar": "استرجاع — حصة طفلك",
+                "tm": "Tuɣalin — tiɣimit n mmi-k/yell-ik",
+            },
+            body_i18n=body_i18n,
             data={"booking_id": str(booking.id), "amount": amount_dzd, "refunded": result["refunded"]},
             dedup_key=f"child_refund_alert:{booking.id}:{amount_dzd}:{link.parent_id}",
         )
 
 
-def _flag_admins_manual_refund(db: Session, booking: Booking, amount_dzd: int, reason: str) -> None:
+def _flag_admins_manual_refund(db: Session, booking: Booking, amount_dzd: int, reason_i18n: Dict[str, str]) -> None:
     admin_roles = db.exec(select(UserRole).where(UserRole.role == "admin")).all()
     for ar in admin_roles:
         emit(
             db, event_type="system", user_id=ar.user_id,
-            title_override="⚠️ Remboursement manuel requis",
-            body_override=f"Remboursement de {amount_dzd} DA requis pour la réservation {booking.id}. {reason}",
+            title_i18n={
+                "fr": "⚠️ Remboursement manuel requis",
+                "en": "⚠️ Manual refund required",
+                "ar": "⚠️ يتطلب استرجاع يدوي",
+                "tm": "⚠️ Yesra tuɣalin s ufus",
+            },
+            body_i18n={
+                "fr": f"Remboursement de {amount_dzd} DA requis pour la réservation {booking.id}. {reason_i18n['fr']}",
+                "en": f"A refund of {amount_dzd} DZD is required for booking {booking.id}. {reason_i18n['en']}",
+                "ar": f"يتطلب استرجاع مبلغ {amount_dzd} دج للحجز {booking.id}. {reason_i18n['ar']}",
+                "tm": f"Yesra tuɣalin n {amount_dzd} DA i uḥerz {booking.id}. {reason_i18n['tm']}",
+            },
             data={"booking_id": str(booking.id), "amount": amount_dzd},
             dedup_key=f"manual_refund_needed:{booking.id}:{amount_dzd}:{ar.user_id}",
         )

@@ -60,11 +60,14 @@ def log_audit(
     ))
 
 
-def _notify(db: Session, user_id: UUID, title: str, body: str, data: Optional[Dict[str, Any]] = None) -> None:
+def _notify(
+    db: Session, user_id: UUID, title_i18n: Dict[str, str], body_i18n: Dict[str, str],
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
     from app.services.notification_engine import emit
     emit(
         db, event_type="session_validation", user_id=user_id,
-        title_override=title, body_override=body, data=data or {},
+        title_i18n=title_i18n, body_i18n=body_i18n, data=data or {},
     )
 
 
@@ -331,8 +334,19 @@ def credit_session_payout(db: Session, session: TutoringSession, sv: SessionVali
         metadata={"amount": payout, "gross": gross, "commission": commission},
     )
     _notify(
-        db, session.teacher_id, "💰 Paiement crédité",
-        f"{payout} DA ont été ajoutés à votre solde pour une séance validée.",
+        db, session.teacher_id,
+        {
+            "fr": "💰 Paiement crédité",
+            "en": "💰 Payment credited",
+            "ar": "💰 تم إضافة الدفعة",
+            "tm": "💰 Axelaṣ yettwarna",
+        },
+        {
+            "fr": f"{payout} DA ont été ajoutés à votre solde pour une séance validée.",
+            "en": f"{payout} DZD were added to your balance for a validated lesson.",
+            "ar": f"تمت إضافة {payout} دج إلى رصيدك مقابل حصة تم التحقق منها.",
+            "tm": f"{payout} DA ttwarnan ɣer usiḍen-ik/inem ɣef tiɣimit yettwasenteḍen.",
+        },
         {"session_id": str(session.id)},
     )
     return payout
@@ -360,7 +374,21 @@ def evaluate_and_finalize(
         db.add(sv)
         db.flush()
         credit_session_payout(db, session, sv)
-        _notify(db, sv.teacher_id, "✅ Séance approuvée", "Votre séance a été validée automatiquement — paiement crédité.")
+        _notify(
+            db, sv.teacher_id,
+            {
+                "fr": "✅ Séance approuvée",
+                "en": "✅ Lesson approved",
+                "ar": "✅ تمت الموافقة على الحصة",
+                "tm": "✅ Tiɣimit tettwaqbel",
+            },
+            {
+                "fr": "Votre séance a été validée automatiquement — paiement crédité.",
+                "en": "Your lesson was automatically validated — payment credited.",
+                "ar": "تم التحقق من حصتك تلقائيًا — تمت إضافة الدفعة.",
+                "tm": "Tiɣimit-inek/inem tettwasenteḍ s wudem awurman — axelaṣ yettwarna.",
+            },
+        )
         log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=None,
                   actor_ip=None, action="auto_approved", metadata={"trust_score": score})
     else:
@@ -368,5 +396,18 @@ def evaluate_and_finalize(
         db.add(sv)
         log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=None,
                   actor_ip=None, action="routed_to_admin_review", metadata={"trust_score": score})
-        _notify(db, sv.teacher_id, "🕓 Séance en cours de vérification",
-                "Votre séance nécessite une vérification supplémentaire avant le paiement.")
+        _notify(
+            db, sv.teacher_id,
+            {
+                "fr": "🕓 Séance en cours de vérification",
+                "en": "🕓 Lesson under review",
+                "ar": "🕓 الحصة قيد المراجعة",
+                "tm": "🕓 Tiɣimit deg tuzzelt",
+            },
+            {
+                "fr": "Votre séance nécessite une vérification supplémentaire avant le paiement.",
+                "en": "Your lesson needs additional review before payment.",
+                "ar": "تتطلب حصتك مراجعة إضافية قبل الدفع.",
+                "tm": "Tiɣimit-inek/inem tesra tuzzelt niḍen uqbel axelaṣ.",
+            },
+        )

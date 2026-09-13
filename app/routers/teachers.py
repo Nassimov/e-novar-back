@@ -1359,12 +1359,31 @@ def refuse_booking(
         for ar in admin_roles:
             emit(
                 db, event_type="system", user_id=ar.user_id,
-                title_override="⚠️ Remboursement Edahabia manuel requis",
-                body_override=(
-                    f"Le professeur a refusé une réservation payée en Edahabia ({booking.amount} DA). "
-                    "Chargily ne permet pas le remboursement par API — traitez-le manuellement depuis "
-                    "le tableau de bord Chargily."
-                ),
+                title_i18n={
+                    "fr": "⚠️ Remboursement Edahabia manuel requis",
+                    "en": "⚠️ Manual Edahabia refund required",
+                    "ar": "⚠️ يتطلب استرجاع يدوي عبر Edahabia",
+                    "tm": "⚠️ Yesra tuɣalin s ufus s Edahabia",
+                },
+                body_i18n={
+                    "fr": (
+                        f"Le professeur a refusé une réservation payée en Edahabia ({booking.amount} DA). "
+                        "Chargily ne permet pas le remboursement par API — traitez-le manuellement depuis "
+                        "le tableau de bord Chargily."
+                    ),
+                    "en": (
+                        f"The teacher declined a booking paid via Edahabia ({booking.amount} DZD). "
+                        "Chargily has no refund API — process it manually from the Chargily dashboard."
+                    ),
+                    "ar": (
+                        f"رفض الأستاذ حجزًا تم دفعه عبر Edahabia ({booking.amount} دج). "
+                        "لا توفر Chargily استرجاعًا عبر API — عالجه يدويًا من لوحة تحكم Chargily."
+                    ),
+                    "tm": (
+                        f"Aselmad yugi aḥerz yettwaxlaṣen s Edahabia ({booking.amount} DA). "
+                        "Chargily ur d-tefki ara tuɣalin s API — xdem-itt s ufus seg tqacuct n Chargily."
+                    ),
+                },
                 data={"booking_id": str(booking.id)},
                 dedup_key=f"edahabia_refund_needed_refused:{booking.id}:{ar.user_id}",
             )
@@ -1383,8 +1402,18 @@ def refuse_booking(
             db,
             event_type="booking_refused",
             user_id=booking.student_id,
-            title_override="Réservation refusée",
-            body_override="Le professeur a refusé ta demande de réservation. Tu n'as pas été débité·e.",
+            title_i18n={
+                "fr": "Réservation refusée",
+                "en": "Booking declined",
+                "ar": "تم رفض الحجز",
+                "tm": "Aḥerz yettwagi",
+            },
+            body_i18n={
+                "fr": "Le professeur a refusé ta demande de réservation. Tu n'as pas été débité·e.",
+                "en": "The teacher declined your booking request. You were not charged.",
+                "ar": "رفض الأستاذ طلب حجزك. لم يتم خصم أي مبلغ منك.",
+                "tm": "Aselmad yugi anadi-inek/inem n uḥerz. Ur ak/akem-nekkis idrimen.",
+            },
             data={"booking_id": str(booking.id)},
             dedup_key=f"booking_refused:{booking.id}",
         )
