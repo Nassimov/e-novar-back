@@ -1704,13 +1704,20 @@ def get_my_students_overview(
     - a trend comparing the two most recent evaluation scores.
     """
     from collections import Counter
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from app.models.booking import TutoringSession
     from app.models.evaluation import Evaluation
 
     teacher_id = UUID(current_user["id"])
-    now = datetime.utcnow()
+    # aware, not datetime.utcnow() — sessions.scheduled_at is TIMESTAMPTZ,
+    # so it always comes back timezone-aware; comparing it against a naive
+    # "now" below (`s.scheduled_at >= now`, `now - last_completed_at`)
+    # raised "can't compare offset-naive and offset-aware datetimes" for
+    # any teacher with real session history — see tests/
+    # test_datetime_timezone_fix.py for the established fix pattern this
+    # call site had been missed by.
+    now = datetime.now(timezone.utc)
 
     sessions = db.exec(
         select(TutoringSession)

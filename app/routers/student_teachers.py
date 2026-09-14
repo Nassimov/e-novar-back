@@ -1580,11 +1580,25 @@ def book_teacher_slot(
     # "price_single, discounted" formula regardless of the slot's own
     # declared duration — out of this feature's scope, see _resolve_leg_range.
     pack_prices = compute_pack_prices(price_single, get_platform_settings(db))
-    if resolved_session_type == "group":
-        amount = pack_prices["group"]
-    elif body.pack_sessions:
-        leg_amounts = [round(price_single * duration_min / 60) for (_, duration_min) in pack_leg_ranges]
+    if body.pack_sessions:
+        # A group pack must charge N group-rate lessons (then pack-
+        # discounted), not the single flat group rate for the whole pack —
+        # this branch used to be unreachable for session_type="group"
+        # because that case was checked first below, so a pack5/pack10
+        # booked in group mode billed exactly 1 lesson while scheduling 5
+        # or 10 (found via the exhaustive booking-workflow test matrix,
+        # tests/test_booking_workflow_matrix.py). Group legs are flatly
+        # priced (never duration-scaled — see compute_pack_prices' own
+        # "group" formula and the comment on the individual-leg branch
+        # below), so each leg is simply pack_prices["group"] regardless of
+        # that leg's own duration.
+        if resolved_session_type == "group":
+            leg_amounts = [pack_prices["group"] for _ in pack_leg_ranges]
+        else:
+            leg_amounts = [round(price_single * duration_min / 60) for (_, duration_min) in pack_leg_ranges]
         amount = compute_variable_duration_amount(leg_amounts, body.formula, get_platform_settings(db))
+    elif resolved_session_type == "group":
+        amount = pack_prices["group"]
     else:
         amount = round(price_single * single_duration_min / 60)
 
@@ -1597,10 +1611,18 @@ def book_teacher_slot(
                 detail=f"formula={body.formula} requires exactly {required_sessions} pack_sessions entries",
             )
 
-    # Serialize pack_sessions if provided
+    # Serialize pack_sessions if provided. mode="json" (not the default
+    # mode="python") — PackSessionItem.subject_id/level_id are real UUID
+    # fields, and json.dumps() has no idea how to encode a raw UUID object
+    # (TypeError: Object of type UUID is not JSON serializable). This 500'd
+    # every pack5/pack10 booking that resolved a subject/level per session
+    # (i.e. the normal case — see student.booking.pack-schedule.tsx's
+    # resolveSlotSubjectLevel, which always sets these), found via the
+    # exhaustive booking-workflow test matrix (tests/
+    # test_booking_workflow_matrix.py).
     pack_sessions_json: Optional[str] = None
     if body.pack_sessions:
-        pack_sessions_json = json.dumps([s.model_dump() for s in body.pack_sessions])
+        pack_sessions_json = json.dumps([s.model_dump(mode="json") for s in body.pack_sessions])
 
     # A non-DZ teacher is online-only by construction (see migration 100 /
     # TeacherProfile.country) — never trust the frontend gating alone, this
