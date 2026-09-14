@@ -82,7 +82,15 @@ async def get_egress_status(egress_id: str) -> Optional[Dict[str, Any]]:
         file_result = info.file_results[0] if info.file_results else None
         return {
             "status": _status_str(info.status),
-            "file_url": file_result.location if file_result else None,
+            # `file_result.filename` is the actual bucket-relative object key
+            # we uploaded to (the `filepath=` we passed to start_recording,
+            # with LiveKit's own `{time}` placeholder resolved) — this is
+            # what a signed URL must be generated from (see
+            # app/services/storage.py's get_egress_signed_url). Deliberately
+            # NOT `file_result.location`: that's the raw S3 upload target
+            # LiveKit wrote to, not a browser-fetchable URL — opening it
+            # directly 403s against a private bucket (which this one is).
+            "file_path": file_result.filename if file_result else None,
             "duration_sec": round(file_result.duration / 1_000_000_000) if file_result and file_result.duration else None,
         }
 

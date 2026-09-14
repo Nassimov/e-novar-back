@@ -164,6 +164,26 @@ def get_signed_url(path: str, expires_in: int = 3600) -> str:
     return result.get("signedURL", "")
 
 
+def get_egress_signed_url(path: str, expires_in: int = 3600) -> Optional[str]:
+    """Signed URL for a session recording uploaded by LiveKit Egress —
+    egress_s3_bucket (app/services/egress.py) may be a different bucket
+    than the app's general supabase_storage_bucket, so this can't reuse
+    get_signed_url()/_bucket() above, which hardcode the latter. `path` is
+    the object key as reported by FileInfo.filename (see
+    app/services/egress.py's get_egress_status), never a full URL. Returns
+    None (rather than raising) if egress isn't configured or signing fails
+    — callers already treat "recording not viewable yet" as a normal,
+    displayable state."""
+    if not settings.egress_s3_bucket:
+        return None
+    try:
+        bucket = get_supabase_service().storage.from_(settings.egress_s3_bucket)
+        result = bucket.create_signed_url(path, expires_in)
+        return result.get("signedURL") or None
+    except Exception:
+        return None
+
+
 # ── Challenge justification files (enovar-files/challenge-justifications/) ─────
 
 def upload_challenge_proof(

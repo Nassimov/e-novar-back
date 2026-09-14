@@ -394,10 +394,15 @@ async def list_recordings(
             continue
         if fresh is None:
             continue
-        if fresh["status"] != rec.status or fresh.get("file_url"):
+        if fresh["status"] != rec.status or fresh.get("file_path"):
             rec.status = fresh["status"]
-            if fresh.get("file_url"):
-                rec.file_url = fresh["file_url"]
+            if fresh.get("file_path"):
+                # `file_url` stores the bucket-relative object KEY here, not
+                # a browser-openable URL — see get_egress_signed_url below,
+                # which turns it into one fresh on every read (a persisted
+                # signed URL would just expire on a recording watched days
+                # later).
+                rec.file_url = fresh["file_path"]
             if fresh.get("duration_sec"):
                 rec.duration_sec = fresh["duration_sec"]
             if rec.status in ("complete", "failed") and rec.ended_at is None:
@@ -405,9 +410,13 @@ async def list_recordings(
             db.add(rec)
     db.commit()
 
+    from app.services.storage import get_egress_signed_url
+
     return [
         RecordingOut(
-            id=str(r.id), status=r.status, file_url=r.file_url, duration_sec=r.duration_sec,
+            id=str(r.id), status=r.status,
+            file_url=get_egress_signed_url(r.file_url) if r.status == "complete" and r.file_url else None,
+            duration_sec=r.duration_sec,
             started_at=r.started_at.isoformat(), ended_at=r.ended_at.isoformat() if r.ended_at else None,
         )
         for r in recordings
