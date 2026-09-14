@@ -86,6 +86,11 @@ def _publish_badge_event(mapper, connection, target: "Notification") -> None:
                 "category": target.category,
                 "priority": target.priority,
                 "deep_link": target.deep_link,
+                # Structured payload (e.g. badge_unlocked's icon/tier/ep_reward)
+                # for consumers that need more than title/body to render rich
+                # feedback (see src/lib/badge-celebration.ts) — without this
+                # they'd need a second API round-trip to look it up.
+                "data": target.data,
             }),
         )
     except Exception:

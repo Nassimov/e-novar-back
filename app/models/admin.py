@@ -36,7 +36,12 @@ class PlatformSettings(SQLModel, table=True):
     trust_weight_clean_history: int = Field(default=10)
     trust_auto_approve_threshold: int = Field(default=80)
     trust_manual_review_threshold: int = Field(default=50)
-    token_visible_minutes_before: int = Field(default=30)
+    # How many minutes before a session's scheduled start the live classroom
+    # room opens for joining — see app/routers/classroom.py's GET .../room
+    # (join_opens_at). Was named token_visible_minutes_before (migration
+    # 118 renamed it): originally did double duty gating the validation
+    # code's visibility too, which no longer exists.
+    room_join_minutes_before: int = Field(default=30)
     student_validation_window_hours: int = Field(default=24)
     # A session left in "validated" (student done, waiting on the teacher's
     # secondary confirm) with no bounded timeout would stall the payout AND
@@ -46,6 +51,21 @@ class PlatformSettings(SQLModel, table=True):
     # app/routers/session_validation.py's _check_expiry.
     teacher_confirmation_window_hours: int = Field(default=48)
     gps_proximity_threshold_meters: int = Field(default=500)
+    # Group lessons (2026-09-14 redesign — dropped the code-exchange
+    # validation entirely, see migration 118): each enrolled student gets a
+    # simple one-click "valider" button instead, and the TEACHER confirms
+    # once for the whole group rather than once per student. This is the %
+    # of enrolled students who must click validate, within
+    # student_validation_window_hours of the teacher ending the session,
+    # before the teacher's group-confirm action becomes available. Below
+    # this threshold once the window lapses, the teacher can instead file a
+    # group report (reuses the existing student_validation_neglect dispute
+    # path, fanned out to every still-unvalidated sibling — see
+    # app/services/session_validation.py's file_group_report), which an
+    # admin decides on like any other dispute. Meaningless for individual
+    # (1-student) sessions, where "threshold met" trivially means "the one
+    # student validated" — same as before this redesign, just without a code.
+    trust_group_validation_threshold_percent: int = Field(default=70)
 
     # Booking safety rules (see app/routers/student_teachers.py +
     # app/workers/booking_tasks.py). A teacher has this many hours to

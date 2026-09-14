@@ -28,15 +28,8 @@ class SessionValidation(SQLModel, table=True):
 
     status: str = Field(default="scheduled", index=True)
 
-    token_hash: Optional[str] = Field(default=None)
-    token_expires_at: Optional[datetime] = Field(default=None)
-    token_shown_at: Optional[datetime] = Field(default=None)
-    token_consumed_at: Optional[datetime] = Field(default=None)
-    token_method: Optional[str] = Field(default=None)
-
     teacher_ended_at: Optional[datetime] = Field(default=None)
     student_validated_at: Optional[datetime] = Field(default=None)
-    validation_method: Optional[str] = Field(default=None)
     teacher_confirmed_at: Optional[datetime] = Field(default=None)
 
     dispute_reason: Optional[str] = Field(default=None)

@@ -57,10 +57,11 @@ def _serialize_session_validation(s: PlatformSettings) -> dict:
         "trust_weight_clean_history": s.trust_weight_clean_history,
         "trust_auto_approve_threshold": s.trust_auto_approve_threshold,
         "trust_manual_review_threshold": s.trust_manual_review_threshold,
-        "token_visible_minutes_before": s.token_visible_minutes_before,
+        "room_join_minutes_before": s.room_join_minutes_before,
         "student_validation_window_hours": s.student_validation_window_hours,
         "teacher_confirmation_window_hours": s.teacher_confirmation_window_hours,
         "gps_proximity_threshold_meters": s.gps_proximity_threshold_meters,
+        "trust_group_validation_threshold_percent": s.trust_group_validation_threshold_percent,
         "updated_at": s.updated_at.isoformat() if s.updated_at else None,
     }
 

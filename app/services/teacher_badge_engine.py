@@ -174,6 +174,27 @@ def check_and_unlock_teacher_badges(
     if newly_unlocked:
         db.commit()
 
+        # Mirrors badge_engine.py's student-side emit() — see
+        # docs/migrations/119_teacher_badge_unlocked_notification.sql for the
+        # notification_templates row this relies on.
+        from app.services.notification_engine import emit
+        badges_by_id = {b.id: b for b in badges}
+        for badge_id in newly_unlocked:
+            badge = badges_by_id.get(badge_id)
+            emit(
+                db, event_type="teacher_badge_unlocked", user_id=teacher_id,
+                context={"badge_name": badge.name if badge else "nouveau trophée"},
+                data={
+                    "badge_id": badge_id,
+                    "name": badge.name if badge else None,
+                    "description": badge.description or (badge.condition if badge else None),
+                    "icon": badge.icon if badge else None,
+                    "tier": badge.tier if badge else None,
+                    "ep_reward": badge.ep_reward if badge else 0,
+                },
+                dedup_key=f"teacher_badge_unlocked:{teacher_id}:{badge_id}",
+            )
+
     return newly_unlocked
 
 

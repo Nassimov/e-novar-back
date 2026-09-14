@@ -1,29 +1,38 @@
 """Session validation & trust-score engine (migration 063 / spec: production
-session-completion workflow). See app/routers/session_validation.py for the
-HTTP surface.
+session-completion workflow, redesigned 2026-09-14 — migration 118). See
+app/routers/session_validation.py for the HTTP surface.
 
 Design summary
 --------------
 - A teacher can never single-handedly make themselves payment-eligible.
-- Tokens are never stored in plaintext — only their SHA-256 hash. Viewing a
-  token is idempotent-safe to repeat (regenerates + invalidates the previous
-  one); *consuming* one is strictly single-use, enforced by an atomic
-  conditional UPDATE so concurrent submissions can't double-consume it
-  (classic replay/race protection — no application-level lock needed,
-  Postgres's row-level locking on the UPDATE does the job).
 - The trust score is a weighted sum of independent signals, all weights and
   thresholds pulled from PlatformSettings — never hardcoded (spec point 19).
-- `token_method`/verification is written so a future QR code is just another
-  way to *deliver* the same plaintext token to the verify function — the
-  business logic never changes (spec point 14).
+- No more code/token exchange (dropped 2026-09-14): the student validates
+  with a single "valider" button, full stop. student_validation's signal in
+  compute_trust_score below only ever cared WHETHER student_validated_at
+  was set, never HOW — so this simplification changes nothing about the
+  trust-score math itself.
+- Group lessons (one TutoringSession/SessionValidation row per enrolled
+  student, sharing a Booking.slot_id — see app.services.livekit_video's
+  group_slot_id/group_sessions) no longer require the teacher to confirm
+  each student one at a time. Once >= PlatformSettings.
+  trust_group_validation_threshold_percent of the group has individually
+  validated, group_confirm_and_finalize lets the teacher finalize payout
+  for the WHOLE group in one action — including students who personally
+  never clicked validate, on the theory that a healthy validation rate is
+  itself sufficient evidence the class happened. If that threshold is
+  never reached before student_validation_window_hours elapses, the
+  teacher can instead call file_group_report, which reuses the existing
+  per-session student_validation_neglect dispute path (fanned out to every
+  still-unvalidated sibling) rather than inventing a parallel review
+  mechanism — the admin review queue, approve/reject endpoints, and the
+  resulting student strike all already exist and need no changes.
 """
 from __future__ import annotations
 
-import hashlib
 import math
-import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from sqlmodel import Session, select
@@ -32,11 +41,6 @@ from app.models.admin import PlatformSettings
 from app.models.booking import Booking, TutoringSession
 from app.models.session_validation import SessionValidation, SessionValidationAuditLog
 from app.services.pricing import PACK_SIZES
-
-# Unambiguous charset — no 0/O, 1/I/L, to avoid mis-hearing/mis-typing when
-# the code is read aloud (the whole point of the manual-entry fallback).
-_TOKEN_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
-
 
 # ─── Audit log ────────────────────────────────────────────────────────────────
 
@@ -61,13 +65,29 @@ def log_audit(
 
 
 def _notify(
-    db: Session, user_id: UUID, title_i18n: Dict[str, str], body_i18n: Dict[str, str],
+    db: Session, user_id: UUID, title_i18n: "str | Dict[str, str]", body_i18n: "str | Dict[str, str]",
     data: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """A handful of call sites in this module (see app/routers/
+    session_validation.py's end_session/dispute_session) predate the
+    title_i18n/body_i18n convention and still pass a plain French string.
+    notification_engine.emit()'s own try/except swallows ANY exception
+    (by design — a notification failure must never break the real
+    request), which meant those specific calls have been silently sending
+    NOTHING since day one: _render_i18n does `title_i18n.get(lang)`, and a
+    plain str has no .get(), so it always raised, always got swallowed,
+    with nothing visible anywhere pointing at it. Normalizing a bare
+    string into a same-text-every-language dict here fixes that (real per-
+    language copy for those specific call sites is a separate follow-up,
+    out of scope for this fix) without having to hunt down and rewrite
+    every existing call site right now."""
+    def _as_i18n(v: "str | Dict[str, str]") -> Dict[str, str]:
+        return v if isinstance(v, dict) else {"fr": v, "en": v, "ar": v, "tm": v}
+
     from app.services.notification_engine import emit
     emit(
         db, event_type="session_validation", user_id=user_id,
-        title_i18n=title_i18n, body_i18n=body_i18n, data=data or {},
+        title_i18n=_as_i18n(title_i18n), body_i18n=_as_i18n(body_i18n), data=data or {},
     )
 
 
@@ -91,85 +111,6 @@ def get_or_create_validation(db: Session, session: TutoringSession) -> SessionVa
         db.add(sv)
         db.flush()
     return sv
-
-
-# ─── Token lifecycle ──────────────────────────────────────────────────────────
-
-def _hash_token(plaintext: str) -> str:
-    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
-
-
-def token_window_open(sv: SessionValidation, session: TutoringSession, settings: PlatformSettings) -> bool:
-    """Token only becomes visible starting `token_visible_minutes_before`
-    minutes before the session's scheduled start (spec point 2) — never
-    before, regardless of what the client asks."""
-    opens_at = session.scheduled_at - timedelta(minutes=settings.token_visible_minutes_before)
-    return datetime.now(timezone.utc) >= opens_at
-
-
-def generate_token(
-    db: Session,
-    sv: SessionValidation,
-    *,
-    actor_user_id: UUID,
-    actor_ip: Optional[str],
-) -> str:
-    """Generate a fresh plaintext token, store only its hash, return the
-    plaintext once. Safe to call again before consumption — each call
-    invalidates whatever was generated before (old hash gets overwritten), so
-    there is never more than one valid token per session at a time."""
-    plaintext = f"{secrets.choice(_TOKEN_ALPHABET)}{''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(3))}-" \
-                f"{''.join(secrets.choice(_TOKEN_ALPHABET) for _ in range(4))}"
-    now = datetime.now(timezone.utc)
-    sv.token_hash = _hash_token(plaintext)
-    sv.token_expires_at = now + timedelta(hours=24)  # generous ceiling; the real gate is the validation window
-    sv.token_shown_at = now
-    sv.token_consumed_at = None
-    sv.token_method = "app_token"
-    sv.updated_at = now
-    db.add(sv)
-    log_audit(
-        db, session_id=sv.session_id, booking_id=sv.booking_id,
-        actor_user_id=actor_user_id, actor_ip=actor_ip, action="token_shown",
-    )
-    return plaintext
-
-
-def consume_token(
-    db: Session,
-    sv: SessionValidation,
-    plaintext: str,
-) -> bool:
-    """Atomically mark the current token consumed IF it matches and hasn't
-    expired/been used yet. Returns False (never raises) on any mismatch, so
-    callers can return a uniform "invalid or expired token" error without
-    leaking which specific check failed (timing/oracle hardening).
-
-    Concurrency: the UPDATE's WHERE clause includes `token_consumed_at IS
-    NULL`, so if two requests race, only the first COMMIT wins — the second
-    affects zero rows and this returns False. No explicit lock needed.
-    """
-    if not plaintext or sv.token_hash is None:
-        return False
-    candidate_hash = _hash_token(plaintext.strip().upper())
-    now = datetime.now(timezone.utc)
-    if sv.token_expires_at and now > sv.token_expires_at:
-        return False
-
-    from sqlalchemy import update as sa_update
-    result = db.exec(
-        sa_update(SessionValidation)
-        .where(
-            SessionValidation.id == sv.id,
-            SessionValidation.token_hash == candidate_hash,
-            SessionValidation.token_consumed_at.is_(None),
-        )
-        .values(token_consumed_at=now, updated_at=now)
-    )
-    consumed = result.rowcount > 0
-    if consumed:
-        db.refresh(sv)
-    return consumed
 
 
 # ─── Trust score ──────────────────────────────────────────────────────────────
@@ -349,6 +290,27 @@ def credit_session_payout(db: Session, session: TutoringSession, sv: SessionVali
         },
         {"session_id": str(session.id)},
     )
+
+    # A completed, paid session is the single biggest driver of both badge
+    # catalogues (sessions_completed, subject_hours, hours_taught,
+    # students_taught, ...) — checking right here, at the moment the
+    # milestone is actually reached, is what lets the global celebration
+    # (src/lib/badge-celebration.ts) fire on whatever page the user is on,
+    # instead of only the next time they happen to open the badges page
+    # (student_badges.py / teacher_badges.py still do that lazy check too,
+    # as a safety net for badges whose condition isn't tied to a session).
+    # Never allowed to block a real payout over a badge-engine bug.
+    try:
+        from app.services.badge_engine import check_and_unlock_badges
+        check_and_unlock_badges(session.student_id, db)
+    except Exception:
+        pass
+    try:
+        from app.services.teacher_badge_engine import check_and_unlock_teacher_badges
+        check_and_unlock_teacher_badges(session.teacher_id, db)
+    except Exception:
+        pass
+
     return payout
 
 
@@ -411,3 +373,255 @@ def evaluate_and_finalize(
                 "tm": "Tiɣimit-inek/inem tesra tuzzelt niḍen uqbel axelaṣ.",
             },
         )
+
+
+# ─── Group lessons (2026-09-14 redesign) ───────────────────────────────────────
+
+def group_validation_rows(db: Session, session: TutoringSession) -> List[SessionValidation]:
+    """Every SessionValidation row sharing this session's group slot,
+    including `session`'s own — `[get_or_create_validation(db, session)]`
+    for an individual (non-group) session. One row per enrolled student,
+    same convention as app.services.livekit_video.group_sessions."""
+    from app.services.livekit_video import group_sessions, group_slot_id
+
+    slot_id = group_slot_id(db, session)
+    if not slot_id:
+        return [get_or_create_validation(db, session)]
+    return [get_or_create_validation(db, s) for s in group_sessions(db, slot_id)]
+
+
+def group_validation_stats(
+    db: Session, session: TutoringSession, settings: PlatformSettings,
+) -> Dict[str, Any]:
+    """Aggregate validation counts for session's group (or the trivial
+    1-student case for an individual session) — the numbers the teacher's
+    "X/N ont validé" counter and the group-confirm/group-report gates are
+    both computed from.
+
+    `deadline_passed` is computed directly from teacher_ended_at + the
+    admin-configured window (every sibling shares the same
+    teacher_ended_at — see app.routers.session_validation.end_session's
+    fan-out) rather than trusting each row's own `status` already having
+    individually flipped to "expired": that transition only happens when
+    THAT specific row gets polled (each student's own device polls their
+    own session_id) — the teacher's group view is anchored to just one
+    row and must not depend on every OTHER student's device having
+    happened to poll recently."""
+    rows = group_validation_rows(db, session)
+    total = len(rows)
+    validated = sum(1 for r in rows if r.student_validated_at is not None)
+    finalized = sum(1 for r in rows if r.status in ("approved", "rejected"))
+    already_reported = any(r.dispute_reason_code == "student_validation_neglect" for r in rows)
+    percent = round((validated / total) * 100) if total else 0
+    threshold = settings.trust_group_validation_threshold_percent
+
+    anchor = next((r for r in rows if r.teacher_ended_at is not None), None)
+    anchor_ended_at = (
+        anchor.teacher_ended_at.replace(tzinfo=timezone.utc)
+        if anchor and anchor.teacher_ended_at.tzinfo is None else (anchor.teacher_ended_at if anchor else None)
+    )
+    deadline_at = (
+        anchor_ended_at + timedelta(hours=settings.student_validation_window_hours)
+        if anchor_ended_at else None
+    )
+    deadline_passed = bool(deadline_at and datetime.now(timezone.utc) > deadline_at)
+
+    return {
+        "is_group": total > 1,
+        "total": total,
+        "validated": validated,
+        "percent": percent,
+        "threshold_percent": threshold,
+        "threshold_met": percent >= threshold,
+        "already_finalized": finalized == total,
+        "already_reported": already_reported,
+        "deadline_at": deadline_at,
+        "deadline_passed": deadline_passed,
+        "rows": rows,
+    }
+
+
+def group_confirm_and_finalize(
+    db: Session, session: TutoringSession, settings: PlatformSettings, *, actor_user_id: UUID,
+) -> Dict[str, Any]:
+    """The teacher's single group-confirm action, once enough of the group
+    has validated. For each sibling still awaiting a decision:
+      - a student who personally validated goes through the exact same
+        evaluate_and_finalize the individual flow always has (their own
+        trust score still applies in full — GPS/online-duration/clean-
+        history can still route THEM to admin_review even though the group
+        as a whole cleared the bar);
+      - a student who never personally validated is approved and paid
+        directly (bypassing the trust-score gate for THEM specifically) —
+        the group's own validation rate is standing in for their missing
+        student_validation signal, per the product decision that a
+        cleared group threshold vouches for the whole class, not just
+        whoever happened to click.
+    Raises ValueError if the threshold isn't met yet — callers translate
+    that into a 409.
+    """
+    stats = group_validation_stats(db, session, settings)
+    if not stats["threshold_met"]:
+        raise ValueError(
+            f"{stats['validated']}/{stats['total']} ont validé "
+            f"({stats['percent']}%) — seuil requis {stats['threshold_percent']}%."
+        )
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for sv in stats["rows"]:
+        if sv.status in ("approved", "rejected"):
+            results.append({"session_id": str(sv.session_id), "status": sv.status})
+            continue
+        sibling_session = db.get(TutoringSession, sv.session_id)
+        if sibling_session is None:
+            continue
+        if sv.teacher_confirmed_at is None:
+            sv.teacher_confirmed_at = now
+        if sv.student_validated_at is not None:
+            # This student validated individually — full normal evaluation,
+            # unaffected by the group mechanism.
+            db.add(sv)
+            log_audit(db, session_id=sv.session_id, booking_id=sv.booking_id,
+                      actor_user_id=actor_user_id, actor_ip=None, action="group_confirmed_individually_validated")
+            evaluate_and_finalize(db, sibling_session, sv, settings)
+        else:
+            # Never personally validated — the group threshold vouches for
+            # them instead. Approved and paid directly; trust_score is
+            # still computed and stored for the audit trail, just not used
+            # to gate this decision.
+            clean = teacher_has_clean_history(db, sv.teacher_id)
+            score, breakdown = compute_trust_score(sv, sibling_session, settings, teacher_has_clean_history=clean)
+            breakdown["group_threshold_override"] = True
+            sv.trust_score = score
+            sv.trust_score_breakdown = breakdown
+            sv.status = "approved"
+            sv.payment_eligible_at = now
+            db.add(sv)
+            db.flush()
+            credit_session_payout(db, sibling_session, sv)
+            log_audit(db, session_id=sv.session_id, booking_id=sv.booking_id,
+                      actor_user_id=actor_user_id, actor_ip=None,
+                      action="group_confirmed_threshold_override", metadata={"trust_score": score})
+            _notify(
+                db, sv.student_id,
+                {
+                    "fr": "✅ Séance confirmée par ton professeur",
+                    "en": "✅ Lesson confirmed by your teacher",
+                    "ar": "✅ تم تأكيد الحصة من طرف أستاذك",
+                    "tm": "✅ Tiɣimit tettwasentem sɣur uselmad-ik/inem",
+                },
+                {
+                    "fr": "Ton professeur a confirmé cette séance de groupe — elle est validée même si tu n'avais pas cliqué sur \"Valider\".",
+                    "en": "Your teacher confirmed this group lesson — it's validated even though you hadn't clicked \"Validate\".",
+                    "ar": "أكد أستاذك هذه الحصة الجماعية — تم التحقق منها حتى لو لم تنقر على \"تحقق\".",
+                    "tm": "Aselmad-ik/inem yesentem tiɣimit-agi n ugraw — tettwasenteḍ ɣas akken ur tenniḍ ara ɣef \"Senteḍ\".",
+                },
+                {"session_id": str(sv.session_id)},
+            )
+        results.append({"session_id": str(sv.session_id), "status": sv.status})
+
+    _notify(
+        db, session.teacher_id,
+        {
+            "fr": "✅ Groupe confirmé",
+            "en": "✅ Group confirmed",
+            "ar": "✅ تم تأكيد المجموعة",
+            "tm": "✅ Agraw yettwasentem",
+        },
+        {
+            "fr": f"Séance de groupe confirmée ({stats['validated']}/{stats['total']} élèves avaient validé) — paiement traité.",
+            "en": f"Group lesson confirmed ({stats['validated']}/{stats['total']} students had validated) — payment processed.",
+            "ar": f"تم تأكيد الحصة الجماعية ({stats['validated']}/{stats['total']} تلاميذ تحققوا) — تمت معالجة الدفع.",
+            "tm": f"Tiɣimit n ugraw tettwasentem ({stats['validated']}/{stats['total']} inelmaden sentḍen) — axelaṣ yettwaselken.",
+        },
+        {"session_id": str(session.id)},
+    )
+    return {"results": results, "stats": {k: v for k, v in stats.items() if k != "rows"}}
+
+
+def file_group_report(
+    db: Session, session: TutoringSession, settings: PlatformSettings, *, actor_user_id: UUID, actor_ip: Optional[str],
+) -> Dict[str, Any]:
+    """The teacher's group-level escalation once the validation window has
+    lapsed without clearing the threshold. Reuses the existing per-session
+    student_validation_neglect dispute (app.routers.session_validation's
+    dispute_session / _RECOGNIZED_REASON_CODES) rather than a parallel
+    mechanism — fanned out to every sibling still stuck at 'expired', so
+    the existing admin review queue, approve/reject endpoints, and the
+    resulting student strike (see app/routers/admin/session_validation.py's
+    approve_validation) all just work unmodified. Raises ValueError if the
+    group isn't actually eligible yet (still within the window, or the
+    threshold was already met) — callers translate that into a 409.
+    """
+    stats = group_validation_stats(db, session, settings)
+    if stats["threshold_met"]:
+        raise ValueError("Le seuil de validation du groupe est déjà atteint — rien à signaler.")
+    if not stats["deadline_passed"]:
+        raise ValueError("Le délai de validation des élèves n'est pas encore écoulé.")
+    if stats["already_reported"]:
+        raise ValueError("Ce groupe a déjà été signalé — en attente de la décision d'un administrateur.")
+
+    now = datetime.now(timezone.utc)
+    reported = []
+    for sv in stats["rows"]:
+        if sv.status not in ("expired", "awaiting_student_validation"):
+            continue  # already resolved another way (validated, approved, disputed, ...)
+        if sv.status == "awaiting_student_validation":
+            # This specific row hasn't been individually polled since its
+            # deadline passed (see group_validation_stats' own note) —
+            # transition it now, same as _check_expiry would have.
+            log_audit(db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=None,
+                      actor_ip=None, action="validation_expired")
+        sv.status = "admin_review"
+        sv.dispute_reason = (
+            f"Séance de groupe : seuil de validation non atteint "
+            f"({stats['validated']}/{stats['total']}, {stats['percent']}% < {stats['threshold_percent']}% requis)."
+        )
+        sv.dispute_reason_code = "student_validation_neglect"
+        sv.dispute_created_at = sv.dispute_created_at or now
+        sv.dispute_filed_by = sv.dispute_filed_by or actor_user_id
+        sv.updated_at = now
+        db.add(sv)
+        log_audit(db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=actor_user_id,
+                  actor_ip=actor_ip, action="group_report_filed",
+                  metadata={"group_validated": stats["validated"], "group_total": stats["total"]})
+        _notify(
+            db, sv.student_id,
+            {
+                "fr": "⚠️ Ton professeur a signalé une séance de groupe non validée",
+                "en": "⚠️ Your teacher reported an unvalidated group lesson",
+                "ar": "⚠️ أبلغ أستاذك عن حصة جماعية لم يتم التحقق منها",
+                "tm": "⚠️ Aselmad-ik/inem yemmeslay-d ɣef tiɣimit n ugraw ur nettwasenteḍ ara",
+            },
+            {
+                "fr": "Ton professeur a signalé à l'administration que cette séance de groupe a bien eu lieu. Un administrateur va vérifier.",
+                "en": "Your teacher reported to the administration that this group lesson took place. An administrator will review it.",
+                "ar": "أبلغ أستاذك الإدارة أن هذه الحصة الجماعية جرت فعلاً. سيقوم مسؤول بالمراجعة.",
+                "tm": "Aselmad-ik/inem yemmeslay-d i unedbal belli tiɣimit-agi n ugraw tedṛa. Anedbal ad iẓer.",
+            },
+            {"session_id": str(sv.session_id)},
+        )
+        reported.append(str(sv.session_id))
+
+    if reported:
+        from app.models.profile import UserRole
+        admin_ids = db.exec(select(UserRole).where(UserRole.role == "admin")).all()
+        for ar in admin_ids:
+            _notify(
+                db, ar.user_id,
+                {
+                    "fr": "⚠️ Séance de groupe non validée — décision requise",
+                    "en": "⚠️ Unvalidated group lesson — decision required",
+                    "ar": "⚠️ حصة جماعية غير محققة — القرار مطلوب",
+                    "tm": "⚠️ Tiɣimit n ugraw ur nettwasenteḍ ara — asentel yettusra",
+                },
+                {
+                    "fr": f"{len(reported)} élève(s) n'ont pas validé une séance de groupe malgré le délai écoulé — intervention requise.",
+                    "en": f"{len(reported)} student(s) didn't validate a group lesson despite the deadline passing — intervention required.",
+                    "ar": f"{len(reported)} تلميذ(ة) لم يتحقق من حصة جماعية رغم انتهاء المهلة — التدخل مطلوب.",
+                    "tm": f"{len(reported)} inelmaden ur senteḍen ara tiɣimit n ugraw ɣas yezri lawan — asenced yettusra.",
+                },
+                {"session_id": str(session.id)},
+            )
+    return {"reported_session_ids": reported, "stats": {k: v for k, v in stats.items() if k != "rows"}}

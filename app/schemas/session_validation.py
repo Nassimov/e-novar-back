@@ -13,12 +13,10 @@ class SessionValidationStatus(BaseModel):
     status: str
     mode: str = "online"  # "online" | "at_home" | "at_student" — see TutoringSession.mode
     can_end_session: bool
-    can_view_token: bool
-    token_visible_at: Optional[datetime] = None
+    can_validate: bool = False
     scheduled_end_at: Optional[datetime] = None
     teacher_ended_at: Optional[datetime] = None
     student_validated_at: Optional[datetime] = None
-    validation_method: Optional[str] = None
     teacher_confirmed_at: Optional[datetime] = None
     validation_deadline_at: Optional[datetime] = None
     dispute_reason: Optional[str] = None
@@ -29,18 +27,20 @@ class SessionValidationStatus(BaseModel):
     payment_credited_at: Optional[datetime] = None
     gps_consent: bool = False
 
+    # Group lesson info (2026-09-14 redesign) — is_group is False and the
+    # rest trivial (1/1) for an individual session; see
+    # app/services/session_validation.py's group_validation_stats.
+    is_group: bool = False
+    group_total: int = 1
+    group_validated: int = 0
+    group_threshold_percent: int = 0
+    group_threshold_met: bool = False
+    group_deadline_at: Optional[datetime] = None
+    can_group_confirm: bool = False
+    can_file_group_report: bool = False
+    group_already_reported: bool = False
+
     model_config = {"from_attributes": True}
-
-
-class TokenViewResponse(BaseModel):
-    token: str
-    expires_at: datetime
-    already_consumed: bool = False
-
-
-class ValidateSessionRequest(BaseModel):
-    token: str
-    method: str  # 'auto_send' | 'manual_entry'
 
 
 class DisputeRequest(BaseModel):
@@ -87,7 +87,7 @@ class TrustScoreSettings(BaseModel):
     trust_weight_clean_history: int
     trust_auto_approve_threshold: int
     trust_manual_review_threshold: int
-    token_visible_minutes_before: int
+    room_join_minutes_before: int
     student_validation_window_hours: int
     teacher_confirmation_window_hours: int
     gps_proximity_threshold_meters: int

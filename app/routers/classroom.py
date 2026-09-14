@@ -144,7 +144,7 @@ async def get_classroom_room(
     settings = get_platform_settings(db)
     duration = session.duration_min or 90
     scheduled_end = session.scheduled_at + timedelta(minutes=duration)
-    join_opens_at = session.scheduled_at - timedelta(minutes=settings.token_visible_minutes_before)
+    join_opens_at = session.scheduled_at - timedelta(minutes=settings.room_join_minutes_before)
     now = datetime.now(timezone.utc)
     grace_end = scheduled_end + timedelta(minutes=45)
 

@@ -407,10 +407,13 @@ class SessionValidationSettings(BaseModel):
     trust_weight_clean_history: int = Field(ge=0, le=100)
     trust_auto_approve_threshold: int = Field(ge=0, le=100)
     trust_manual_review_threshold: int = Field(ge=0, le=100)
-    token_visible_minutes_before: int = Field(ge=0, le=1440)
+    room_join_minutes_before: int = Field(ge=0, le=1440)
     student_validation_window_hours: int = Field(ge=1, le=336)
     teacher_confirmation_window_hours: int = Field(ge=1, le=336)
     gps_proximity_threshold_meters: int = Field(ge=1, le=50000)
+    # Group lessons only (meaningless for individual/1-student sessions) —
+    # see app/models/admin.py's PlatformSettings.trust_group_validation_threshold_percent.
+    trust_group_validation_threshold_percent: int = Field(ge=1, le=100)
 
     @field_validator("trust_manual_review_threshold")
     @classmethod

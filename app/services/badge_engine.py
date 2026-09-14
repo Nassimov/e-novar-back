@@ -291,7 +291,18 @@ def check_and_unlock_badges(
             emit(
                 db, event_type="badge_unlocked", user_id=student_id,
                 context={"badge_name": badge.name if badge else "nouveau badge"},
-                data={"badge_id": badge_id},
+                # Full badge shape (not just the id) so the global celebration
+                # listener (src/lib/badge-celebration.ts) can render the
+                # CelebrationModal from the WS payload alone, on whatever page
+                # the student is on — no follow-up GET /student/badges needed.
+                data={
+                    "badge_id": badge_id,
+                    "name": badge.name if badge else None,
+                    "description": badge.description or (badge.condition if badge else None),
+                    "icon": badge.icon if badge else None,
+                    "tier": badge.tier if badge else None,
+                    "ep_reward": badge.ep_reward if badge else 0,
+                },
                 dedup_key=f"badge_unlocked:{student_id}:{badge_id}",
             )
 

@@ -17,7 +17,7 @@ from app.models.profile import Profile
 from app.models.session_validation import SessionValidation
 from app.schemas.session_validation import AdminDecisionRequest, AdminReviewItem, TrustScoreSettings
 from app.services.pricing import get_platform_settings
-from app.services.session_validation import credit_session_payout, generate_token, log_audit
+from app.services.session_validation import credit_session_payout, log_audit
 from app.models.admin import PlatformSettings
 
 router = APIRouter(tags=["Admin — Session Validation"])
@@ -33,7 +33,7 @@ def _trust_settings_dict(s: PlatformSettings) -> dict:
         "trust_weight_clean_history": s.trust_weight_clean_history,
         "trust_auto_approve_threshold": s.trust_auto_approve_threshold,
         "trust_manual_review_threshold": s.trust_manual_review_threshold,
-        "token_visible_minutes_before": s.token_visible_minutes_before,
+        "room_join_minutes_before": s.room_join_minutes_before,
         "student_validation_window_hours": s.student_validation_window_hours,
         "teacher_confirmation_window_hours": s.teacher_confirmation_window_hours,
         "gps_proximity_threshold_meters": s.gps_proximity_threshold_meters,
@@ -269,32 +269,6 @@ def reject_validation(
     log_audit(db, session_id=sv.session_id, booking_id=sv.booking_id, actor_user_id=admin_id,
               actor_ip=None, action="admin_rejected", metadata={"note": body.note, "refunded": refund_result["refunded"]})
     return {"status": sv.status, "refunded": refund_result["refunded"], "refund_requires_manual_action": refund_result["requires_manual_action"]}
-
-
-@router.post("/{validation_id}/regenerate-token")
-def admin_regenerate_token(
-    validation_id: UUID,
-    admin: Dict[str, Any] = Depends(get_admin_user),
-    db: Session = Depends(get_db),
-):
-    """Escape hatch for a stuck session (e.g. student lost their code) —
-    admin forces a fresh token. Returned once, same as the student's own
-    view-token endpoint."""
-    sv = _get_sv(db, validation_id)
-    session = db.get(TutoringSession, sv.session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    admin_id = None
-    if admin.get("id"):
-        try:
-            admin_id = UUID(admin["id"])
-        except ValueError:
-            admin_id = None
-
-    plaintext = generate_token(db, sv, actor_user_id=admin_id, actor_ip=None)
-    db.commit()
-    return {"token": plaintext, "expires_at": sv.token_expires_at}
 
 
 @router.get("/settings/trust-score", response_model=TrustScoreSettings)

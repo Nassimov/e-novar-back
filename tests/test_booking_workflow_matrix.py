@@ -681,3 +681,129 @@ def test_students_overview_no_tz_crash_for_teacher_with_completed_session(db_ses
     assert result[0]["student_id"] == str(student_profile.id)
     assert result[0]["status"] == "active"  # completed 10 days ago, within the 30-day window
     assert result[0]["sessions"] == 1
+
+
+# ─── "Student requests" teacher notification timing (2026-09-14 report) ─────
+#
+# Asserting on calls to notification_engine.emit() (mocked at its source
+# module, which local `from app.services.notification_engine import emit`
+# imports re-resolve at call time — so patching the source works) rather
+# than on Notification rows in the DB: NotificationTemplate.channels is a
+# Postgres ARRAY column, and conftest.py's own SQLite shims explicitly
+# document that inserting a real Python list through a raw ARRAY column
+# under SQLite fails at the DB layer — with no seeded template row, emit()
+# would just no-op (template lookup returns None) regardless of whether
+# the call itself happened at the right time, which is exactly the thing
+# these tests need to verify.
+
+def test_cib_booking_does_not_notify_teacher_at_creation(db_session):
+    """Was the actual bug reported: clicking "payer" on a cib (Stripe)
+    booking notified the teacher (and populated their dashboard's "Student
+    requests"/pending list, via badge-store.ts's lesson_booked ->
+    invalidateQueries wiring) immediately at booking creation — before the
+    student was even redirected to Stripe, let alone actually paid. Fixed:
+    cib no longer notifies at creation; see the next test for where it
+    notifies instead."""
+    teacher_profile, tp = _make_teacher(db_session)
+    student_profile, _sp = _make_student(db_session)
+    subject, level = _make_subject_level(db_session)
+
+    with patch("app.services.notification_engine.emit") as mock_emit:
+        _book(
+            db_session, teacher_profile=teacher_profile, student_profile=student_profile,
+            session_type="individual", mode="online", formula="single", payment_method="cib",
+            subject=subject, level=level,
+        )
+    lesson_booked_calls = [c for c in mock_emit.call_args_list if c.kwargs.get("event_type") == "lesson_booked"]
+    assert lesson_booked_calls == []
+
+
+def test_cib_booking_notifies_teacher_once_payment_authorized_via_lookup(db_session):
+    """The corrected trigger point: GET /bookings/lookup (student.payment_.
+    process.tsx's own endpoint, hit right as the "Paiement autorisé — C'est
+    noté !" screen renders) is what now fires lesson_booked for cib, and
+    only once real Stripe verification confirms it — simulated here (no
+    live Stripe call) by short-circuiting get_checkout_session so the
+    "succeeded" branch is reached deterministically."""
+    from app.routers.student_teachers import lookup_booking
+
+    teacher_profile, tp = _make_teacher(db_session)
+    student_profile, _sp = _make_student(db_session)
+    subject, level = _make_subject_level(db_session)
+
+    with patch("app.services.notification_engine.emit") as mock_emit:
+        result = _book(
+            db_session, teacher_profile=teacher_profile, student_profile=student_profile,
+            session_type="individual", mode="online", formula="single", payment_method="cib",
+            subject=subject, level=level,
+        )
+    booking = db_session.get(Booking, _bid(result))
+
+    def _count():
+        return len([c for c in mock_emit.call_args_list if c.kwargs.get("event_type") == "lesson_booked"])
+
+    with patch("app.services.notification_engine.emit") as mock_emit, patch(
+        "app.services.stripe.get_checkout_session",
+        return_value={"payment_intent_status": "succeeded", "payment_intent": "pi_test_lookup"},
+    ):
+        lookup_booking(
+            session_id=booking.stripe_cs_id, booking_id=None,
+            current_user=_current_user(student_profile, "student"), db=db_session,
+        )
+        assert _count() == 1
+
+        # A second visit to the same success page (refresh, back button)
+        # calls emit() again (dedup happens inside emit()'s own DB-level
+        # unique-constraint swallow, not before the call) — so what this
+        # asserts is narrower but still meaningful: the call itself still
+        # carries the SAME dedup_key both times, which is what actually
+        # prevents a real second Notification row.
+        lookup_booking(
+            session_id=booking.stripe_cs_id, booking_id=None,
+            current_user=_current_user(student_profile, "student"), db=db_session,
+        )
+        assert _count() == 2
+        dedup_keys = {
+            c.kwargs.get("dedup_key")
+            for c in mock_emit.call_args_list
+            if c.kwargs.get("event_type") == "lesson_booked"
+        }
+        assert dedup_keys == {f"lesson_booked:{booking.id}"}
+
+
+def test_cash_booking_still_notifies_teacher_immediately(db_session):
+    """Manual rails (cash/transfer/rib_*) are unaffected by this fix — no
+    external gateway step exists for them, so creation-time is already the
+    correct 'payment declared' moment."""
+    teacher_profile, tp = _make_teacher(db_session)
+    student_profile, _sp = _make_student(db_session)
+    subject, level = _make_subject_level(db_session)
+
+    with patch("app.services.notification_engine.emit") as mock_emit:
+        _book(
+            db_session, teacher_profile=teacher_profile, student_profile=student_profile,
+            session_type="individual", mode="online", formula="single", payment_method="cash",
+            subject=subject, level=level,
+        )
+    lesson_booked_calls = [c for c in mock_emit.call_args_list if c.kwargs.get("event_type") == "lesson_booked"]
+    assert len(lesson_booked_calls) == 1
+
+
+def test_edahabia_booking_does_not_notify_teacher_at_creation(db_session):
+    """edahabia already gets its own, correctly-timed notification from the
+    Chargily webhook's real checkout.paid event (app/routers/
+    chargily_webhook.py) — book_teacher_slot must not ALSO fire
+    lesson_booked immediately, which would be both premature (before
+    payment) and a duplicate (once the webhook does its own)."""
+    teacher_profile, tp = _make_teacher(db_session)
+    student_profile, _sp = _make_student(db_session)
+    subject, level = _make_subject_level(db_session)
+
+    with patch("app.services.notification_engine.emit") as mock_emit:
+        _book(
+            db_session, teacher_profile=teacher_profile, student_profile=student_profile,
+            session_type="individual", mode="online", formula="single", payment_method="edahabia",
+            subject=subject, level=level,
+        )
+    lesson_booked_calls = [c for c in mock_emit.call_args_list if c.kwargs.get("event_type") == "lesson_booked"]
+    assert lesson_booked_calls == []

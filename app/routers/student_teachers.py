@@ -1837,23 +1837,40 @@ def book_teacher_slot(
     db.refresh(booking)
 
     # Notify the teacher that a booking is waiting for their confirmation —
-    # this was previously only fired for the edahabia webhook / manual cash
-    # approval paths, so the default cib (Stripe) flow never told the
-    # teacher anything (no dashboard badge, nothing in their pending list
-    # felt "new"). lesson_booked already has a seeded template (deep_link
-    # /teacher/sessions) — see docs/migrations/071_notification_templates_seed.sql.
-    from app.services.notification_engine import emit
-    student_profile_row = db.get(Profile, student_id)
-    emit(
-        db, event_type="lesson_booked", user_id=teacher_id,
-        context={
-            "student_name": student_profile_row.full_name if student_profile_row else "Un élève",
-            "date": str(booking.booking_date),
-            "time": booking.slot_time.strftime("%H:%M") if booking.slot_time else "",
-        },
-        data={"booking_id": str(booking.id)},
-        dedup_key=f"lesson_booked:{booking.id}",
-    )
+    # cash/transfer/rib_cib/rib_edahabia only. These have no external
+    # gateway step: creation itself is already "payment declared", so
+    # immediate is correct (admin's later approve_manual_payment sends its
+    # own separate "confirmed" notification once actually reconciled).
+    #
+    # cib and edahabia are deliberately EXCLUDED here — they used to fire
+    # this same notification unconditionally, right at booking creation,
+    # which is the instant the student's browser makes this request, well
+    # BEFORE they're even redirected to Stripe/Chargily's own checkout
+    # page — so "nouvelle demande" showed up on the teacher's dashboard the
+    # moment the student clicked "payer", not once they actually paid
+    # (reported 2026-09-14: appeared before the student ever reached
+    # student.payment_.process.tsx's "Paiement autorisé — C'est noté !"
+    # screen). edahabia already gets its own, correctly-timed notification
+    # from the Chargily webhook (app/routers/chargily_webhook.py, on the
+    # real `checkout.paid` event) — sending this one too would just be a
+    # second, premature notification for the same booking. cib has no
+    # webhook wired to this booking flow at all, so its equivalent fires
+    # from GET /bookings/lookup below, at the first moment payment is
+    # actually verified authorized (same dedup_key, so it still only ever
+    # inserts once regardless of how many times that endpoint is polled).
+    if body.payment_method in ("cash", "transfer", "rib_cib", "rib_edahabia"):
+        from app.services.notification_engine import emit
+        student_profile_row = db.get(Profile, student_id)
+        emit(
+            db, event_type="lesson_booked", user_id=teacher_id,
+            context={
+                "student_name": student_profile_row.full_name if student_profile_row else "Un élève",
+                "date": str(booking.booking_date),
+                "time": booking.slot_time.strftime("%H:%M") if booking.slot_time else "",
+            },
+            data={"booking_id": str(booking.id)},
+            dedup_key=f"lesson_booked:{booking.id}",
+        )
 
     return {
         "booking_id": str(booking.id),
@@ -1922,6 +1939,28 @@ def lookup_booking(
             # Stripe unreachable — don't block the redirect page on a
             # transient error; fall back to whatever we know locally.
             payment_authorized = booking.status != "pending"
+
+        if payment_authorized:
+            # The cib equivalent of the "a booking is waiting for your
+            # confirmation" notification (see book_teacher_slot's own
+            # comment on why cib is excluded from firing it at creation
+            # time) — this is the first point payment is genuinely
+            # verified authorized, which lines up with the student's own
+            # "Paiement autorisé" screen. Same dedup_key as before, so a
+            # student revisiting/refreshing this page never re-notifies
+            # the teacher a second time.
+            from app.services.notification_engine import emit
+            student_profile_row = db.get(Profile, student_id)
+            emit(
+                db, event_type="lesson_booked", user_id=booking.teacher_id,
+                context={
+                    "student_name": student_profile_row.full_name if student_profile_row else "Un élève",
+                    "date": str(booking.booking_date),
+                    "time": booking.slot_time.strftime("%H:%M") if booking.slot_time else "",
+                },
+                data={"booking_id": str(booking.id)},
+                dedup_key=f"lesson_booked:{booking.id}",
+            )
 
     teacher_profile = db.get(Profile, booking.teacher_id)
 

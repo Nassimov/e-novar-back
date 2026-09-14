@@ -19,17 +19,15 @@ from app.schemas.session_validation import (
     DisputeRequest,
     GpsSubmitRequest,
     SessionValidationStatus,
-    TokenViewResponse,
-    ValidateSessionRequest,
 )
 from app.services.pricing import get_platform_settings
 from app.services.session_validation import (
-    consume_token,
     evaluate_and_finalize,
-    generate_token,
+    file_group_report,
     get_or_create_validation,
+    group_confirm_and_finalize,
+    group_validation_stats,
     log_audit,
-    token_window_open,
 )
 from app.services.storage import upload_file
 from sqlmodel import Session
@@ -55,9 +53,18 @@ def _load(db: Session, session_id: UUID, current_user: Dict[str, Any]):
     return session, sv, is_student, is_teacher
 
 
+def _aware(d):
+    """Defensive normalization — every relevant timestamp column here is
+    TIMESTAMPTZ so a value read back from the real Postgres DB is always
+    timezone-aware, but see app/services/matching.py's identical pattern
+    (find_overlapping_confirmed_sessions) for the one existing precedent of
+    this actually mattering. Never assume the caller already handled it."""
+    return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d
+
+
 def _check_expiry(db: Session, session: TutoringSession, sv, settings) -> None:
     if sv.status == "awaiting_student_validation" and sv.teacher_ended_at:
-        deadline = sv.teacher_ended_at + timedelta(hours=settings.student_validation_window_hours)
+        deadline = _aware(sv.teacher_ended_at) + timedelta(hours=settings.student_validation_window_hours)
         if datetime.now(timezone.utc) > deadline:
             sv.status = "expired"
             db.add(sv)
@@ -74,7 +81,7 @@ def _check_expiry(db: Session, session: TutoringSession, sv, settings) -> None:
     # trust-score evaluation confirm() would have triggered, just without
     # the teacher_confirmation signal since teacher_confirmed_at stays unset.
     if sv.status == "validated" and sv.student_validated_at:
-        deadline = sv.student_validated_at + timedelta(hours=settings.teacher_confirmation_window_hours)
+        deadline = _aware(sv.student_validated_at) + timedelta(hours=settings.teacher_confirmation_window_hours)
         if datetime.now(timezone.utc) > deadline:
             log_audit(db, session_id=session.id, booking_id=session.booking_id, actor_user_id=None,
                       actor_ip=None, action="teacher_confirmation_auto_finalized")
@@ -85,7 +92,6 @@ def _check_expiry(db: Session, session: TutoringSession, sv, settings) -> None:
 
 def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatus:
     scheduled_end = session.scheduled_at + timedelta(minutes=session.duration_min or 90)
-    token_visible_at = session.scheduled_at - timedelta(minutes=settings.token_visible_minutes_before)
     deadline = (
         sv.teacher_ended_at + timedelta(hours=settings.student_validation_window_hours)
         if sv.teacher_ended_at else None
@@ -98,15 +104,13 @@ def _to_status(session: TutoringSession, sv, settings) -> SessionValidationStatu
         # Either participant can end the session once it has actually
         # started — no longer gated on the full scheduled duration having
         # elapsed (a class legitimately finishing early is normal, not
-        # fraud; the downstream code-validation + dispute/trust-score
-        # workflow is what actually guards against abuse here).
+        # fraud; the downstream dispute/trust-score workflow is what
+        # actually guards against abuse here).
         can_end_session=(sv.status == "scheduled" and datetime.now(timezone.utc) >= session.scheduled_at),
-        can_view_token=token_window_open(sv, session, settings) and sv.status in ("scheduled", "awaiting_student_validation"),
-        token_visible_at=token_visible_at,
+        can_validate=(sv.status == "awaiting_student_validation" and sv.student_validated_at is None),
         scheduled_end_at=scheduled_end,
         teacher_ended_at=sv.teacher_ended_at,
         student_validated_at=sv.student_validated_at,
-        validation_method=sv.validation_method,
         teacher_confirmed_at=sv.teacher_confirmed_at,
         validation_deadline_at=deadline,
         dispute_reason=sv.dispute_reason,
@@ -125,10 +129,27 @@ def get_validation_status(
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    session, sv, _, _ = _load(db, session_id, current_user)
+    session, sv, _, is_teacher = _load(db, session_id, current_user)
     settings = get_platform_settings(db)
     _check_expiry(db, session, sv, settings)
-    return _to_status(session, sv, settings)
+    status = _to_status(session, sv, settings)
+
+    stats = group_validation_stats(db, session, settings)
+    status.is_group = stats["is_group"]
+    status.group_total = stats["total"]
+    status.group_validated = stats["validated"]
+    status.group_threshold_percent = stats["threshold_percent"]
+    status.group_threshold_met = stats["threshold_met"]
+    status.group_deadline_at = stats["deadline_at"]
+    status.group_already_reported = stats["already_reported"]
+    status.can_group_confirm = bool(
+        is_teacher and stats["is_group"] and stats["threshold_met"] and not stats["already_finalized"]
+    )
+    status.can_file_group_report = bool(
+        is_teacher and stats["is_group"] and not stats["threshold_met"]
+        and stats["deadline_passed"] and not stats["already_reported"] and not stats["already_finalized"]
+    )
+    return status
 
 
 @router.post("/{session_id}/validation/end")
@@ -229,77 +250,36 @@ async def _disconnect_session_cameras(db: Session, room_key: str) -> None:
         db.commit()
 
 
-@router.get("/{session_id}/validation/token", response_model=TokenViewResponse)
-def view_token(
-    session_id: UUID,
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Student (only) retrieves their session token. Only the plaintext
-    returned by THIS call ever exists — the DB only ever stores its hash."""
-    session, sv, is_student, _ = _load(db, session_id, current_user)
-    if not is_student:
-        raise HTTPException(status_code=403, detail="Only the student can view their session token")
-    settings = get_platform_settings(db)
-    if not token_window_open(sv, session, settings):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Le code ne sera visible que {settings.token_visible_minutes_before} minutes avant la séance.",
-        )
-    if sv.status not in ("scheduled", "awaiting_student_validation"):
-        raise HTTPException(status_code=409, detail=f"Aucun code disponible pour une séance en statut '{sv.status}'")
-
-    plaintext = generate_token(
-        db, sv,
-        actor_user_id=UUID(current_user["id"]),
-        actor_ip=_client_ip(request),
-    )
-    db.commit()
-    return TokenViewResponse(token=plaintext, expires_at=sv.token_expires_at)
-
-
 @router.post("/{session_id}/validation/validate")
 def validate_session(
     session_id: UUID,
-    body: ValidateSessionRequest,
     request: Request,
     current_user: Dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Consume the session token — either the student's own client submitting
-    its cached token silently ('auto_send'), or the teacher typing in the
-    code the student dictated out loud ('manual_entry'). Both paths run the
-    exact same verification; only who called it and how differs."""
-    session, sv, is_student, is_teacher = _load(db, session_id, current_user)
-    if not is_student and not is_teacher:
-        raise HTTPException(status_code=403, detail="Access denied")
+    """Student (only) marks the lesson as having taken place — a single
+    "Valider" click, no code (dropped 2026-09-14, see migration 118: the
+    trust score's student_validation signal only ever cared WHETHER this
+    got set, not how)."""
+    session, sv, is_student, _ = _load(db, session_id, current_user)
+    if not is_student:
+        raise HTTPException(status_code=403, detail="Only the student can validate their own session")
     settings = get_platform_settings(db)
     _check_expiry(db, session, sv, settings)
-    if body.method not in ("auto_send", "manual_entry"):
-        raise HTTPException(status_code=400, detail="Invalid validation method")
     if sv.status != "awaiting_student_validation":
         raise HTTPException(status_code=409, detail=f"Cannot validate a session in status '{sv.status}'")
     if sv.student_validated_at is not None:
         raise HTTPException(status_code=409, detail="Cette séance a déjà été validée")
 
-    if not consume_token(db, sv, body.token):
-        log_audit(db, session_id=session.id, booking_id=session.booking_id,
-                  actor_user_id=UUID(current_user["id"]), actor_ip=_client_ip(request),
-                  action="validation_token_rejected", metadata={"method": body.method})
-        db.commit()
-        raise HTTPException(status_code=400, detail="Code invalide ou expiré")
-
     now = datetime.now(timezone.utc)
     sv.student_validated_at = now
-    sv.validation_method = body.method
     sv.status = "validated"
     sv.updated_at = now
     db.add(sv)
 
     log_audit(db, session_id=session.id, booking_id=session.booking_id,
               actor_user_id=UUID(current_user["id"]), actor_ip=_client_ip(request),
-              action="student_validated", metadata={"method": body.method})
+              action="student_validated")
 
     from app.services.session_validation import _notify
     _notify(db, session.teacher_id, "✅ Séance validée par l'élève",
@@ -323,6 +303,12 @@ def teacher_confirm_session(
     session, sv, _, is_teacher = _load(db, session_id, current_user)
     if not is_teacher and current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Only the session's teacher can confirm it")
+    settings = get_platform_settings(db)
+    if group_validation_stats(db, session, settings)["is_group"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Cette séance fait partie d'un groupe — utilisez la confirmation de groupe.",
+        )
     if sv.status != "validated":
         raise HTTPException(status_code=409, detail=f"Cannot confirm a session in status '{sv.status}'")
     if sv.teacher_confirmed_at is not None:
@@ -334,12 +320,75 @@ def teacher_confirm_session(
               actor_user_id=UUID(current_user["id"]) if current_user.get("id") else None,
               actor_ip="", action="teacher_confirmed")
 
-    settings = get_platform_settings(db)
     evaluate_and_finalize(db, session, sv, settings)
 
     db.commit()
     db.refresh(sv)
     return {"status": sv.status, "trust_score": sv.trust_score}
+
+
+@router.get("/{session_id}/validation/group-status")
+def get_group_validation_status(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Standalone group-stats fetch — get_validation_status above already
+    embeds the same numbers in its response for the common case (one poll
+    covers both), this exists for a caller that only cares about the group
+    counter without the rest of the per-session status payload."""
+    session, sv, _, _ = _load(db, session_id, current_user)
+    settings = get_platform_settings(db)
+    stats = group_validation_stats(db, session, settings)
+    return {k: v for k, v in stats.items() if k != "rows"}
+
+
+@router.post("/{session_id}/validation/group-confirm")
+def group_confirm(
+    session_id: UUID,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher's single confirm action for an entire group lesson, once
+    enough students have validated — see app/services/session_validation.py's
+    group_confirm_and_finalize for the full mechanics."""
+    session, sv, _, is_teacher = _load(db, session_id, current_user)
+    if not is_teacher and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only the session's teacher can confirm the group")
+    settings = get_platform_settings(db)
+    try:
+        result = group_confirm_and_finalize(
+            db, session, settings, actor_user_id=UUID(current_user["id"]),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    db.commit()
+    return result
+
+
+@router.post("/{session_id}/validation/group-report")
+def group_report(
+    session_id: UUID,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Teacher's escalation for a group lesson that never cleared the
+    validation threshold within the window — see app/services/
+    session_validation.py's file_group_report."""
+    session, sv, _, is_teacher = _load(db, session_id, current_user)
+    if not is_teacher and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only the session's teacher can file this report")
+    settings = get_platform_settings(db)
+    try:
+        result = file_group_report(
+            db, session, settings,
+            actor_user_id=UUID(current_user["id"]), actor_ip=_client_ip(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    db.commit()
+    return result
 
 
 _AUTO_RESOLVABLE_REASON_CODES = ("student_absent", "teacher_absent")
