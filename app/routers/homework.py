@@ -97,6 +97,7 @@ def _to_response(
         student_name=student_name,
         session_id=hw.session_id, subject_name=_resolve_subject_name(db, hw),
         title=hw.title, statement=hw.statement, hints=hw.hints or [],
+        attachments=_parse_files(hw.attachments),
         due_at=hw.due_at, due_label=hw.due_label,
         status=hw.status.value if hasattr(hw.status, "value") else hw.status,
         kp_reward=hw.kp_reward, created_at=hw.created_at, updated_at=hw.updated_at,
@@ -260,6 +261,7 @@ def create_homework(
         statement=payload.statement,
         hints=payload.hints,
         hints_checked=[False] * len(payload.hints),
+        attachments=[f.model_dump(exclude_none=True) for f in payload.attachments],
         due_at=payload.due_at,
         due_label=payload.due_label,
         kp_reward=payload.kp_reward,
@@ -300,6 +302,7 @@ def update_homework(
     hw.title = payload.title
     hw.statement = payload.statement
     hw.hints = payload.hints
+    hw.attachments = [f.model_dump(exclude_none=True) for f in payload.attachments]
     hw.due_at = payload.due_at
     hw.due_label = payload.due_label
     hw.kp_reward = payload.kp_reward

@@ -7,6 +7,13 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
+class HwFileIn(BaseModel):
+    name: str
+    size: int = 0
+    type: str = ""
+    url: Optional[str] = None
+
+
 class HomeworkCreate(BaseModel):
     student_id: UUID
     session_id: Optional[UUID] = None
@@ -19,6 +26,11 @@ class HomeworkCreate(BaseModel):
     title: str
     statement: str
     hints: List[str] = []
+    # Reference material the teacher attaches to the assignment itself (not
+    # to be confused with HomeworkSubmission.files / HomeworkGrade.files,
+    # the student's answer and the teacher's correction) — uploaded via the
+    # generic POST /api/files/upload, same as grade files.
+    attachments: List[HwFileIn] = []
     due_at: Optional[datetime] = None
     due_label: Optional[str] = None
     # Sanity ceiling only — the real, admin-configurable cap
@@ -59,6 +71,7 @@ class HomeworkResponse(BaseModel):
     title: str
     statement: str
     hints: List[str] = []
+    attachments: List[HwFileOut] = []
     due_at: Optional[datetime] = None
     due_label: Optional[str] = None
     status: str
@@ -74,13 +87,6 @@ class HomeworkResponse(BaseModel):
 class HomeworkSubmitRequest(BaseModel):
     text: str
     attachment_url: Optional[str] = None
-
-
-class HwFileIn(BaseModel):
-    name: str
-    size: int = 0
-    type: str = ""
-    url: Optional[str] = None
 
 
 class HomeworkGradeRequest(BaseModel):
