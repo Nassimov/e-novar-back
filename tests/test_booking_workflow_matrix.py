@@ -807,3 +807,69 @@ def test_edahabia_booking_does_not_notify_teacher_at_creation(db_session):
         )
     lesson_booked_calls = [c for c in mock_emit.call_args_list if c.kwargs.get("event_type") == "lesson_booked"]
     assert lesson_booked_calls == []
+
+
+# ─── Teacher booking list hides unauthorized cib/edahabia rows (2026-09-21 report) ─
+#
+# The row itself is created (status="pending") the instant the student
+# submits the form — well before Stripe/Chargily checkout completes. The
+# lesson_booked *notification* was already fixed to wait for that (tests
+# above); this covers the separate leak where the teacher's own "Student
+# requests" list (GET /teachers/me/bookings, read directly by
+# teacher.index.tsx/teacher.students.tsx/teacher.sessions.tsx) still showed
+# the booking immediately regardless, since it only ever filtered on
+# Booking.status.
+
+def test_unauthorized_cib_booking_hidden_from_teacher_list(db_session):
+    from app.routers.teachers import list_teacher_bookings
+
+    teacher_profile, tp = _make_teacher(db_session)
+    student_profile, _sp = _make_student(db_session)
+    subject, level = _make_subject_level(db_session)
+
+    result = _book(
+        db_session, teacher_profile=teacher_profile, student_profile=student_profile,
+        session_type="individual", mode="online", formula="single", payment_method="cib",
+        subject=subject, level=level,
+    )
+    teacher_view = _current_user(teacher_profile, "teacher")
+
+    # Not yet authorized (no stripe_pi_id) — must not appear at all.
+    items = list_teacher_bookings(booking_status="pending", current_user=teacher_view, db=db_session)
+    assert result["booking_id"] not in {i.id for i in items}
+    items = list_teacher_bookings(booking_status=None, current_user=teacher_view, db=db_session)
+    assert result["booking_id"] not in {i.id for i in items}
+
+    # Once Stripe authorization is recorded (same field lookup_booking sets),
+    # it becomes visible like any other pending request.
+    booking = db_session.get(Booking, _bid(result))
+    booking.stripe_pi_id = "pi_test_123"
+    db_session.add(booking)
+    db_session.commit()
+    items = list_teacher_bookings(booking_status="pending", current_user=teacher_view, db=db_session)
+    assert result["booking_id"] in {i.id for i in items}
+
+
+def test_unauthorized_edahabia_booking_hidden_from_teacher_list(db_session):
+    from app.routers.teachers import list_teacher_bookings
+
+    teacher_profile, tp = _make_teacher(db_session)
+    student_profile, _sp = _make_student(db_session)
+    subject, level = _make_subject_level(db_session)
+
+    result = _book(
+        db_session, teacher_profile=teacher_profile, student_profile=student_profile,
+        session_type="individual", mode="online", formula="single", payment_method="edahabia",
+        subject=subject, level=level,
+    )
+    teacher_view = _current_user(teacher_profile, "teacher")
+
+    items = list_teacher_bookings(booking_status="pending", current_user=teacher_view, db=db_session)
+    assert result["booking_id"] not in {i.id for i in items}
+
+    booking = db_session.get(Booking, _bid(result))
+    booking.chargily_paid_at = dt.datetime.now(dt.timezone.utc)
+    db_session.add(booking)
+    db_session.commit()
+    items = list_teacher_bookings(booking_status="pending", current_user=teacher_view, db=db_session)
+    assert result["booking_id"] in {i.id for i in items}

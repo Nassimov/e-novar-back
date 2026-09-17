@@ -1117,6 +1117,25 @@ def list_teacher_bookings(
 
     teacher_id = UUID(current_user["id"])
     stmt = select(Booking).where(Booking.teacher_id == teacher_id)
+    # A cib (Stripe) or edahabia (Chargily) booking row is created and set
+    # "pending" the instant the student submits the form — well before
+    # they've actually paid (Stripe checkout / Chargily redirect happens
+    # after this request returns). Without this filter the teacher would
+    # see "nouvelle demande" for a payment the student hasn't completed, or
+    # never completes (abandoned checkout, declined card) — reported
+    # 2026-09-21, the same premature-visibility bug the "lesson_booked"
+    # notification itself was already fixed for (see book_teacher_slot's
+    # comment), just via the booking LIST instead of the push notification.
+    # stripe_pi_id / chargily_paid_at are the same persisted "actually
+    # authorized/paid" signals lookup_booking and the Chargily webhook
+    # already rely on. Manual methods (cash/transfer/rib_cib/rib_edahabia)
+    # are untouched — for those, creation itself IS the payment declaration.
+    stmt = stmt.where(
+        ~(
+            ((Booking.payment_method == "cib") & (Booking.stripe_pi_id.is_(None)))
+            | ((Booking.payment_method == "edahabia") & (Booking.chargily_paid_at.is_(None)))
+        )
+    )
     if booking_status:
         stmt = stmt.where(Booking.status == booking_status)
     stmt = stmt.order_by(Booking.created_at.desc())
