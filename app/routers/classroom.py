@@ -1445,7 +1445,23 @@ async def share_camera(
     camera = _load_camera(db, session, camera_id)
 
     room_name = lk_video.room_name_for_session(camera.room_key)
-    await lk_video.set_camera_track_shared(room_name, str(camera.id), True)
+    # set_camera_track_shared returns False if the phone's camera:<id>
+    # LiveKit participant isn't found, or has no video track published yet
+    # (e.g. the teacher clicked "share" in the instant right after the
+    # phone's WS "connected" event, before its actual camera track finished
+    # publishing to the SFU) — the return value used to be silently
+    # ignored, so is_shared still flipped true and camera_shared still
+    # broadcast even though nothing was actually unmuted server-side. The
+    # student's dock tile would then show forever ("en attente de la
+    # vidéo") with no way to know why, and the teacher's dialog would say
+    # "sharing" with zero indication it hadn't actually taken effect —
+    # reported 2026-09-18 as "share with student does nothing".
+    found = await lk_video.set_camera_track_shared(room_name, str(camera.id), True)
+    if not found:
+        raise HTTPException(
+            status_code=409,
+            detail="Le téléphone n'a pas encore de flux vidéo actif. Réessayez dans quelques secondes.",
+        )
     camera.is_shared = True
     camera.updated_at = datetime.now(timezone.utc)
     db.add(camera)
