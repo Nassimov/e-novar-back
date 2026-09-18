@@ -43,6 +43,12 @@ class UserBrief(BaseModel):
     phone: Optional[str] = None
     is_verified: bool = False
     onboarding_completed: bool = False
+    totp_enabled: bool = False
+    # ISO datetime string, or None if no deletion is scheduled — see
+    # app/routers/account_security.py. The frontend gates the whole app on
+    # this (same pattern as is_verified) so the user can only reach a
+    # "cancel deletion" screen until they do.
+    deletion_scheduled_for: Optional[str] = None
 
 
 class TokenResponse(BaseModel):
@@ -50,6 +56,19 @@ class TokenResponse(BaseModel):
     refresh_token: Optional[str] = None
     token_type: str = "bearer"
     user: UserBrief
+
+
+class SignInTotpChallenge(BaseModel):
+    """Returned by POST /signin instead of a TokenResponse when the account
+    has 2FA enabled — the password was correct, but the session isn't
+    issued until POST /signin/totp verifies the code."""
+    totp_required: bool = True
+    challenge_token: str
+
+
+class SignInTotpVerifyRequest(BaseModel):
+    challenge_token: str
+    totp_code: str
 
 
 class OtpVerifyRequest(BaseModel):

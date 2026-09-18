@@ -298,6 +298,7 @@ register_exception_handlers(app)
 # ── Routers ───────────────────────────────────────────────────────────────────
 from app.routers.auth import router as auth_router
 from app.routers.profile import router as profile_router
+from app.routers.account_security import router as account_security_router
 from app.routers.onboarding import router as onboarding_router
 from app.routers.teachers import router as teachers_router
 from app.routers.payments import router as payments_router
@@ -376,6 +377,7 @@ from app.routers.admin.club import router as admin_clubs_router
 app.include_router(public_router,        prefix="/api/public",         tags=["Public"])
 app.include_router(auth_router,          prefix="/api/auth",           tags=["Auth"])
 app.include_router(profile_router,       prefix="/api/profile",        tags=["Profile"])
+app.include_router(account_security_router, prefix="/api/account",     tags=["Account Security"])
 app.include_router(onboarding_router,    prefix="/api/onboarding",     tags=["Onboarding"])
 app.include_router(teachers_router,      prefix="/api/teachers",       tags=["Teachers"])
 app.include_router(teacher_leaderboard_router, prefix="/api/teachers", tags=["Teachers"])

@@ -24,6 +24,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.models.booking import Booking, TutoringSession
+from app.models.parent_link import ParentStudentLink
 from app.models.profile import Profile
 
 
@@ -412,3 +413,64 @@ async def test_dev_simulate_start_allowed_outside_production(db_session):
     scheduled_at_naive = session.scheduled_at.replace(tzinfo=None) if session.scheduled_at.tzinfo else session.scheduled_at
     future_naive = future.replace(tzinfo=None)
     assert scheduled_at_naive < future_naive
+
+
+# ─── Parent recording access (2026-09-18 report) ────────────────────────────
+#
+# Recordings are the one exception to "a parent never touches classroom
+# endpoints" — every other _authorize call site in app/routers/classroom.py
+# (camera control, chapters, live room join, ...) is untouched by this;
+# only list_recordings was switched to _authorize_or_parent.
+
+@pytest.mark.asyncio
+async def test_linked_parent_can_list_recordings(db_session):
+    from app.routers.classroom import list_recordings
+
+    teacher = _make_profile(db_session)
+    student = _make_profile(db_session)
+    parent = _make_profile(db_session)
+    db_session.add(ParentStudentLink(parent_id=parent.id, student_id=student.id, status="accepted"))
+    db_session.commit()
+
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    session = _make_session(db_session, teacher_id=teacher.id, student_id=student.id, scheduled_at=past, status="completed")
+
+    result = await list_recordings(session.id, _current_user(parent, role="parent"), db_session)
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_unlinked_parent_cannot_list_recordings(db_session):
+    from app.routers.classroom import list_recordings
+
+    teacher = _make_profile(db_session)
+    student = _make_profile(db_session)
+    stranger_parent = _make_profile(db_session)  # no ParentStudentLink row at all
+
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    session = _make_session(db_session, teacher_id=teacher.id, student_id=student.id, scheduled_at=past, status="completed")
+
+    with pytest.raises(HTTPException) as exc:
+        await list_recordings(session.id, _current_user(stranger_parent, role="parent"), db_session)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_pending_link_parent_cannot_list_recordings(db_session):
+    """status='pending' (invite sent, not yet accepted by the student) must
+    not grant access — mirrors every other parent-access check's own
+    status == 'accepted' gate."""
+    from app.routers.classroom import list_recordings
+
+    teacher = _make_profile(db_session)
+    student = _make_profile(db_session)
+    parent = _make_profile(db_session)
+    db_session.add(ParentStudentLink(parent_id=parent.id, student_id=student.id, status="pending"))
+    db_session.commit()
+
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    session = _make_session(db_session, teacher_id=teacher.id, student_id=student.id, scheduled_at=past, status="completed")
+
+    with pytest.raises(HTTPException) as exc:
+        await list_recordings(session.id, _current_user(parent, role="parent"), db_session)
+    assert exc.value.status_code == 403

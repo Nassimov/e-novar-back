@@ -114,7 +114,15 @@ class _SearchTeacherRow:
 
 
 def _load_approved_teacher_rows(db: Session) -> List[dict]:
-    rows = db.exec(select(TeacherProfile).where(TeacherProfile.status == "approved")).all()
+    # A teacher who has requested account deletion (see
+    # app/routers/account_security.py) is deactivated immediately, not only
+    # once the grace period elapses — excluding them here stops new
+    # bookings from landing on an account that's about to disappear.
+    rows = db.exec(
+        select(TeacherProfile)
+        .join(Profile, Profile.id == TeacherProfile.user_id)
+        .where(TeacherProfile.status == "approved", Profile.deletion_scheduled_for.is_(None))
+    ).all()
     return [
         asdict(_SearchTeacherRow(
             user_id=str(tp.user_id),

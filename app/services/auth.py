@@ -95,6 +95,25 @@ def ensure_role(supabase_id: str, role: str, db: Session) -> None:
         db.commit()
 
 
+def generate_totp_secret() -> str:
+    """Same pyotp-based TOTP scheme as the admin panel (see
+    app/services/admin_accounts.py) — one function per app, since
+    admin_accounts.py is intentionally admin-only, but the algorithm is
+    identical."""
+    import pyotp
+    return pyotp.random_base32()
+
+
+def totp_provisioning_uri(secret: str, email: str) -> str:
+    import pyotp
+    return pyotp.TOTP(secret).provisioning_uri(name=email, issuer_name="E-NOVAR")
+
+
+def verify_totp_code(secret: str, code: str) -> bool:
+    import pyotp
+    return pyotp.TOTP(secret).verify((code or "").strip(), valid_window=1)
+
+
 def generate_otp_code(length: int = 6) -> str:
     """Cryptographically random — this used to be `random.choices` (not
     suitable for anything security-sensitive)."""

@@ -73,6 +73,33 @@ def _authorize(session: TutoringSession, current_user: Dict[str, Any]) -> UUID:
     return uid
 
 
+def _authorize_or_parent(db: Session, session: TutoringSession, current_user: Dict[str, Any]) -> UUID:
+    """Same as _authorize, plus a parent with an accepted link to this
+    session's student — used only where a parent legitimately needs
+    after-the-fact access (recordings) and never for anything live-session-
+    control-related, so this intentionally isn't just folded into the
+    shared _authorize (which 30+ other endpoints in this file — camera
+    control, chapters, live room join, etc. — also use, none of which a
+    parent should ever be allowed to touch)."""
+    uid = UUID(current_user["id"])
+    role = current_user.get("role", "student")
+    if uid == session.student_id or uid == session.teacher_id or role == "admin":
+        return uid
+    if role == "parent":
+        from app.models.parent_link import ParentStudentLink
+
+        link = db.exec(
+            select(ParentStudentLink).where(
+                ParentStudentLink.parent_id == uid,
+                ParentStudentLink.student_id == session.student_id,
+                ParentStudentLink.status == "accepted",
+            )
+        ).first()
+        if link is not None:
+            return uid
+    raise HTTPException(status_code=403, detail="Access denied")
+
+
 def _group_slot_id(db: Session, session: TutoringSession) -> Optional[UUID]:
     return lk_video.group_slot_id(db, session)
 
@@ -373,10 +400,14 @@ async def list_recordings(
     db: Session = Depends(get_db),
 ):
     """Both participants can view — refreshes status/file_url from LiveKit's
-    ListEgress for anything not yet 'complete'/'failed' (no webhook receiver
-    exists in this app, see app/services/egress.py)."""
+    ListEgress for anything not yet 'complete'/'failed', or 'complete' with
+    no file_url yet (see the self-healing note below) — no webhook receiver
+    exists in this app, see app/services/egress.py. Also reachable by a
+    parent with an accepted link to the session's student (see
+    _authorize_or_parent) — recordings, unlike everything else in this
+    file, are legitimate after-the-fact viewing for a parent."""
     session = _load_session(db, session_id)
-    _authorize(session, current_user)
+    _authorize_or_parent(db, session, current_user)
 
     recordings = db.exec(
         select(SessionRecording)
@@ -385,7 +416,14 @@ async def list_recordings(
     ).all()
 
     for rec in recordings:
-        if rec.status in ("complete", "failed"):
+        # "complete" but no file_url yet means an earlier poll hit the
+        # get_egress_status bug fixed 2026-09-18 (wrong protobuf field, so
+        # file_path always came back None) before status stopped being
+        # re-checked — re-polling these once self-heals every recording
+        # that finished before the fix, no backfill needed. A genuinely
+        # complete-with-file_url row still never re-polls (nothing left to
+        # learn), and "failed" never has a file to find either way.
+        if rec.status == "failed" or (rec.status == "complete" and rec.file_url):
             continue
         try:
             fresh = await lk_egress.get_egress_status(rec.egress_id)

@@ -79,7 +79,19 @@ async def get_egress_status(egress_id: str) -> Optional[Dict[str, Any]]:
         if not resp.items:
             return None
         info = resp.items[0]
-        file_result = info.file_results[0] if info.file_results else None
+        # A single-file RoomCompositeEgress (what start_recording always
+        # requests — one file_output, never multiple) reports its result on
+        # the singular `file` field, NOT the `file_results` repeated field
+        # (that one is for egress types with several simultaneous file
+        # outputs — for us it's always empty, confirmed directly against a
+        # real completed egress: file_results == [] while file.filename was
+        # populated). Reading file_results here meant file_path/duration_sec
+        # were None on every single recording ever produced by this app —
+        # "Recording ready" always showed (status alone), but the watch
+        # button never had a URL to render, for every user, always (reported
+        # 2026-09-18, traced by querying a live completed recording's actual
+        # LiveKit response directly).
+        file_result = info.file if info.HasField("file") else None
         return {
             "status": _status_str(info.status),
             # `file_result.filename` is the actual bucket-relative object key

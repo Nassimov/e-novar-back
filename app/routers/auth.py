@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
@@ -18,6 +18,8 @@ from app.schemas.auth import (
     RegisterRequest,
     ResetPasswordRequest,
     SignInRequest,
+    SignInTotpChallenge,
+    SignInTotpVerifyRequest,
     TokenResponse,
     UpdateRoleRequest,
     UserBrief,
@@ -27,6 +29,20 @@ from app.services import auth as auth_service
 
 router = APIRouter(tags=["auth"])
 settings = get_settings()
+
+
+def _brief_security_fields(profile: Any) -> Dict[str, Any]:
+    """Splat into every UserBrief(...) construction below so the frontend's
+    2FA-enabled display and account-pending-deletion gate (auth-context.tsx)
+    always reflect the real profile row, not stale defaults."""
+    return {
+        "totp_enabled": bool(getattr(profile, "totp_enabled", False)),
+        "deletion_scheduled_for": (
+            profile.deletion_scheduled_for.isoformat()
+            if getattr(profile, "deletion_scheduled_for", None)
+            else None
+        ),
+    }
 
 
 # ── rate limiting helpers ────────────────────────────────────────────────────
@@ -53,6 +69,40 @@ def _guard_login_rate_limit(request: Request, email: str) -> None:
         window_seconds=60 * 60,
         detail="Too many login attempts from this network. Please try again later.",
     )
+
+
+def _guard_signin_totp_rate_limit(request: Request, challenge_token: str) -> None:
+    """Codes are 6 digits and brute-forceable if unbounded — same shape as
+    admin_step2's guard (app/routers/admin/auth.py)."""
+    ip = get_client_ip(request)
+    check_rate_limit(
+        f"ratelimit:signin_totp:ip:{ip}",
+        limit=10,
+        window_seconds=10 * 60,
+        detail="Too many 2FA attempts from this network. Please try again later.",
+    )
+    check_rate_limit(
+        f"ratelimit:signin_totp:token:{challenge_token}",
+        limit=5,
+        window_seconds=10 * 60,
+        detail="Too many 2FA attempts for this login attempt. Please sign in again.",
+    )
+
+
+def _record_login_event(db: Session, user_id: Any, success: bool, request: Request) -> None:
+    """Best-effort — powers the login-history/recent-devices UI
+    (app/routers/account_security.py). Never allowed to break a login."""
+    try:
+        from app.models.account_security import LoginEvent
+        db.add(LoginEvent(
+            user_id=user_id,
+            success=success,
+            ip=get_client_ip(request),
+            user_agent=(request.headers.get("User-Agent") or "")[:500],
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def _guard_register_rate_limit(request: Request) -> None:
@@ -165,6 +215,7 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
             avatar_url=profile.avatar_url,
             is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
+            **_brief_security_fields(profile),
         ),
     )
 
@@ -212,6 +263,7 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
         phone=profile.phone,
         is_verified=profile.email_verified,
         onboarding_completed=profile.onboarding_completed,
+        **_brief_security_fields(profile),
     )
 
 
@@ -293,6 +345,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             avatar_url=profile.avatar_url,
             is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
+            **_brief_security_fields(profile),
         ),
     )
 
@@ -347,6 +400,7 @@ def refresh_token(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
             avatar_url=profile.avatar_url,
             is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
+            **_brief_security_fields(profile),
         ),
     )
 
@@ -413,6 +467,7 @@ def update_role(
             avatar_url=profile.avatar_url if profile else None,
             is_verified=profile.email_verified if profile else False,
             onboarding_completed=profile.onboarding_completed if profile else False,
+            **(_brief_security_fields(profile) if profile else {}),
         ),
     )
 
@@ -559,11 +614,12 @@ def google_exchange(payload: GoogleExchangeRequest, db: Session = Depends(get_db
             avatar_url=profile.avatar_url,
             is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
+            **_brief_security_fields(profile),
         ),
     )
 
 
-@router.post("/signin", response_model=TokenResponse)
+@router.post("/signin", response_model=Union[TokenResponse, SignInTotpChallenge])
 def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_db)):
     """
     Unified sign-in endpoint — choose one method:
@@ -637,6 +693,7 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
                 avatar_url=profile.avatar_url,
                 is_verified=profile.email_verified,
                 onboarding_completed=profile.onboarding_completed,
+                **_brief_security_fields(profile),
             ),
         )
 
@@ -650,6 +707,13 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
     try:
         result = auth_service.login_with_supabase(payload.email, payload.password)
     except Exception:
+        from sqlmodel import select
+        from app.models.profile import Profile
+        failed_profile = db.exec(
+            select(Profile).where(Profile.email == str(payload.email))
+        ).first()
+        if failed_profile is not None:
+            _record_login_event(db, failed_profile.id, False, request)
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     supabase_user = result.user
@@ -678,6 +742,33 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
         pass
 
     session = result.session
+    _record_login_event(db, profile.id, True, request)
+
+    # Password was correct — but if 2FA is enabled, don't hand out real
+    # tokens yet. Stash the already-completed Supabase session in Redis
+    # (never the password) behind a short-lived challenge token; the
+    # frontend collects the 6-digit code and calls POST /signin/totp, which
+    # retrieves this exact session rather than re-authenticating.
+    if profile.totp_enabled:
+        import json
+        import secrets
+        from app.core.redis import get_redis_client
+
+        challenge = secrets.token_urlsafe(48)
+        get_redis_client().setex(
+            f"signin_totp_challenge:{challenge}",
+            5 * 60,
+            json.dumps({
+                "access_token": session.access_token if session else "",
+                "refresh_token": session.refresh_token if session else None,
+                "profile_id": str(profile.id),
+                "role": role,
+                "full_name": full_name,
+                "email": profile.email or str(payload.email),
+            }),
+        )
+        return SignInTotpChallenge(challenge_token=challenge)
+
     return TokenResponse(
         access_token=session.access_token if session else "",
         refresh_token=session.refresh_token if session else None,
@@ -689,6 +780,55 @@ def signin(payload: SignInRequest, request: Request, db: Session = Depends(get_d
             avatar_url=profile.avatar_url,
             is_verified=profile.email_verified,
             onboarding_completed=profile.onboarding_completed,
+            **_brief_security_fields(profile),
+        ),
+    )
+
+
+@router.post("/signin/totp", response_model=TokenResponse)
+def signin_totp(payload: SignInTotpVerifyRequest, request: Request, db: Session = Depends(get_db)):
+    """Step 2 of a 2FA-gated sign-in — verifies the TOTP code against the
+    challenge from POST /signin and, on success, returns the real session
+    that was stashed at that point (see the comment there)."""
+    import json
+    from uuid import UUID
+    from app.core.redis import get_redis_client
+    from app.models.profile import Profile
+
+    _guard_signin_totp_rate_limit(request, payload.challenge_token)
+
+    redis = get_redis_client()
+    challenge_key = f"signin_totp_challenge:{payload.challenge_token}"
+    raw = redis.get(challenge_key)
+    if not raw:
+        raise HTTPException(status_code=401, detail="Invalid or expired challenge — please sign in again")
+    stashed = json.loads(raw)
+
+    profile = db.get(Profile, UUID(stashed["profile_id"]))
+    if profile is None or not profile.totp_enabled or not profile.totp_secret:
+        redis.delete(challenge_key)
+        raise HTTPException(status_code=401, detail="2FA is no longer enabled for this account")
+
+    if not auth_service.verify_totp_code(profile.totp_secret, payload.totp_code):
+        # Do NOT delete the challenge on a wrong code — let the user retry
+        # within the same 5-minute window, same as admin_step2.
+        raise HTTPException(status_code=401, detail="Invalid 2FA code")
+
+    redis.delete(challenge_key)
+    _record_login_event(db, profile.id, True, request)
+
+    return TokenResponse(
+        access_token=stashed["access_token"],
+        refresh_token=stashed["refresh_token"],
+        user=UserBrief(
+            id=str(profile.id),
+            email=profile.email or stashed["email"],
+            full_name=profile.full_name or stashed["full_name"],
+            role=stashed["role"],
+            avatar_url=profile.avatar_url,
+            is_verified=profile.email_verified,
+            onboarding_completed=profile.onboarding_completed,
+            **_brief_security_fields(profile),
         ),
     )
 
@@ -756,4 +896,5 @@ def get_me(
         phone=profile.phone,
         is_verified=profile.email_verified,
         onboarding_completed=profile.onboarding_completed,
+        **_brief_security_fields(profile),
     )

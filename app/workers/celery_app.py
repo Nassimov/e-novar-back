@@ -21,6 +21,7 @@ celery_app = Celery(
         "app.workers.competitive_tasks",
         "app.workers.club_tasks",
         "app.workers.liveops_tasks",
+        "app.workers.account_tasks",
     ],
 )
 
@@ -52,6 +53,7 @@ celery_app.conf.update(
         "app.workers.competitive_tasks.*": {"queue": "notifications"},
         "app.workers.club_tasks.*": {"queue": "notifications"},
         "app.workers.liveops_tasks.*": {"queue": "notifications"},
+        "app.workers.account_tasks.*": {"queue": "notifications"},
     },
     beat_schedule={
         # Every day at 09:00 Algiers time — send reminders for tomorrow's sessions
@@ -234,6 +236,12 @@ celery_app.conf.update(
         "liveops-notify-missions-expire-tonight": {
             "task": "app.workers.liveops_tasks.task_liveops_notify_missions_expire_tonight",
             "schedule": crontab(hour=20, minute=0),
+        },
+        # Once daily, off-peak — hard-deletes any account whose 60-day
+        # deletion grace period has elapsed (see app/routers/account_security.py).
+        "account-scheduled-deletions": {
+            "task": "app.workers.account_tasks.task_process_scheduled_account_deletions",
+            "schedule": crontab(hour=3, minute=0),
         },
     },
 )

@@ -75,6 +75,7 @@ from app.models.catalog import (  # noqa: F401
 # Relationships
 from app.models.parent_link import ParentStudentLink  # noqa: F401
 from app.models.scheduling import TeacherSlot, TeacherSlotSubject  # noqa: F401
+from app.models.account_security import LoginEvent  # noqa: F401
 
 # Booking & sessions
 from app.models.booking import (  # noqa: F401

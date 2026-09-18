@@ -58,6 +58,17 @@ class Profile(SQLModel, table=True):
     phone_verified: bool = Field(default=False)
     email_verified: bool = Field(default=False)
     last_seen_at: Optional[datetime] = Field(default=None)
+    # TOTP-based 2FA — mirrors the admin panel's pyotp flow (see
+    # app/services/admin_accounts.py). totp_secret is set (but totp_enabled
+    # stays False) as soon as setup starts; it only flips to True once the
+    # user confirms one real code, same anti-half-setup rule as admin.
+    totp_secret: Optional[str] = Field(default=None)
+    totp_enabled: bool = Field(default=False)
+    # Scheduled, cancelable account deletion (60-day grace period) — see
+    # app/routers/account_security.py and
+    # app/workers/account_tasks.py::task_process_scheduled_account_deletions.
+    deletion_requested_at: Optional[datetime] = Field(default=None)
+    deletion_scheduled_for: Optional[datetime] = Field(default=None)
     referral_code: Optional[str] = Field(
         default=None,
         sa_column=sa.Column(sa.String(30), unique=True, nullable=True),
