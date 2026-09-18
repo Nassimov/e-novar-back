@@ -1445,23 +1445,23 @@ async def share_camera(
     camera = _load_camera(db, session, camera_id)
 
     room_name = lk_video.room_name_for_session(camera.room_key)
-    # set_camera_track_shared returns False if the phone's camera:<id>
-    # LiveKit participant isn't found, or has no video track published yet
-    # (e.g. the teacher clicked "share" in the instant right after the
-    # phone's WS "connected" event, before its actual camera track finished
-    # publishing to the SFU) — the return value used to be silently
-    # ignored, so is_shared still flipped true and camera_shared still
-    # broadcast even though nothing was actually unmuted server-side. The
-    # student's dock tile would then show forever ("en attente de la
-    # vidéo") with no way to know why, and the teacher's dialog would say
-    # "sharing" with zero indication it hadn't actually taken effect —
-    # reported 2026-09-18 as "share with student does nothing".
-    found = await lk_video.set_camera_track_shared(room_name, str(camera.id), True)
-    if not found:
-        raise HTTPException(
-            status_code=409,
-            detail="Le téléphone n'a pas encore de flux vidéo actif. Réessayez dans quelques secondes.",
-        )
+    # Best-effort only: LiveKit Cloud disallows server-initiated remote
+    # UNMUTE by default — this 412s ("remote unmute not enabled", reported
+    # 2026-09-18) on every project that hasn't had that flipped on by
+    # LiveKit support/dashboard, which is a platform-level setting this
+    # backend cannot itself set (no such field exists on CreateRoomRequest
+    # in the currently available livekit-protocol release). The paired
+    # phone (camera.$token.tsx) is the AUTHORITATIVE mechanism instead: it
+    # polls GET /api/camera/session/status and grants/revokes its own
+    # track's subscription permissions client-side, which needs no elevated
+    # permission since a publisher always controls who may subscribe to its
+    # own track. This call stays as a best-effort optimization for the rare
+    # case remote unmute IS enabled (near-instant instead of poll-interval
+    # latency) — must never block is_shared/camera_shared on its result.
+    try:
+        await lk_video.set_camera_track_shared(room_name, str(camera.id), True)
+    except Exception:
+        logger.warning("Remote unmute unavailable for camera %s (falling back to client-side subscription permissions)", camera.id, exc_info=True)
     camera.is_shared = True
     camera.updated_at = datetime.now(timezone.utc)
     db.add(camera)
@@ -1484,7 +1484,14 @@ async def stop_sharing_camera(
     camera = _load_camera(db, session, camera_id)
 
     room_name = lk_video.room_name_for_session(camera.room_key)
-    await lk_video.set_camera_track_shared(room_name, str(camera.id), False)
+    # Remote MUTE (unlike unmute above) has no LiveKit Cloud restriction and
+    # normally succeeds — kept as an instant server-side backstop on top of
+    # the phone's own poll-driven subscription-permission revoke, but still
+    # best-effort: stopping the share must never get stuck on this call.
+    try:
+        await lk_video.set_camera_track_shared(room_name, str(camera.id), False)
+    except Exception:
+        logger.warning("Remote mute failed for camera %s", camera.id, exc_info=True)
     camera.is_shared = False
     camera.updated_at = datetime.now(timezone.utc)
     db.add(camera)

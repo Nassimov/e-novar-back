@@ -43,6 +43,16 @@ class CameraSessionOut(BaseModel):
     room_name: str
     token: str
     camera_id: str
+    # The identity the phone must always allow to subscribe to its video
+    # track, regardless of is_shared — matches the teacher's own LiveKit
+    # identity (str(profile id), see app/routers/classroom.py's
+    # create_access_token call). See CameraStatusOut below for why this is
+    # needed client-side at all.
+    teacher_identity: str
+
+
+class CameraStatusOut(BaseModel):
+    is_shared: bool
 
 
 def _session_end_grace(session: TutoringSession) -> datetime:
@@ -122,7 +132,25 @@ def get_camera_session(claims: Dict[str, Any] = Depends(get_current_camera), db:
 
     return CameraSessionOut(
         livekit_url=_get_settings().livekit_url, room_name=room_name, token=token, camera_id=camera_id,
+        teacher_identity=str(camera.teacher_id),
     )
+
+
+@router.get("/session/status", response_model=CameraStatusOut)
+def get_camera_share_status(claims: Dict[str, Any] = Depends(get_current_camera), db: Session = Depends(get_db)):
+    """Polled every few seconds by the phone page while connected — the
+    client-side counterpart of is_shared (see app/lib/session-camera.tsx's
+    share()/stopSharing()): LiveKit Cloud disallows server-initiated remote
+    UNMUTE by default ("remote unmute not enabled", reported 2026-09-18),
+    so rather than depend on that being turned on for this project, the
+    phone itself grants/revokes its video track's subscription permission
+    for students based on this flag — see camera.$token.tsx's
+    setTrackSubscriptionPermissions call, which needs no elevated
+    permission since a publisher controls its own track's subscribers."""
+    camera = db.get(SessionCamera, UUID(claims["camera_id"]))
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return CameraStatusOut(is_shared=camera.is_shared)
 
 
 @router.post("/session/connected")

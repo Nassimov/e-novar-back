@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 import uuid
 from datetime import datetime, timezone
@@ -22,6 +23,8 @@ from app.schemas.session import (
     SessionResponse,
 )
 from app.services.pricing import PACK_SIZES
+
+logger = logging.getLogger(__name__)
 
 
 class CancelSessionRequest(BaseModel):
@@ -499,7 +502,19 @@ def get_session_summary(
         "notes": session.notes_teacher,
         "scheduled_at": session.scheduled_at.isoformat(),
     }
-    summary = generate_session_summary(session_data)
+    # generate_session_summary calls the Anthropic API with zero retry/
+    # error handling of its own — a missing/invalid ANTHROPIC_API_KEY, a
+    # rate limit, or any transient failure was an unhandled exception,
+    # surfacing as a 500 on the whole summary page (reported 2026-09-18)
+    # instead of the "no AI summary yet" state the frontend already
+    # renders gracefully (see classroom_summary.ai_summary_unavailable).
+    # This endpoint is fetched on every page load, so a flaky/misconfigured
+    # AI provider must never take down the rest of the summary with it.
+    try:
+        summary = generate_session_summary(session_data)
+    except Exception:
+        logger.warning("AI session summary generation failed for session_id=%s", session_id, exc_info=True)
+        return {"summary": None, "generated": False}
 
     session.summary = summary
     db.add(session)
