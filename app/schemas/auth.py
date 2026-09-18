@@ -49,6 +49,8 @@ class UserBrief(BaseModel):
     # this (same pattern as is_verified) so the user can only reach a
     # "cancel deletion" screen until they do.
     deletion_scheduled_for: Optional[str] = None
+    # ISO datetime string, or None if never changed via POST /api/account/password.
+    password_changed_at: Optional[str] = None
 
 
 class TokenResponse(BaseModel):

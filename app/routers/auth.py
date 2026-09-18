@@ -42,6 +42,11 @@ def _brief_security_fields(profile: Any) -> Dict[str, Any]:
             if getattr(profile, "deletion_scheduled_for", None)
             else None
         ),
+        "password_changed_at": (
+            profile.password_changed_at.isoformat()
+            if getattr(profile, "password_changed_at", None)
+            else None
+        ),
     }
 
 

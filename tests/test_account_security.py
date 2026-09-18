@@ -198,4 +198,5 @@ def test_change_password_requires_correct_current_password(db_session):
     assert exc.value.status_code == 401
 
     result = asyncio.run(_run(True))
-    assert result == {"message": "Password updated"}
+    assert result["message"] == "Password updated"
+    assert result["password_changed_at"]

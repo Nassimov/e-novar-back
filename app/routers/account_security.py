@@ -73,7 +73,12 @@ def change_password(
 
     from app.database import get_supabase_service
     get_supabase_service().auth.admin.update_user_by_id(str(uid), {"password": payload.new_password})
-    return {"message": "Password updated"}
+
+    profile.password_changed_at = datetime.utcnow()
+    db.add(profile)
+    db.commit()
+
+    return {"message": "Password updated", "password_changed_at": profile.password_changed_at.isoformat()}
 
 
 # ── 2FA (TOTP) ───────────────────────────────────────────────────────────────

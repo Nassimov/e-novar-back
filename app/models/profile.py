@@ -64,6 +64,9 @@ class Profile(SQLModel, table=True):
     # user confirms one real code, same anti-half-setup rule as admin.
     totp_secret: Optional[str] = Field(default=None)
     totp_enabled: bool = Field(default=False)
+    # Set by app/routers/account_security.py::change_password — NULL means
+    # never changed through that flow (still the registration password).
+    password_changed_at: Optional[datetime] = Field(default=None)
     # Scheduled, cancelable account deletion (60-day grace period) — see
     # app/routers/account_security.py and
     # app/workers/account_tasks.py::task_process_scheduled_account_deletions.
