@@ -21,7 +21,7 @@ from app.models.catalog import Level, Subject, TeacherDeliveryOption, TeacherDip
 from app.models.profile import Profile, StudentProfile, TeacherProfile
 from app.models.review import Review
 from app.models.scheduling import TeacherAbsence, TeacherSlot, TeacherSlotSubject
-from app.schemas.teacher import AbsenceResponse, SlotSubjectLevelResponse
+from app.schemas.teacher import AbsenceResponse, SlotSubjectLevelResponse, TeacherBusyRangeItem
 from app.services import matching
 from app.services.boost import is_boost_active
 from app.services.tenure import experience_years_from
@@ -1171,6 +1171,59 @@ def get_teacher_absences(
         )
         for a in absences
     ]
+
+
+@router.get("/teachers/{teacher_ref}/busy-times", response_model=List[TeacherBusyRangeItem])
+def get_teacher_busy_times(
+    teacher_ref: str,
+    db: Session = Depends(get_db),
+    _: Dict[str, Any] = Depends(get_current_user),
+):
+    """This teacher's already-confirmed sessions over the same 30-day
+    booking window as get_teacher_slots/get_teacher_absences — every
+    CONFIRMED booking's actual scheduled time, whether tied to a declared
+    slot or a slot-less custom date/time the teacher accepted directly.
+
+    get_teacher_slots only ever reports booked_ranges INSIDE a slot's own
+    declared window; a slot-less booking (or a booking against a DIFFERENT
+    slot) was previously invisible to the "open hour" picker entirely, so
+    the student-facing schedule page could propose an hour as free when the
+    teacher was actually already teaching someone else then (or, just as
+    confusingly, propose a time the SAME student already has a session
+    booked at). book_teacher_slot's own conflict check
+    (matching.find_overlapping_confirmed_sessions) has always rejected the
+    booking anyway — this endpoint just lets the picker stop proposing it
+    in the first place, same filtering rule (status scheduled/waiting/live,
+    parent booking confirmed) as that single source of truth."""
+    tp = _resolve_teacher(db, teacher_ref)
+    today = date.today()
+    end = today + timedelta(days=30)
+    window_start = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    window_end = datetime.combine(end, datetime.min.time(), tzinfo=timezone.utc) + timedelta(days=1)
+
+    rows = db.exec(
+        select(TutoringSession, Booking.duration_min)
+        .join(Booking, Booking.id == TutoringSession.booking_id)
+        .where(
+            TutoringSession.teacher_id == tp.user_id,
+            TutoringSession.status.in_(["scheduled", "waiting", "live"]),
+            Booking.status == "confirmed",
+            TutoringSession.scheduled_at >= window_start,
+            TutoringSession.scheduled_at < window_end,
+        )
+    ).all()
+
+    items: List[TeacherBusyRangeItem] = []
+    for session_row, booking_duration in rows:
+        duration = session_row.duration_min or booking_duration or 90
+        start_local = session_row.scheduled_at
+        end_local = start_local + timedelta(minutes=duration)
+        items.append(TeacherBusyRangeItem(
+            date=start_local.date().isoformat(),
+            start_time=start_local.strftime("%H:%M"),
+            end_time=end_local.strftime("%H:%M"),
+        ))
+    return items
 
 
 # ─── Student reviews (authenticated student) ─────────────────────────────────

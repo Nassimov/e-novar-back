@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import math
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, date, time, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -136,6 +137,8 @@ def student_dashboard(
     now_utc = datetime.now(timezone.utc)
     today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
+
+    _backfill_missing_tutoring_sessions(db, uid)
 
     # ── Profile ──────────────────────────────────────────────────────────────────
     profile = db.exec(select(Profile).where(Profile.id == uid)).first()
@@ -349,6 +352,94 @@ class StudentSessionListResponse(BaseModel):
     parent_linked: bool
 
 
+def _backfill_missing_tutoring_sessions(db: Session, student_id: UUID) -> None:
+    """Self-heals a rare but real data gap (found via direct production
+    inspection 2026-09-19): a CONFIRMED booking with zero TutoringSession
+    rows is completely invisible here (this endpoint reads from sessions,
+    never from bookings directly) even though the teacher's own booking
+    list (Booking-sourced — see teachers.py's list_teacher_bookings, which
+    has no such dependency) shows it fine and lets the teacher act on it —
+    the two surfaces silently disagree about whether the booking exists.
+    Root cause of any individual gap is whatever it is (a genuinely
+    interrupted request, historical data predating some session-creation
+    change, etc.) — this reconstructs the missing session(s) straight from
+    the booking's own already-validated stored data (pack_sessions JSON for
+    a pack, slot_time/duration_min for a single), exactly like a fresh
+    booking would have gotten, so the student sees it on their very next
+    fetch with no manual admin intervention needed. Same self-healing idiom
+    as app/routers/classroom.py's list_recordings()."""
+    bookings = db.exec(
+        select(Booking).where(Booking.student_id == student_id, Booking.status == "confirmed")
+    ).all()
+    if not bookings:
+        return
+
+    booking_ids = [b.id for b in bookings]
+    existing_booking_ids = {
+        row for row in db.exec(
+            select(TutoringSession.booking_id).where(TutoringSession.booking_id.in_(booking_ids))
+        ).all()
+    }
+    orphaned = [b for b in bookings if b.id not in existing_booking_ids]
+    if not orphaned:
+        return
+
+    from app.models.session_validation import SessionValidation
+
+    created: List[TutoringSession] = []
+    for b in orphaned:
+        legs: List[Dict[str, Any]] = []
+        if b.pack_sessions:
+            try:
+                legs = json.loads(b.pack_sessions)
+            except (TypeError, ValueError):
+                legs = []
+        if legs:
+            for leg in legs:
+                try:
+                    leg_date = date.fromisoformat(leg["date"])
+                    start_t = time.fromisoformat(leg["slot_time"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                duration = b.duration_min or 90
+                if leg.get("end_time"):
+                    try:
+                        end_t = time.fromisoformat(leg["end_time"])
+                        duration = (end_t.hour * 60 + end_t.minute) - (start_t.hour * 60 + start_t.minute)
+                    except (ValueError, TypeError):
+                        pass
+                session = TutoringSession(
+                    booking_id=b.id, teacher_id=b.teacher_id, student_id=b.student_id,
+                    subject_id=UUID(leg["subject_id"]) if leg.get("subject_id") else None,
+                    level_id=UUID(leg["level_id"]) if leg.get("level_id") else None,
+                    scheduled_at=datetime.combine(leg_date, start_t, tzinfo=timezone.utc),
+                    duration_min=duration, mode=b.mode, status="scheduled",
+                )
+                db.add(session)
+                created.append(session)
+        elif b.slot_time is not None:
+            session = TutoringSession(
+                booking_id=b.id, teacher_id=b.teacher_id, student_id=b.student_id,
+                scheduled_at=datetime.combine(b.booking_date, b.slot_time, tzinfo=timezone.utc),
+                duration_min=b.duration_min, mode=b.mode, status="scheduled",
+            )
+            db.add(session)
+            created.append(session)
+        # No pack_sessions and no slot_time at all — nothing reconstructable,
+        # leave it (this would already have been impossible at creation
+        # time; never seen in practice, just a defensive no-op).
+
+    if not created:
+        return
+    db.flush()
+    for s in created:
+        db.add(SessionValidation(
+            session_id=s.id, booking_id=s.booking_id, student_id=s.student_id,
+            teacher_id=s.teacher_id, status="scheduled",
+        ))
+    db.commit()
+
+
 @router.get("/sessions", response_model=StudentSessionListResponse)
 def student_session_list(
     type: str = Query("upcoming", pattern="^(upcoming|past)$"),
@@ -359,6 +450,9 @@ def student_session_list(
 ):
     uid = UUID(current_user["id"])
     now_utc = datetime.now(timezone.utc)
+
+    if type == "upcoming":
+        _backfill_missing_tutoring_sessions(db, uid)
 
     # Check parent link
     parent_link = db.exec(
@@ -426,7 +520,12 @@ def student_session_list(
         cancel_refund = "none"
         if s.status in ("scheduled", "live", "waiting") and not parent_linked:
             can_cancel = True
-            hrs = (s.scheduled_at - now_utc).total_seconds() / 3600
+            # Defensive: sessions.scheduled_at is TIMESTAMPTZ, always aware
+            # once read back from real Postgres — this guards the same
+            # naive-vs-aware TypeError class documented in matching.py's
+            # module note, in case any row ever slipped in without one.
+            s_scheduled_at = s.scheduled_at if s.scheduled_at.tzinfo else s.scheduled_at.replace(tzinfo=timezone.utc)
+            hrs = (s_scheduled_at - now_utc).total_seconds() / 3600
             cancel_refund = "full" if hrs > 24 else ("partial" if hrs > 6 else "none")
 
         items.append(SessionListItem(

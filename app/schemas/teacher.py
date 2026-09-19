@@ -228,6 +228,16 @@ class AbsenceResponse(BaseModel):
     reason: Optional[str] = None
 
 
+class TeacherBusyRangeItem(BaseModel):
+    """One already-confirmed session (with any student, on any slot or
+    slot-less custom time) — see get_teacher_busy_times. Used by the
+    student-facing schedule picker to stop proposing an "open hour" that
+    isn't actually free."""
+    date: str
+    start_time: str
+    end_time: str
+
+
 class TeacherBookingStudentInfo(BaseModel):
     id: str
     full_name: str
